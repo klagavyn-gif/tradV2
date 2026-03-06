@@ -1,0 +1,39 @@
+name: Telegram Alerts
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Symbols separated by comma
+        required: true
+        default: "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD"
+      period:
+        description: Period (15m, 1h, 1d, 5d, 1mo, 3mo, 6mo, 1y, ytd)
+        required: true
+        default: "15m"
+  schedule:
+    - cron: "*/15 * * * *"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      SYMBOLS: ${{ github.event.inputs.symbols || vars.SYMBOLS || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD' }}
+      PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
+      TELEGRAM_ALERT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_MIN_CONFIDENCE || '75' }}
+      TELEGRAM_ALERT_TTL_SECONDS: ${{ vars.TELEGRAM_ALERT_TTL_SECONDS || '1800' }}
+      TELEGRAM_ALERT_MAX_PER_RUN: ${{ vars.TELEGRAM_ALERT_MAX_PER_RUN || '5' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run analysis and notify
+        run: |
+          python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram

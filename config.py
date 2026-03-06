@@ -1,0 +1,109 @@
+import os
+
+def _env_str(name, default=""):
+    v = os.getenv(name)
+    if v is None:
+        return default
+    v = str(v)
+    return v if v != "" else default
+
+
+def _env_bool(name, default=False):
+    v = os.getenv(name)
+    if v is None:
+        return bool(default)
+    return str(v).strip().lower() in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name, default=0):
+    v = os.getenv(name)
+    if v is None:
+        return int(default)
+    s = str(v).strip()
+    if not s:
+        return int(default)
+    try:
+        return int(s)
+    except Exception:
+        return int(default)
+
+
+def _env_float(name, default=0.0):
+    v = os.getenv(name)
+    if v is None:
+        return float(default)
+    s = str(v).strip()
+    if not s:
+        return float(default)
+    try:
+        return float(s)
+    except Exception:
+        return float(default)
+
+
+DATABASE_URI = _env_str("DATABASE_URI", "sqlite:///trading_app.db")
+
+SECRET_KEY = _env_str("SECRET_KEY", "")
+
+FLASK_DEBUG = _env_bool("FLASK_DEBUG", True)
+PORT = _env_int("PORT", 5000)
+
+CURL_IMPERSONATE = _env_str("CURL_IMPERSONATE", "chrome110")
+HTTP_VERIFY = _env_bool("HTTP_VERIFY", True)
+HTTP_CA_BUNDLE = _env_str("HTTP_CA_BUNDLE", "")
+
+YF_CACHE_MAXSIZE = _env_int("YF_CACHE_MAXSIZE", 256)
+YF_CACHE_TTL_SECONDS = _env_int("YF_CACHE_TTL_SECONDS", 180)
+YF_INFO_CACHE_TTL_SECONDS = _env_int("YF_INFO_CACHE_TTL_SECONDS", 6 * 60 * 60)
+YF_UNIVERSE_CACHE_TTL_SECONDS = _env_int("YF_UNIVERSE_CACHE_TTL_SECONDS", 15 * 60)
+
+ANALYZE_MAX_WORKERS = _env_int("ANALYZE_MAX_WORKERS", 5)
+STATS_CACHE_MAXSIZE = _env_int("STATS_CACHE_MAXSIZE", 128)
+STATS_CACHE_TTL_SECONDS = _env_int("STATS_CACHE_TTL_SECONDS", 10 * 60)
+
+TELEGRAM_ALERT_TTL_SECONDS = _env_int("TELEGRAM_ALERT_TTL_SECONDS", 1800)
+TELEGRAM_ALERT_MIN_CONFIDENCE = _env_float("TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
+TELEGRAM_ALERT_MAX_PER_RUN = _env_int("TELEGRAM_ALERT_MAX_PER_RUN", 5)
+
+EMA_CROSS_15M_STATS_FOLDS = _env_int("EMA_CROSS_15M_STATS_FOLDS", 3)
+EMA_CROSS_15M_STATS_MIN_TRAIN_BARS = _env_int("EMA_CROSS_15M_STATS_MIN_TRAIN_BARS", 240)
+
+EMA_CROSS_15M_ENABLE_OPTIMIZATION = _env_bool("EMA_CROSS_15M_ENABLE_OPTIMIZATION", True)
+EMA_CROSS_15M_YF_PERIOD = _env_str("EMA_CROSS_15M_YF_PERIOD", "30d")
+EMA_CROSS_15M_FAST_MIN = _env_int("EMA_CROSS_15M_FAST_MIN", 6)
+EMA_CROSS_15M_FAST_MAX = _env_int("EMA_CROSS_15M_FAST_MAX", 24)
+EMA_CROSS_15M_FAST_STEP = _env_int("EMA_CROSS_15M_FAST_STEP", 2)
+EMA_CROSS_15M_SLOW_MIN = _env_int("EMA_CROSS_15M_SLOW_MIN", 18)
+EMA_CROSS_15M_SLOW_MAX = _env_int("EMA_CROSS_15M_SLOW_MAX", 80)
+EMA_CROSS_15M_SLOW_STEP = _env_int("EMA_CROSS_15M_SLOW_STEP", 2)
+EMA_CROSS_15M_MIN_TRADES = _env_int("EMA_CROSS_15M_MIN_TRADES", 8)
+EMA_CROSS_15M_TP_MULT = _env_float("EMA_CROSS_15M_TP_MULT", 5.0)
+EMA_CROSS_15M_MAX_FORWARD_BARS = _env_int("EMA_CROSS_15M_MAX_FORWARD_BARS", 64)
+EMA_CROSS_15M_MAX_BARS_SINCE_CROSS = _env_int("EMA_CROSS_15M_MAX_BARS_SINCE_CROSS", 4)
+EMA_CROSS_15M_REQUIRE_SLOW_SLOPE_CONFIRM = _env_bool("EMA_CROSS_15M_REQUIRE_SLOW_SLOPE_CONFIRM", True)
+EMA_CROSS_15M_CACHE_TTL_SECONDS = _env_int("EMA_CROSS_15M_CACHE_TTL_SECONDS", 900)
+
+ACTIONZONE_15M_SMOOTH = _env_int("ACTIONZONE_15M_SMOOTH", 1)
+ACTIONZONE_15M_ALERT_BARS = _env_int("ACTIONZONE_15M_ALERT_BARS", 2)
+ACTIONZONE_15M_USE_OPTIMIZATION = _env_bool("ACTIONZONE_15M_USE_OPTIMIZATION", True)
+ACTIONZONE_15M_TREND_1H_PERIOD = _env_str("ACTIONZONE_15M_TREND_1H_PERIOD", "3mo")
+
+ORDERBLOCK_15M_PIVOT_LENGTH = _env_int("ORDERBLOCK_15M_PIVOT_LENGTH", 5)
+ORDERBLOCK_15M_MAX_BLOCKS = _env_int("ORDERBLOCK_15M_MAX_BLOCKS", 6)
+ORDERBLOCK_15M_MITIGATION = _env_str("ORDERBLOCK_15M_MITIGATION", "wick")
+
+SHORT_TERM_15M_YF_PERIOD = _env_str("SHORT_TERM_15M_YF_PERIOD", "30d")
+SHORT_TERM_15M_TREND_1H_PERIOD = _env_str("SHORT_TERM_15M_TREND_1H_PERIOD", "3mo")
+SHORT_TERM_15M_MIN_TRADES = _env_int("SHORT_TERM_15M_MIN_TRADES", 10)
+SHORT_TERM_15M_MAX_FORWARD_BARS = _env_int("SHORT_TERM_15M_MAX_FORWARD_BARS", 32)
+SHORT_TERM_15M_SIGNAL_RVOL_MIN = _env_float("SHORT_TERM_15M_SIGNAL_RVOL_MIN", 1.2)
+SHORT_TERM_15M_SIGNAL_ADX_MIN = _env_float("SHORT_TERM_15M_SIGNAL_ADX_MIN", 18.0)
+SHORT_TERM_15M_SWING_LOOKBACK = _env_int("SHORT_TERM_15M_SWING_LOOKBACK", 12)
+SHORT_TERM_15M_RISK_ATR_MIN_MULT = _env_float("SHORT_TERM_15M_RISK_ATR_MIN_MULT", 1.0)
+SHORT_TERM_15M_RISK_ATR_MAX_MULT = _env_float("SHORT_TERM_15M_RISK_ATR_MAX_MULT", 3.0)
+SHORT_TERM_15M_STOP_ATR_BUFFER = _env_float("SHORT_TERM_15M_STOP_ATR_BUFFER", 0.2)
+SHORT_TERM_15M_PULLBACK_TOL_PCT = _env_float("SHORT_TERM_15M_PULLBACK_TOL_PCT", 0.3)
+SHORT_TERM_15M_TP1_R = _env_float("SHORT_TERM_15M_TP1_R", 1.5)
+SHORT_TERM_15M_TP2_R = _env_float("SHORT_TERM_15M_TP2_R", 3.0)
+SHORT_TERM_15M_BETA_ALPHA = _env_float("SHORT_TERM_15M_BETA_ALPHA", 1.0)
+SHORT_TERM_15M_BETA_BETA = _env_float("SHORT_TERM_15M_BETA_BETA", 1.0)

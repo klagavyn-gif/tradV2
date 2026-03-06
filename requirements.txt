@@ -1,0 +1,8 @@
+flask
+pandas
+yfinance
+numpy
+certifi
+pytz
+curl_cffi
+requests

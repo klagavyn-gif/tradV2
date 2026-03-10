@@ -468,6 +468,13 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         return None
     if tp_mult <= 0 or max_forward < 1:
         return None
+    stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+    try:
+        stop_mult = float(stop_mult)
+    except Exception:
+        stop_mult = 1.5
+    if stop_mult <= 0:
+        stop_mult = 1.0
     close = df["Close"].astype(float)
     ema_fast = close.ewm(span=fast_len, adjust=False).mean()
     ema_slow = close.ewm(span=slow_len, adjust=False).mean()
@@ -612,7 +619,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         entry_i = close.iloc[i]
         if pd.isna(entry_i) or entry_i <= 0:
             continue
-        risk_i = float(atr_i)
+        risk_i = float(atr_i * stop_mult)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
         outcome = None
@@ -2560,10 +2567,18 @@ def _actionzone_15m_alert(symbol):
             conf = 1
         stop_loss = None
         if entry_price is not None and atr_val is not None and atr_val > 0:
+            stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+            try:
+                stop_mult = float(stop_mult)
+            except Exception:
+                stop_mult = 1.5
+            if stop_mult <= 0:
+                stop_mult = 1.0
+            risk_dist = atr_val * stop_mult
             if filtered_signal == "BUY":
-                stop_loss = entry_price - atr_val
+                stop_loss = entry_price - risk_dist
             elif filtered_signal == "SELL":
-                stop_loss = entry_price + atr_val
+                stop_loss = entry_price + risk_dist
         alert_active = filtered_signal in ("BUY", "SELL")
         recommendation = "WAIT"
         if filtered_signal == "BUY":

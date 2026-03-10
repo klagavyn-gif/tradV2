@@ -244,14 +244,21 @@ def _build_actionzone_message(item, az_plan):
     if name:
         line_symbol += f" • {name}"
     lines.append(line_symbol)
-    price = item.get("price")
+    entry_price = az_plan.get("entry_price")
+    curr_price = az_plan.get("current_price", item.get("price"))
     change = item.get("change")
-    price_text = _format_price_value(price)
-    if price_text:
-        if isinstance(change, (int, float)):
-            lines.append(f"ราคา: {price_text} ({change:+.2f}%)")
-        else:
-            lines.append(f"ราคา: {price_text}")
+    entry_text = _format_price_value(entry_price)
+    curr_text = _format_price_value(curr_price)
+    if entry_text or curr_text:
+        parts = []
+        if entry_text:
+            parts.append(f"จุดเข้า: {entry_text}")
+        if curr_text:
+            if isinstance(change, (int, float)):
+                parts.append(f"ราคาปัจจุบัน: {curr_text} ({change:+.2f}%)")
+            else:
+                parts.append(f"ราคาปัจจุบัน: {curr_text}")
+        lines.append(" | ".join(parts))
     zone = az_plan.get("zone")
     trend = az_plan.get("trend_1h")
     conf = az_plan.get("confidence")
@@ -263,7 +270,11 @@ def _build_actionzone_message(item, az_plan):
             parts.append(f"เทรนด์ 1H: {trend}")
         lines.append(" • ".join(parts))
     if isinstance(conf, (int, float)):
-        lines.append(f"ความมั่นใจ: {float(conf):.0f}%")
+        lines.append(f"โอกาสจุดตัดสำเร็จ: {float(conf):.0f}%")
+    sl = az_plan.get("stop_loss")
+    sl_text = _format_price_value(sl)
+    if sl_text:
+        lines.append(f"จุดตัดขาดทุน (SL): {sl_text}")
     bars = az_plan.get("bars_since_signal")
     if isinstance(bars, (int, float)):
         lines.append(f"แท่งนับจากสัญญาณ: {int(bars)}")
@@ -526,6 +537,131 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     win_rate = (wins / total_trades) * 100.0
     avg_rr = total_rr / total_trades
     payload = {
+        "fast_len": fast_len,
+        "slow_len": slow_len,
+        "trades": int(total_trades),
+        "win_rate_pct": float(win_rate),
+        "avg_rr": float(avg_rr),
+        "expectancy_rr": float(avg_rr),
+    }
+    if rr_list is not None:
+        payload["rr_list"] = rr_list
+    return payload
+
+
+def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=None, return_rr_list=False):
+    sym = normalize_symbol(symbol)
+    if not sym:
+        return None
+    yf_period = str(yf_period or getattr(config, "EMA_CROSS_15M_YF_PERIOD", "90d"))
+    raw = get_yf_history(sym, period=yf_period, interval="15m", auto_adjust=True)
+    if raw is None or getattr(raw, "empty", True):
+        return None
+    df = _ema_cross_15m_prepare_df(raw)
+    if df is None or getattr(df, "empty", True):
+        return None
+    best_fast_len = None
+    best_slow_len = None
+    cached = _ema_cross_15m_get_cached(sym)
+    if isinstance(cached, dict):
+        best_fast_len = cached.get("fast_len")
+        best_slow_len = cached.get("slow_len")
+    use_opt = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", True)
+    if use_opt and (best_fast_len is None or best_slow_len is None):
+        opt_meta = optimize_best_ema_cross_15m(sym, df)
+        best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
+        if isinstance(best, dict):
+            best_fast_len = best.get("fast_len")
+            best_slow_len = best.get("slow_len")
+    try:
+        fast_len = int(best_fast_len) if best_fast_len is not None else 12
+        slow_len = int(best_slow_len) if best_slow_len is not None else 26
+    except Exception:
+        fast_len, slow_len = 12, 26
+    if fast_len < 2 or slow_len < 2 or fast_len >= slow_len:
+        fast_len, slow_len = 12, 26
+    tp_mult = float(tp_mult if tp_mult is not None else getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
+    max_forward = int(max_forward if max_forward is not None else getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
+    if tp_mult <= 0 or max_forward < 1:
+        return None
+    close = df["Close"].astype(float)
+    ema_fast = close.ewm(span=fast_len, adjust=False).mean()
+    ema_slow = close.ewm(span=slow_len, adjust=False).mean()
+    bull = ema_fast > ema_slow
+    bear = ema_fast < ema_slow
+    x_confirm = close
+    green = bull & (x_confirm > ema_fast)
+    red = bear & (x_confirm < ema_fast)
+    buy_signal = green & (~green.shift(1).fillna(False))
+    sell_signal = red & (~red.shift(1).fillna(False))
+    wins = 0
+    losses = 0
+    total_rr = 0.0
+    rr_list = [] if return_rr_list else None
+    for i in range(1, len(df)):
+        if buy_signal.iloc[i]:
+            direction_i = "BUY"
+        elif sell_signal.iloc[i]:
+            direction_i = "SELL"
+        else:
+            continue
+        atr_i = df["ATR"].iloc[i]
+        vol_avg_i = df["Vol_Avg"].iloc[i]
+        if pd.isna(atr_i) or atr_i <= 0 or pd.isna(vol_avg_i) or vol_avg_i <= 0:
+            continue
+        entry_i = close.iloc[i]
+        if pd.isna(entry_i) or entry_i <= 0:
+            continue
+        risk_i = float(atr_i)
+        sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
+        tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
+        outcome = None
+        end_j = min(len(df), i + 1 + max_forward)
+        for j in range(i + 1, end_j):
+            high_j = df["High"].iloc[j]
+            low_j = df["Low"].iloc[j]
+            if direction_i == "BUY":
+                if low_j <= sl_i:
+                    outcome = "loss"
+                    break
+                if high_j >= tp_i:
+                    outcome = "win"
+                    break
+            else:
+                if high_j >= sl_i:
+                    outcome = "loss"
+                    break
+                if low_j <= tp_i:
+                    outcome = "win"
+                    break
+        if outcome == "win":
+            wins += 1
+            total_rr += tp_mult
+            if rr_list is not None:
+                rr_list.append(float(tp_mult))
+        elif outcome == "loss":
+            losses += 1
+            total_rr -= 1.0
+            if rr_list is not None:
+                rr_list.append(-1.0)
+    total_trades = wins + losses
+    if total_trades <= 0:
+        payload = {
+            "symbol": sym,
+            "fast_len": fast_len,
+            "slow_len": slow_len,
+            "trades": 0,
+            "win_rate_pct": None,
+            "avg_rr": None,
+            "expectancy_rr": None,
+        }
+        if rr_list is not None:
+            payload["rr_list"] = []
+        return payload
+    win_rate = (wins / total_trades) * 100.0
+    avg_rr = total_rr / total_trades
+    payload = {
+        "symbol": sym,
         "fast_len": fast_len,
         "slow_len": slow_len,
         "trades": int(total_trades),
@@ -2382,7 +2518,16 @@ def _actionzone_15m_alert(symbol):
         if signal == "SELL" and trend_dir not in (None, "DOWN"):
             trend_ok = False
         filtered_signal = signal if trend_ok else "WAIT"
-        entry_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+        entry_idx = None
+        if last_signal_time is not None:
+            try:
+                entry_idx = df.index.get_loc(last_signal_time)
+            except Exception:
+                entry_idx = None
+        if entry_idx is None:
+            entry_idx = len(close) - 1
+        entry_price = float(close.iloc[entry_idx]) if pd.notna(close.iloc[entry_idx]) else None
+        current_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
         ema_fast = float(fast.iloc[-1]) if pd.notna(fast.iloc[-1]) else None
         ema_slow = float(slow.iloc[-1]) if pd.notna(slow.iloc[-1]) else None
         rvol = None
@@ -2438,7 +2583,8 @@ def _actionzone_15m_alert(symbol):
             "trend_1h": trend_dir,
             "trend_strength_1h": trend_strength,
             "trend_alignment": trend_ok,
-            "current_price": entry_price,
+            "entry_price": entry_price,
+            "current_price": current_price,
             "ema_fast": ema_fast,
             "ema_slow": ema_slow,
             "ema_fast_length": best_fast_len,

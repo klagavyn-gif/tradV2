@@ -34,7 +34,6 @@ def get_thai_now():
 
 
 VALID_PERIODS = ['1d', '5d', '1mo', '3mo', '6mo', '1y', 'ytd', '1h', '15m']
-EMA_OPTIMIZER_BEST = {}
 EMA_CROSS_15M_OPT_CACHE = {}
 
 _THREAD_LOCAL = threading.local()
@@ -81,16 +80,7 @@ _YF_INFO_CACHE = _TTLCache(
     maxsize=max(64, int(getattr(config, "YF_CACHE_MAXSIZE", 256) // 4)),
     ttl_seconds=getattr(config, "YF_INFO_CACHE_TTL_SECONDS", 6 * 60 * 60),
 )
-_YF_UNIVERSE_CACHE = _TTLCache(
-    maxsize=128,
-    ttl_seconds=getattr(config, "YF_UNIVERSE_CACHE_TTL_SECONDS", 15 * 60),
-)
-
 _ANALYZE_EXECUTOR = ThreadPoolExecutor(max_workers=int(getattr(config, "ANALYZE_MAX_WORKERS", 5)))
-_STATS_CACHE = _TTLCache(
-    maxsize=int(getattr(config, "STATS_CACHE_MAXSIZE", 128)),
-    ttl_seconds=int(getattr(config, "STATS_CACHE_TTL_SECONDS", 10 * 60)),
-)
 _TELEGRAM_ALERT_CACHE = _TTLCache(
     maxsize=256,
     ttl_seconds=int(getattr(config, "TELEGRAM_ALERT_TTL_SECONDS", 1800)),
@@ -184,6 +174,7 @@ def _collect_alert_sources(item, min_conf):
     add("Quantum 15m", item.get("quantum_15m"))
     add("EMA Cross 15m", item.get("ema_cross_15m"), setup_key="signal")
     add("ActionZone 15m", item.get("actionzone_15m"), setup_key="signal")
+    add("CDC+VixFix 15m", item.get("cdc_vixfix_15m"), setup_key="signal")
     add("Crypto Reversal 15m", item.get("crypto_reversal_15m"))
     sources.sort(key=lambda x: x[0], reverse=True)
     return [f"{text} ({conf:.0f}%)" for conf, text in sources[:3]]
@@ -197,6 +188,7 @@ def _get_best_confidence(item):
         (item.get("quantum_15m"), "setup", "confidence"),
         (item.get("ema_cross_15m"), "signal", "confidence"),
         (item.get("actionzone_15m"), "signal", "confidence"),
+        (item.get("cdc_vixfix_15m"), "signal", "confidence"),
         (item.get("crypto_reversal_15m"), "setup", "confidence"),
     ):
         if not isinstance(plan, dict):
@@ -282,6 +274,52 @@ def _build_actionzone_message(item, az_plan):
     return "\n".join(lines)
 
 
+def _build_cdc_vixfix_message(item, plan):
+    signal = str(plan.get("signal") or "").upper()
+    if signal not in ("BUY", "EXIT", "SELL"):
+        return None
+    emoji = "🟢" if signal == "BUY" else "🟠"
+    symbol = normalize_symbol(item.get("symbol") or "")
+    name = str(item.get("name") or "").strip()
+    lines = [f"{emoji} CDC+VixFix 15m {signal}"]
+    line_symbol = f"สินทรัพย์: {symbol}"
+    if name:
+        line_symbol += f" • {name}"
+    lines.append(line_symbol)
+    entry_text = _format_price_value(plan.get("entry_price"))
+    exit_text = _format_price_value(plan.get("exit_price"))
+    stop_text = _format_price_value(plan.get("stop_loss"))
+    tp_text = _format_price_value(plan.get("take_profit"))
+    move_parts = []
+    if entry_text:
+        move_parts.append(f"จุดเข้า: {entry_text}")
+    if exit_text:
+        move_parts.append(f"จุดออก: {exit_text}")
+    elif tp_text:
+        move_parts.append(f"จุดออกเป้าหมาย: {tp_text}")
+    if stop_text:
+        move_parts.append(f"SL: {stop_text}")
+    if move_parts:
+        lines.append(" | ".join(move_parts))
+    profit_pct = plan.get("expected_profit_pct")
+    if isinstance(profit_pct, (int, float)):
+        lines.append(f"กำไรคาดการณ์: {profit_pct:+.2f}%")
+    running_pct = plan.get("running_profit_pct")
+    if isinstance(running_pct, (int, float)):
+        lines.append(f"กำไรปัจจุบันจากจุดเข้า: {running_pct:+.2f}%")
+    reason = plan.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        lines.append("เหตุผล: " + reason.strip())
+    conf = _normalize_confidence(plan.get("confidence"))
+    if conf is not None:
+        lines.append(f"ความมั่นใจ: {conf:.0f}%")
+    last_signal_time = plan.get("last_signal_time")
+    if isinstance(last_signal_time, str) and last_signal_time:
+        lines.append("เวลาสัญญาณล่าสุด: " + last_signal_time)
+    lines.append("เวลาแจ้งเตือน: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    return "\n".join(lines)
+
+
 def _notify_telegram_from_results(results):
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
@@ -302,6 +340,21 @@ def _notify_telegram_from_results(results):
         symbol = normalize_symbol(item.get("symbol") or "")
         if not symbol:
             continue
+        if sent >= max_per_run:
+            break
+        cdc_plan = item.get("cdc_vixfix_15m")
+        if isinstance(cdc_plan, dict):
+            cdc_signal = str(cdc_plan.get("signal") or "").upper()
+            cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
+            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= min_conf:
+                cdc_key = f"CDCVIX15|{symbol}|{cdc_signal}"
+                if not _TELEGRAM_ALERT_CACHE.get(cdc_key):
+                    cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
+                    if cdc_message and send_telegram_alert(cdc_message):
+                        _TELEGRAM_ALERT_CACHE.set(cdc_key, True)
+                        sent += 1
+                        if sent >= max_per_run:
+                            break
         if sent >= max_per_run:
             break
         az_plan = item.get("actionzone_15m")
@@ -765,146 +818,6 @@ def optimize_best_ema_cross_15m(symbol, df):
     }
 
 
-def _wilson_ci_95(wins, n):
-    try:
-        wins = int(wins)
-        n = int(n)
-    except Exception:
-        return None
-    if n <= 0 or wins < 0 or wins > n:
-        return None
-    z = 1.96
-    phat = wins / n
-    denom = 1.0 + (z * z / n)
-    center = (phat + (z * z) / (2.0 * n)) / denom
-    adj = (z / denom) * math.sqrt((phat * (1.0 - phat) / n) + (z * z / (4.0 * n * n)))
-    lo = max(0.0, center - adj)
-    hi = min(1.0, center + adj)
-    return {"low_pct": lo * 100.0, "high_pct": hi * 100.0}
-
-
-def _summarize_rr_list(rr_list, tp_mult):
-    if not isinstance(rr_list, list) or not rr_list:
-        return {
-            "trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate_pct": None,
-            "win_rate_ci95": None,
-            "avg_rr": None,
-            "expectancy_rr": None,
-            "expectancy_ci95": None,
-            "breakeven_win_rate_pct": (100.0 / (float(tp_mult) + 1.0)) if isinstance(tp_mult, (int, float)) and tp_mult > 0 else None,
-        }
-    vals = np.array(rr_list, dtype=float)
-    n = int(vals.size)
-    wins = int(np.sum(vals > 0))
-    losses = int(np.sum(vals < 0))
-    mean_rr = float(np.mean(vals)) if n else None
-    std_rr = float(np.std(vals, ddof=1)) if n > 1 else None
-    win_rate = (wins / n) * 100.0 if n else None
-    win_ci = _wilson_ci_95(wins, n)
-    exp_ci = None
-    if std_rr is not None and n > 1:
-        se = std_rr / math.sqrt(n)
-        exp_ci = {"low": mean_rr - 1.96 * se, "high": mean_rr + 1.96 * se}
-    breakeven = None
-    if isinstance(tp_mult, (int, float)) and tp_mult > 0:
-        breakeven = 100.0 / (float(tp_mult) + 1.0)
-    return {
-        "trades": n,
-        "wins": wins,
-        "losses": losses,
-        "win_rate_pct": float(win_rate) if win_rate is not None else None,
-        "win_rate_ci95": win_ci,
-        "avg_rr": mean_rr,
-        "expectancy_rr": mean_rr,
-        "expectancy_ci95": exp_ci,
-        "breakeven_win_rate_pct": breakeven,
-    }
-
-
-def _walk_forward_ema_cross_15m(symbol, raw_df, folds, tp_mult, max_forward, min_train_bars):
-    df = _ema_cross_15m_prepare_df(raw_df)
-    if df is None or df.empty:
-        return {"symbol": normalize_symbol(symbol), "error": "No data"}
-    try:
-        folds = int(folds)
-        tp_mult = float(tp_mult)
-        max_forward = int(max_forward)
-        min_train_bars = int(min_train_bars)
-    except Exception:
-        return {"symbol": normalize_symbol(symbol), "error": "Invalid parameters"}
-    if folds < 1:
-        folds = 1
-    if folds > 6:
-        folds = 6
-    if tp_mult <= 0:
-        tp_mult = float(getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
-    if max_forward < 8:
-        max_forward = int(getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
-    if min_train_bars < 120:
-        min_train_bars = 120
-
-    n_total = len(df)
-    remaining = n_total - min_train_bars
-    if remaining < 120:
-        return {"symbol": normalize_symbol(symbol), "error": "Not enough data", "bars": int(n_total)}
-
-    test_bars = max(60, int(remaining / (folds + 1)))
-    folds_used = []
-    test_rr_all = []
-    for i in range(folds):
-        train_end = min_train_bars + i * test_bars
-        test_end = train_end + test_bars
-        if test_end > n_total:
-            break
-        train_df = df.iloc[:train_end].copy()
-        test_df = df.iloc[train_end:test_end].copy()
-        opt = optimize_best_ema_cross_15m(symbol, train_df)
-        best = opt.get("best") if isinstance(opt, dict) else None
-        if not isinstance(best, dict):
-            continue
-        fast_len = best.get("fast_len")
-        slow_len = best.get("slow_len")
-        if not isinstance(fast_len, int) or not isinstance(slow_len, int):
-            continue
-
-        train_bt = _backtest_ema_cross_15m(train_df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, return_rr_list=True)
-        test_bt = _backtest_ema_cross_15m(test_df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, return_rr_list=True)
-        train_rr = train_bt.get("rr_list") if isinstance(train_bt, dict) else None
-        test_rr = test_bt.get("rr_list") if isinstance(test_bt, dict) else None
-        train_summary = _summarize_rr_list(train_rr, tp_mult)
-        test_summary = _summarize_rr_list(test_rr, tp_mult)
-        if isinstance(test_rr, list) and test_rr:
-            test_rr_all.extend(test_rr)
-
-        folds_used.append(
-            {
-                "fold": i + 1,
-                "train_bars": int(len(train_df)),
-                "test_bars": int(len(test_df)),
-                "best": {"fast_len": fast_len, "slow_len": slow_len},
-                "train": train_summary,
-                "test": test_summary,
-                "evaluated": int(opt.get("evaluated")) if isinstance(opt.get("evaluated"), int) else None,
-            }
-        )
-
-    overall = _summarize_rr_list(test_rr_all, tp_mult)
-    return {
-        "symbol": normalize_symbol(symbol),
-        "bars": int(n_total),
-        "tp_mult": float(tp_mult),
-        "max_forward_bars": int(max_forward),
-        "folds_requested": int(folds),
-        "folds_used": int(len(folds_used)),
-        "test_bars_per_fold": int(test_bars),
-        "folds": folds_used,
-        "overall_test": overall,
-        "computed_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-
 def is_crypto_symbol(symbol):
     if not symbol:
         return False
@@ -1014,111 +927,6 @@ def calculate_technical_indicators(data):
     except Exception as e:
         logger.warning("Calculation error: %s", e, exc_info=True)
         return data
-
-def get_history_data(symbol, period="2y", interval="1d"):
-    sym = normalize_symbol(symbol)
-    df = get_yf_history(sym, period=period, interval=interval, auto_adjust=True)
-    if df is None or df.empty:
-        return None
-    if "Close" not in df.columns:
-        return None
-    cols = [c for c in ["Open", "High", "Low", "Close", "Volume"] if c in df.columns]
-    return df[cols].copy()
-
-def backtest_ema_hold_strategy(df, ema_length, fee_bps=0.0):
-    if df is None or df.empty:
-        return None
-    if "Close" not in df.columns:
-        return None
-    close = df["Close"].astype(float)
-    if close.isna().all():
-        return None
-    ema = close.ewm(span=int(ema_length), adjust=False).mean()
-    signal = (close > ema).astype(int)
-    ret = close.pct_change().fillna(0.0)
-    pos = signal.shift(1).fillna(0).astype(int)
-    strat = ret * pos
-    if isinstance(fee_bps, (int, float)) and fee_bps > 0:
-        turnover = signal.diff().abs().fillna(0.0)
-        fee = (turnover * (float(fee_bps) / 10000.0))
-        strat = strat - fee
-    equity = (1.0 + strat).cumprod()
-    total_return = float(equity.iloc[-1] - 1.0) if len(equity) else 0.0
-    in_market = int(pos.sum())
-    wins = int(((strat > 0) & (pos == 1)).sum())
-    win_rate = (wins / in_market) * 100.0 if in_market > 0 else 0.0
-    entry_count = int(((signal.diff().fillna(0) == 1)).sum())
-    roll_max = equity.cummax()
-    dd = (equity / roll_max) - 1.0
-    max_dd = float(dd.min()) if len(dd) else 0.0
-    return {
-        "ema_length": int(ema_length),
-        "ema_value": float(ema.iloc[-1]) if len(ema) else None,
-        "last_close": float(close.iloc[-1]) if len(close) else None,
-        "total_return_pct": total_return * 100.0,
-        "win_rate_pct": float(win_rate),
-        "in_market_bars": in_market,
-        "entries": entry_count,
-        "max_drawdown_pct": max_dd * 100.0,
-    }
-
-def optimize_best_ema(symbol, period="2y", interval="1d", min_len=10, max_len=200, step=5, fee_bps=0.0, top_n=5):
-    sym = normalize_symbol(symbol)
-    df = get_history_data(sym, period=period, interval=interval)
-    if df is None or df.empty:
-        return {"symbol": sym, "error": "No Data"}
-    try:
-        min_len = int(min_len)
-        max_len = int(max_len)
-        step = int(step)
-        top_n = int(top_n)
-    except Exception:
-        return {"symbol": sym, "error": "Invalid parameters"}
-    if min_len < 2 or max_len < min_len or step < 1:
-        return {"symbol": sym, "error": "Invalid parameters"}
-    if max_len > 400:
-        max_len = 400
-    if min_len > 400:
-        min_len = 400
-    if top_n < 1:
-        top_n = 1
-    if top_n > 20:
-        top_n = 20
-    results = []
-    for length in range(min_len, max_len + 1, step):
-        r = backtest_ema_hold_strategy(df, length, fee_bps=fee_bps)
-        if r:
-            results.append(r)
-    if not results:
-        return {"symbol": sym, "error": "No results"}
-    results_sorted = sorted(
-        results,
-        key=lambda x: x.get("total_return_pct") if isinstance(x.get("total_return_pct"), (int, float)) else -1e18,
-        reverse=True
-    )
-    best = results_sorted[0]
-    top = results_sorted[:top_n]
-    payload = {
-        "symbol": sym,
-        "period": period,
-        "interval": interval,
-        "fee_bps": float(fee_bps) if isinstance(fee_bps, (int, float)) else 0.0,
-        "min_len": min_len,
-        "max_len": max_len,
-        "step": step,
-        "evaluated": len(results_sorted),
-        "best": best,
-        "top": top,
-        "computed_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-    }
-    EMA_OPTIMIZER_BEST[sym] = {
-        "best_length": best.get("ema_length"),
-        "period": period,
-        "interval": interval,
-        "fee_bps": payload["fee_bps"],
-        "computed_at": payload["computed_at"],
-    }
-    return payload
 
 def get_basic_info(symbol):
     sym = normalize_symbol(symbol)
@@ -2617,6 +2425,176 @@ def _actionzone_15m_alert(symbol):
     except Exception:
         return None
 
+
+def _cdc_vixfix_15m_plan(symbol):
+    try:
+        sym = normalize_symbol(symbol)
+        yf_period = getattr(config, "CDC_VIXFIX_15M_YF_PERIOD", "30d")
+        data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+        if data_15m is None or data_15m.empty:
+            data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+        if data_15m is None or data_15m.empty or len(data_15m) < 80:
+            return None
+        df = data_15m[["Open", "High", "Low", "Close", "Volume"]].copy()
+        if isinstance(df.index, pd.DatetimeIndex):
+            try:
+                df.index = df.index.tz_localize(None)
+            except Exception:
+                pass
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        fast_len = getattr(config, "CDC_VIXFIX_15M_FAST_EMA", 12)
+        slow_len = getattr(config, "CDC_VIXFIX_15M_SLOW_EMA", 26)
+        rsi_len = getattr(config, "CDC_VIXFIX_15M_RSI_LENGTH", 14)
+        stoch_len = getattr(config, "CDC_VIXFIX_15M_STOCH_LENGTH", 14)
+        smooth_k = getattr(config, "CDC_VIXFIX_15M_STOCH_SMOOTH_K", 3)
+        smooth_d = getattr(config, "CDC_VIXFIX_15M_STOCH_SMOOTH_D", 3)
+        os_level = getattr(config, "CDC_VIXFIX_15M_STOCH_OVERSOLD", 30.0)
+        vix_pd = getattr(config, "CDC_VIXFIX_15M_VIX_LOOKBACK", 22)
+        vix_bbl = getattr(config, "CDC_VIXFIX_15M_VIX_BB_LENGTH", 20)
+        vix_mult = getattr(config, "CDC_VIXFIX_15M_VIX_BB_STD", 2.0)
+        vix_lb = getattr(config, "CDC_VIXFIX_15M_VIX_PERCENTILE_LOOKBACK", 50)
+        vix_ph = getattr(config, "CDC_VIXFIX_15M_VIX_PERCENTILE_FACTOR", 0.85)
+        alert_bars = getattr(config, "CDC_VIXFIX_15M_ALERT_BARS", 2)
+        try:
+            fast_len = max(2, int(fast_len))
+            slow_len = max(fast_len + 1, int(slow_len))
+            rsi_len = max(2, int(rsi_len))
+            stoch_len = max(2, int(stoch_len))
+            smooth_k = max(1, int(smooth_k))
+            smooth_d = max(1, int(smooth_d))
+            os_level = float(os_level)
+            vix_pd = max(2, int(vix_pd))
+            vix_bbl = max(2, int(vix_bbl))
+            vix_mult = max(0.1, float(vix_mult))
+            vix_lb = max(2, int(vix_lb))
+            vix_ph = float(vix_ph)
+            alert_bars = max(0, int(alert_bars))
+        except Exception:
+            return None
+        fast = close.ewm(span=fast_len, adjust=False).mean()
+        slow = close.ewm(span=slow_len, adjust=False).mean()
+        bull = fast > slow
+        bear = fast < slow
+        green = bull & (close > fast)
+        red = bear & (close < fast)
+        delta = close.diff()
+        gain = delta.where(delta > 0, 0.0)
+        loss = (-delta.where(delta < 0, 0.0))
+        avg_gain = gain.rolling(rsi_len).mean()
+        avg_loss = loss.rolling(rsi_len).mean()
+        rs = avg_gain / avg_loss.replace(0, np.nan)
+        rsi = 100 - (100 / (1 + rs))
+        rsi_low = rsi.rolling(stoch_len).min()
+        rsi_high = rsi.rolling(stoch_len).max()
+        stoch_rsi = ((rsi - rsi_low) / (rsi_high - rsi_low).replace(0, np.nan)) * 100.0
+        k = stoch_rsi.rolling(smooth_k).mean()
+        d = k.rolling(smooth_d).mean()
+        cross_up = (k > d) & (k.shift(1) <= d.shift(1))
+        long_condition = bull & cross_up & (d < os_level)
+        lowest_close = close.rolling(vix_pd).min()
+        wvf1 = ((lowest_close - high) / lowest_close.replace(0, np.nan)) * 100.0
+        sdev = vix_mult * wvf1.rolling(vix_bbl).std()
+        mid = wvf1.rolling(vix_bbl).mean()
+        lower_band = mid - sdev
+        range_low = wvf1.rolling(vix_lb).min() * vix_ph
+        is_market_top = (wvf1 <= lower_band) | (wvf1 <= range_low)
+        entry_idx = None
+        if long_condition.any():
+            entry_idx = long_condition[long_condition].index[-1]
+        bars_since_entry = None
+        if entry_idx is not None:
+            try:
+                idx_pos = df.index.get_loc(entry_idx)
+                bars_since_entry = max(0, len(df) - idx_pos - 1)
+            except Exception:
+                bars_since_entry = None
+        entry_recent = entry_idx is not None and bars_since_entry is not None and bars_since_entry <= alert_bars
+        entry_price = float(close.loc[entry_idx]) if entry_idx is not None and pd.notna(close.loc[entry_idx]) else None
+        stop_loss = None
+        if entry_idx is not None:
+            try:
+                pos = int(df.index.get_loc(entry_idx))
+                start = max(0, pos - 4)
+                sl_val = low.iloc[start:pos + 1].min()
+                if pd.notna(sl_val):
+                    stop_loss = float(sl_val)
+            except Exception:
+                stop_loss = None
+        current_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+        atr = None
+        tr1 = (high - low).abs()
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_series = tr.rolling(14).mean()
+        if pd.notna(atr_series.iloc[-1]):
+            atr = float(atr_series.iloc[-1])
+        take_profit = None
+        if entry_price is not None:
+            if stop_loss is not None and entry_price > stop_loss:
+                risk = entry_price - stop_loss
+                take_profit = entry_price + (risk * 2.0)
+            elif atr is not None and atr > 0:
+                take_profit = entry_price + (atr * 2.0)
+        last_time_str = entry_idx.strftime("%Y-%m-%d %H:%M") if entry_idx is not None else None
+        signal = "WAIT"
+        reason = "ยังไม่เกิดจังหวะเข้าหรือออกตาม CDC+StochRSI+VixFix"
+        if entry_recent:
+            signal = "BUY"
+            reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
+        elif entry_idx is not None and bars_since_entry is not None:
+            if bool(is_market_top.iloc[-1]):
+                signal = "EXIT"
+                reason = "VixFix บอกโซนยืดตัวสูง ควรทยอยปิดกำไร"
+            elif bool(red.iloc[-1]):
+                signal = "EXIT"
+                reason = "โครงสร้าง CDC พลิกเป็น Red ควรปิดสถานะ"
+        expected_profit_pct = None
+        if entry_price is not None:
+            ref_exit = take_profit
+            if signal == "EXIT" and current_price is not None:
+                ref_exit = current_price
+            if ref_exit is not None and entry_price > 0:
+                expected_profit_pct = ((ref_exit - entry_price) / entry_price) * 100.0
+        running_profit_pct = None
+        if entry_price is not None and current_price is not None and entry_price > 0:
+            running_profit_pct = ((current_price - entry_price) / entry_price) * 100.0
+        conf = 45.0
+        if signal == "BUY":
+            conf += 25.0
+        if signal == "EXIT":
+            conf += 20.0
+        if pd.notna(k.iloc[-1]) and pd.notna(d.iloc[-1]):
+            if signal == "BUY" and float(k.iloc[-1]) > float(d.iloc[-1]):
+                conf += 10.0
+            if signal == "EXIT" and bool(is_market_top.iloc[-1]):
+                conf += 10.0
+        if conf > 95:
+            conf = 95.0
+        return {
+            "signal": signal,
+            "setup": "CDC+StochRSI+VixFix 15m",
+            "entry_price": entry_price,
+            "current_price": current_price,
+            "exit_price": current_price if signal == "EXIT" else None,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "expected_profit_pct": expected_profit_pct,
+            "running_profit_pct": running_profit_pct,
+            "confidence": conf,
+            "last_signal_time": last_time_str,
+            "bars_since_entry": bars_since_entry,
+            "is_market_top": bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
+            "trend_color": "GREEN" if bool(green.iloc[-1]) else "RED" if bool(red.iloc[-1]) else "NEUTRAL",
+            "stoch_k": float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None,
+            "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
+            "reason": reason
+        }
+    except Exception:
+        return None
+
 def _order_block_levels_15m(symbol):
     try:
         sym = normalize_symbol(symbol)
@@ -2845,455 +2823,6 @@ class QuantumSovereign4H:
             'reason': reason
         }
 
-class UniverseAnalyzer:
-    def __init__(self, target_symbol, is_crypto=False):
-        self.target_symbol = target_symbol
-        self.is_crypto = is_crypto
-        self.assets = {
-            'Target': target_symbol,
-            'Gold': 'GC=F',
-            'Oil': 'CL=F',
-            'Bond_10Y': '^TNX',
-            'Dollar': 'DX-Y.NYB',
-            'S&P500': '^GSPC'
-        }
-        if self.is_crypto:
-            self.assets['Bitcoin'] = 'BTC-USD'
-        self.df = self._fetch_data()
-
-    def _fetch_data(self):
-        cache_key = ("universe", normalize_symbol(self.target_symbol), bool(self.is_crypto))
-        cached = _YF_UNIVERSE_CACHE.get(cache_key)
-        if isinstance(cached, pd.DataFrame) and not cached.empty:
-            return cached.copy()
-        session = _get_thread_curl_session()
-        tickers = list(self.assets.values())
-        data = yf.download(tickers, period="1y", progress=False, session=session)['Close']
-        inv_map = {v: k for k, v in self.assets.items()}
-        data.rename(columns=inv_map, inplace=True)
-        data.ffill(inplace=True)
-        data.dropna(inplace=True)
-        _YF_UNIVERSE_CACHE.set(cache_key, data)
-        return data.copy()
-
-    def analyze_correlations(self):
-        returns = self.df.pct_change()
-        corrs = returns.corr()['Target'].drop('Target')
-        return corrs
-
-    def analyze_macro_trends(self):
-        trends = {}
-        for name in self.df.columns:
-            if name == 'Target':
-                continue
-            price = self.df[name]
-            sma50 = price.rolling(50).mean().iloc[-1]
-            current = price.iloc[-1]
-            trends[name] = "UP" if current > sma50 else "DOWN"
-        return trends
-
-    def calculate_regime_score(self):
-        corrs = self.analyze_correlations()
-        trends = self.analyze_macro_trends()
-        score = 0
-        total_factors = 0
-        for asset, trend in trends.items():
-            correlation = corrs.get(asset, 0)
-            if abs(correlation) < 0.2:
-                continue
-            total_factors += 1
-            if correlation > 0:
-                if trend == "UP":
-                    score += 1
-                else:
-                    score -= 1
-            else:
-                if trend == "DOWN":
-                    score += 1
-                else:
-                    score -= 1
-        if total_factors == 0:
-            final_prob = 50
-        else:
-            final_prob = ((score / total_factors) + 1) * 50
-        return final_prob, trends
-
-    def predict(self):
-        price_current = float(self.df['Target'].iloc[-1])
-        macro_prob, macro_trends = self.calculate_regime_score()
-        delta = self.df['Target'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        rsi_series = 100 - (100 / (1 + rs))
-        rsi = float(rsi_series.iloc[-1])
-        final_score = (macro_prob * 0.6) + ((100 - rsi) * 0.4)
-        if rsi > 70:
-            final_score = min(final_score, 40)
-        recommendation = "WAIT"
-        if final_score > 75:
-            recommendation = "STRONG BUY"
-        elif final_score > 60:
-            recommendation = "ACCUMULATE (ทยอยสะสม)"
-        elif final_score < 40:
-            recommendation = "SELL / AVOID"
-        return {
-            'price_current': price_current,
-            'macro_prob': float(macro_prob),
-            'macro_trends': macro_trends,
-            'rsi': rsi,
-            'final_score': float(final_score),
-            'recommendation': recommendation
-        }
-
-class SovereignFetcher:
-    def __init__(self):
-        self.session = _get_thread_curl_session()
-
-    def fetch_full_data(self, ticker, period="2y"):
-        try:
-            sym = normalize_symbol(ticker)
-            df = get_yf_history(sym, period=period, interval=None, auto_adjust=True)
-            if df is None or df.empty:
-                return None, None
-            df.columns = [c.lower() for c in df.columns]
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-                df.set_index("date", inplace=True)
-            info = yf.Ticker(sym, session=self.session).info
-            fundamentals = {
-                "peRatio": info.get("forwardPE", info.get("trailingPE", 999)),
-                "marketCap": info.get("marketCap", 0),
-                "dividendYield": info.get("dividendYield", 0) * 100 if info.get("dividendYield") else 0,
-                "sector": info.get("sector", "Unknown"),
-            }
-            return df, fundamentals
-        except Exception:
-            return None, None
-
-class HybridSovereignEngine:
-    def __init__(self, portfolio_value=100000, risk_per_trade=0.02):
-        self.fetcher = SovereignFetcher()
-        self.portfolio_value = portfolio_value
-        self.risk_per_trade = risk_per_trade
-
-    def analyze_asset(self, ticker, alias):
-        df, fund = self.fetcher.fetch_full_data(ticker)
-        if df is None or len(df) < 200:
-            return None
-        df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
-        df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-        delta = df["close"].diff()
-        gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df["rsi14"] = 100 - (100 / (1 + rs))
-        tr1 = df["high"] - df["low"]
-        tr2 = (df["high"] - df["close"].shift(1)).abs()
-        tr3 = (df["low"] - df["close"].shift(1)).abs()
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        df["atr22"] = tr.rolling(22).mean()
-        adx_df = pd.DataFrame({
-            "High": df["high"],
-            "Low": df["low"],
-            "Close": df["close"],
-        })
-        adx_series = QuantumHunterStrategy.calculate_adx(adx_df)
-        df["adx14"] = adx_series
-        last = df.iloc[-1]
-        close = float(last["close"])
-        atr = float(last["atr22"]) if pd.notna(last["atr22"]) else None
-        rsi = float(last["rsi14"]) if pd.notna(last["rsi14"]) else None
-        ema50 = float(last["ema50"]) if pd.notna(last["ema50"]) else None
-        ema200 = float(last["ema200"]) if pd.notna(last["ema200"]) else None
-        adx = float(last["adx14"]) if pd.notna(last["adx14"]) else None
-        if atr is None or rsi is None or ema50 is None or ema200 is None or adx is None:
-            return None
-        score = 0
-        if close > ema200:
-            score += 20
-        if close > ema50:
-            score += 10
-        if adx > 25:
-            score += 10
-        dist_from_ema200 = ((close - ema200) / ema200) * 100
-        if 40 <= rsi <= 60:
-            score += 15
-        if -10 < dist_from_ema200 < 10:
-            score += 15
-        pe = fund.get("peRatio", 999)
-        if pe < 25:
-            score += 30
-        elif pe < 50:
-            score += 15
-        else:
-            score -= 20
-        stop_loss = close - (3.0 * atr)
-        risk_per_share = close - stop_loss
-        money_at_risk = self.portfolio_value * self.risk_per_trade
-        qty = int(money_at_risk / risk_per_share) if risk_per_share > 0 else 0
-        position_value = qty * close
-        volatility_pct = (atr / close) * 100 if close > 0 else None
-        action = "WAIT"
-        if score >= 70:
-            action = "🟢 STRONG BUY"
-        elif score >= 50:
-            action = "🟡 ACCUMULATE"
-        elif score < 30:
-            action = "🔴 AVOID/SELL"
-        bubble_risk = False
-        bubble_reasons = []
-        if isinstance(pe, (int, float)) and pe != 0:
-            if pe > 60:
-                bubble_risk = True
-                bubble_reasons.append("P/E สูงมากเกิน 60 เท่า")
-        if dist_from_ema200 > 35:
-            bubble_risk = True
-            bubble_reasons.append("ราคาทะลุเส้น EMA200 เกิน 35%")
-        if volatility_pct is not None and volatility_pct > 12:
-            if is_crypto_symbol(ticker) or action.startswith("🟢") or action.startswith("🟡"):
-                bubble_risk = True
-                bubble_reasons.append("ความผันผวนรายวันสูงเกิน 12%")
-        return {
-            "asset": alias,
-            "symbol": ticker,
-            "sector": fund.get("sector", "Unknown"),
-            "price": close,
-            "pe": pe,
-            "score": score,
-            "action": action,
-            "stop_loss": stop_loss,
-            "suggested_qty": qty,
-            "invest_amount": position_value,
-            "risk_note": f"ATR={atr:.2f}" if atr is not None else "",
-            "volatility_pct": volatility_pct,
-            "dist_from_ema200": dist_from_ema200,
-            "adx": adx,
-            "rsi": rsi,
-            "bubble_risk": bubble_risk,
-            "bubble_reason": "; ".join(bubble_reasons) if bubble_risk else "",
-        }
-
-def classify_asset_type(symbol, alias, sector):
-    s = (symbol or "").upper()
-    a = (alias or "").upper()
-    sec = (sector or "").upper()
-    if is_crypto_symbol(symbol):
-        return "คริปโตหลัก"
-    if s == "GC=F" or "GOLD" in a:
-        return "ทองคำ / Safe Haven"
-    if s.endswith(".BK"):
-        return "หุ้นไทย"
-    if "FINANCIAL" in sec:
-        return "หุ้นการเงินต่างประเทศ"
-    return "หุ้นต่างประเทศขนาดใหญ่"
-
-def get_global_sovereign_overview():
-    portfolio_cash = 100000
-    risk_tolerance = 0.02
-    engine = HybridSovereignEngine(portfolio_cash, risk_tolerance)
-    universe = {
-        "NVDA": "Nvidia (AI)",
-        "MSFT": "Microsoft",
-        "GOOGL": "Google",
-        "AMZN": "Amazon",
-        "META": "Meta Platforms",
-        "TSLA": "Tesla",
-        "AAPL": "Apple",
-        "AVGO": "Broadcom",
-        "SPY": "S&P 500 ETF",
-        "QQQ": "Nasdaq 100 ETF",
-        "XLF": "Financial Select Sector ETF",
-        "XLE": "Energy Select Sector ETF",
-        "EEM": "Emerging Markets ETF",
-        "TLT": "US 20Y Treasury ETF",
-        "CPALL.BK": "CP All (TH)",
-        "BDMS.BK": "BDMS (TH)",
-        "AOT.BK": "AOT (TH)",
-        "PTT.BK": "PTT (TH)",
-        "KBANK.BK": "KBANK (TH)",
-        "ADVANC.BK": "ADVANC (TH)",
-        "GC=F": "Gold Futures",
-        "SI=F": "Silver Futures",
-        "CL=F": "Crude Oil Futures",
-        "BTC-USD": "Bitcoin",
-        "ETH-USD": "Ethereum",
-    }
-
-    def make_dynamic_asset_name(item):
-        symbol = (item.get("symbol") or "").upper()
-        base = universe.get(symbol, item.get("asset") or symbol)
-        action = (item.get("action") or "").upper()
-        asset_type = item.get("asset_type") or ""
-        tags = []
-        if "STRONG BUY" in action:
-            tags.append("ตัวโฟกัสฝั่งซื้อ")
-        elif "ACCUMULATE" in action:
-            tags.append("ทยอยสะสม")
-        elif "AVOID" in action or "SELL" in action:
-            tags.append("ลดน้ำหนัก/หลีกเลี่ยง")
-        elif action == "WAIT":
-            tags.append("เฝ้าดูจังหวะ")
-        if item.get("bubble_risk"):
-            tags.append("เสี่ยงฟองสบู่")
-        if is_crypto_symbol(symbol):
-            tags.append("คริปโตหลัก")
-        if asset_type:
-            tags.append(asset_type)
-        if tags:
-            return f"{base} ({' • '.join(tags)})"
-        return base
-
-    items = []
-    for ticker, alias in universe.items():
-        res = engine.analyze_asset(ticker, alias)
-        if res:
-            items.append(res)
-    if not items:
-        summary = {
-            "strong_buy": 0,
-            "accumulate": 0,
-            "avoid": 0,
-            "wait": 0,
-            "mood": "NEUTRAL",
-        }
-        return {
-            "portfolio_base": portfolio_cash,
-            "risk_per_trade": risk_tolerance,
-            "items": [],
-            "summary": summary,
-            "type_summary": [],
-            "bubble_assets": [],
-        }
-    for item in items:
-        item["asset_type"] = classify_asset_type(item["symbol"], item["asset"], item["sector"])
-    type_stats = {}
-    for item in items:
-        t = item.get("asset_type", "อื่น ๆ")
-        if t not in type_stats:
-            type_stats[t] = {
-                "count": 0,
-                "score_sum": 0.0,
-                "strong_buy": 0,
-                "accumulate": 0,
-                "avoid": 0,
-            }
-        stat = type_stats[t]
-        stat["count"] += 1
-        score_val = item.get("score")
-        if isinstance(score_val, (int, float)):
-            stat["score_sum"] += score_val
-        action = item.get("action", "")
-        if isinstance(action, str):
-            if action.startswith("🟢"):
-                stat["strong_buy"] += 1
-            elif action.startswith("🟡"):
-                stat["accumulate"] += 1
-            elif action.startswith("🔴"):
-                stat["avoid"] += 1
-    type_summary = []
-    for t, stat in type_stats.items():
-        count = stat["count"]
-        avg_score = stat["score_sum"] / count if count else 0.0
-        strong = stat["strong_buy"]
-        acc = stat["accumulate"]
-        avoid_type = stat["avoid"]
-        stance = "เฝ้าดูสถานการณ์"
-        if strong >= 1 or avg_score >= 70:
-            stance = "เน้นซื้อ/ทยอยสะสม"
-        elif avg_score >= 50:
-            stance = "ถือ/เพิ่มเล็กน้อย"
-        elif avg_score < 40 and avoid_type > 0:
-            stance = "ลดน้ำหนัก/หลีกเลี่ยง"
-        type_summary.append({
-            "type": t,
-            "stance": stance,
-            "avg_score": avg_score,
-            "strong_buy": strong,
-                "accumulate": acc,
-                "avoid": avoid_type,
-                "count": count,
-        })
-    preferred_types = set()
-    avoid_types = set()
-    for ts in type_summary:
-        stance = (ts.get("stance") or "").strip()
-        t = ts.get("type")
-        if not t:
-            continue
-        if "เน้นซื้อ" in stance or "ทยอยสะสม" in stance or "ถือ/เพิ่มเล็กน้อย" in stance:
-            preferred_types.add(t)
-        elif "ลดน้ำหนัก" in stance or "หลีกเลี่ยง" in stance:
-            avoid_types.add(t)
-    focus_items = []
-    seen_symbols = set()
-    for item in items:
-        sym = item.get("symbol")
-        if not sym:
-            continue
-        t = item.get("asset_type", "อื่น ๆ")
-        action = item.get("action", "")
-        bubble_flag = bool(item.get("bubble_risk"))
-        if isinstance(action, str):
-            if t in preferred_types and (action.startswith("🟢") or action.startswith("🟡")):
-                if sym not in seen_symbols:
-                    focus_items.append(item)
-                    seen_symbols.add(sym)
-                continue
-            if t in avoid_types and action.startswith("🔴"):
-                if sym not in seen_symbols:
-                    focus_items.append(item)
-                    seen_symbols.add(sym)
-                continue
-        if bubble_flag and sym not in seen_symbols:
-            focus_items.append(item)
-            seen_symbols.add(sym)
-    if not focus_items:
-        focus_items = sorted(
-            items,
-            key=lambda x: x.get("score") if isinstance(x.get("score"), (int, float)) else 0,
-            reverse=True
-        )[:10]
-    else:
-        focus_items.sort(key=lambda x: x.get("score") if isinstance(x.get("score"), (int, float)) else 0, reverse=True)
-    for item in focus_items:
-        item["asset"] = make_dynamic_asset_name(item)
-    strong_buy = sum(1 for x in focus_items if isinstance(x.get("action", ""), str) and x["action"].startswith("🟢"))
-    accumulate = sum(1 for x in focus_items if isinstance(x.get("action", ""), str) and x["action"].startswith("🟡"))
-    avoid = sum(1 for x in focus_items if isinstance(x.get("action", ""), str) and x["action"].startswith("🔴"))
-    wait = sum(1 for x in focus_items if x.get("action") == "WAIT")
-    mood = "NEUTRAL"
-    if strong_buy + accumulate > avoid + wait:
-        mood = "BULLISH"
-    elif avoid > strong_buy + accumulate:
-        mood = "BEARISH"
-    bubble_assets = []
-    for item in items:
-        if item.get("bubble_risk"):
-            bubble_assets.append({
-                "asset": item.get("asset"),
-                "symbol": item.get("symbol"),
-                "asset_type": item.get("asset_type"),
-                "reason": item.get("bubble_reason", ""),
-                "score": item.get("score"),
-                "pe": item.get("pe"),
-            })
-    summary = {
-        "strong_buy": strong_buy,
-        "accumulate": accumulate,
-        "avoid": avoid,
-        "wait": wait,
-        "mood": mood,
-    }
-    return {
-        "portfolio_base": portfolio_cash,
-        "risk_per_trade": risk_tolerance,
-        "items": focus_items,
-        "summary": summary,
-        "type_summary": type_summary,
-        "bubble_assets": bubble_assets,
-    }
-
 def generate_gemini_particle_a_analysis(info, data, resonance_score, phase_status, support, resistance, vol_status):
     latest = data.iloc[-1]
     price = float(latest["Close"])
@@ -3329,7 +2858,7 @@ def generate_gemini_particle_a_analysis(info, data, resonance_score, phase_statu
     return ui_signal, text
 
 
-def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, sovereign_plan, macro_analysis, resonance_score, phase_status, crypto_plan=None):
+def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, sovereign_plan, resonance_score, phase_status, crypto_plan=None):
     up_score = 0.0
     down_score = 0.0
     conf_sum = 0.0
@@ -3370,13 +2899,6 @@ def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_pla
             up_score += 1.5
         elif "SELL" in reco:
             down_score += 1.5
-    if isinstance(macro_analysis, dict):
-        macro_reco = str(macro_analysis.get("recommendation", "")).upper()
-        if "STRONG BUY" in macro_reco or "ACCUMULATE" in macro_reco:
-            up_score += 1.5
-        elif "SELL" in macro_reco or "AVOID" in macro_reco:
-            down_score += 1.5
-        add_conf(macro_analysis.get("final_score"))
     if isinstance(resonance_score, (int, float)):
         if resonance_score >= 50:
             up_score += 1.0
@@ -3405,24 +2927,14 @@ def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_pla
             expected_holding_hours = float(bars) * 0.25
         if isinstance(ema_plan.get("signal"), str):
             short_term_signal = ema_plan["signal"]
-    macro_reco = None
-    macro_score = None
-    if isinstance(macro_analysis, dict):
-        macro_reco = macro_analysis.get("recommendation")
-        val = macro_analysis.get("final_score")
-        if isinstance(val, (int, float)):
-            macro_score = float(val)
     return {
         "direction": direction,
         "probability": probability,
         "expected_move_pct": expected_move_pct,
         "expected_holding_hours": expected_holding_hours,
         "short_term_signal": short_term_signal,
-        "macro_recommendation": macro_reco,
-        "macro_score": macro_score,
         "phase_status": phase_status,
     }
-
 
 # --- Main Analysis Logic ---
 
@@ -3433,28 +2945,6 @@ def analyze_single_symbol(symbol, period):
             return {"symbol": symbol, "error": "No Data"}
         data = calculate_technical_indicators(data)
         latest = data.iloc[-1]
-        best_meta = EMA_OPTIMIZER_BEST.get(normalize_symbol(symbol))
-        best_len = None
-        ema_baseline = None
-        if isinstance(best_meta, dict):
-            best_len = best_meta.get("best_length")
-        try:
-            if best_len is not None:
-                best_len_int = int(best_len)
-                if best_len_int >= 2 and best_len_int <= 400:
-                    ema_val = data["Close"].ewm(span=best_len_int, adjust=False).mean().iloc[-1]
-                    if pd.notna(ema_val) and pd.notna(latest["Close"]):
-                        ema_baseline = {
-                            "ema_length": best_len_int,
-                            "ema_value": float(ema_val),
-                            "phase": "BULL" if float(latest["Close"]) > float(ema_val) else "BEAR",
-                            "particle_phase": 0 if float(latest["Close"]) > float(ema_val) else 180,
-                            "source_period": best_meta.get("period"),
-                            "source_interval": best_meta.get("interval"),
-                            "computed_at": best_meta.get("computed_at"),
-                        }
-        except Exception:
-            ema_baseline = None
         resonance_score = ParticleAAnalyzer.calculate_resonance_score(data)
         phase_status = ParticleAAnalyzer.interpret_phase(resonance_score)
         support = data["Low"].min()
@@ -3473,18 +2963,13 @@ def analyze_single_symbol(symbol, period):
         short_term_plan = ShortTermStrategy.analyze_15m_setup(symbol)
         sniper_plan = ShortTermStrategy.analyze_sniper_setup(symbol)
         quantum_plan = QuantumHunterStrategy.analyze(symbol)
-        sovereign_4h_plan = QuantumSovereign4H.analyze(symbol, baseline_ema_length=ema_baseline["ema_length"] if isinstance(ema_baseline, dict) else None)
+        sovereign_4h_plan = QuantumSovereign4H.analyze(symbol)
         crypto_reversal_plan = CryptoReversal15m.analyze(symbol)
         ema_cross_plan = EMACross15m.analyze(symbol)
         actionzone_plan = _actionzone_15m_alert(symbol)
+        cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol)
         order_blocks_15m = _order_block_levels_15m(symbol)
-        macro_analysis = None
-        try:
-            ua = UniverseAnalyzer(symbol, is_crypto=is_crypto_symbol(symbol))
-            macro_analysis = ua.predict()
-        except Exception:
-            macro_analysis = None
-        prediction = build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_cross_plan, sovereign_4h_plan, macro_analysis, resonance_score, phase_status, crypto_reversal_plan)
+        prediction = build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_cross_plan, sovereign_4h_plan, resonance_score, phase_status, crypto_reversal_plan)
         return {
             "symbol": symbol,
             "name": info["name"],
@@ -3502,9 +2987,8 @@ def analyze_single_symbol(symbol, period):
             "crypto_reversal_15m": crypto_reversal_plan,
             "ema_cross_15m": ema_cross_plan,
             "actionzone_15m": actionzone_plan,
+            "cdc_vixfix_15m": cdc_vixfix_plan,
             "order_blocks_15m": order_blocks_15m,
-            "ema_baseline": ema_baseline,
-            "macro_analysis": macro_analysis,
             "support": float(support) if pd.notna(support) else None,
             "resistance": float(resistance) if pd.notna(resistance) else None,
             "volume_status": vol_status,
@@ -3528,74 +3012,6 @@ def health():
             "warnings": _get_config_warnings(),
         }
     )
-
-@app.route('/ema_cross_15m_stats', methods=['POST'])
-def ema_cross_15m_stats():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid request body"}), 400
-    symbol = normalize_symbol(data.get("symbol") or data.get("ticker") or "")
-    if not symbol:
-        return jsonify({"error": "No symbol provided"}), 400
-    yf_period = str(data.get("yf_period") or getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d"))
-    folds = data.get("folds", getattr(config, "EMA_CROSS_15M_STATS_FOLDS", 3))
-    tp_mult = data.get("tp_mult", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
-    max_forward = data.get("max_forward_bars", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
-    min_train = data.get("min_train_bars", getattr(config, "EMA_CROSS_15M_STATS_MIN_TRAIN_BARS", 240))
-
-    cache_key = ("ema_cross_15m_stats", symbol, yf_period, int(folds) if str(folds).isdigit() else str(folds), str(tp_mult), str(max_forward), str(min_train))
-    cached = _STATS_CACHE.get(cache_key)
-    if isinstance(cached, dict) and cached:
-        return jsonify(cached)
-
-    raw_df = get_yf_history(symbol, period=yf_period, interval="15m", auto_adjust=True)
-    if raw_df is None or getattr(raw_df, "empty", True):
-        return jsonify({"error": "No data"}), 400
-
-    payload = _walk_forward_ema_cross_15m(symbol, raw_df, folds=folds, tp_mult=tp_mult, max_forward=max_forward, min_train_bars=min_train)
-    payload["warnings"] = _get_config_warnings()
-    payload["yf_period"] = yf_period
-    _STATS_CACHE.set(cache_key, payload)
-    if payload.get("error"):
-        return jsonify(payload), 400
-    return jsonify(payload)
-
-@app.route('/global_sovereign', methods=['GET'])
-def global_sovereign():
-    try:
-        data = get_global_sovereign_overview()
-        return jsonify(data)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/ema_optimize', methods=['POST'])
-def ema_optimize():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({'error': 'Invalid request body'}), 400
-    symbol = normalize_symbol(data.get('symbol') or data.get('ticker') or "")
-    if not symbol:
-        return jsonify({'error': 'No symbol provided'}), 400
-    period = str(data.get('period') or '2y')
-    interval = str(data.get('interval') or '1d')
-    min_len = data.get('min_len', 10)
-    max_len = data.get('max_len', 200)
-    step = data.get('step', 5)
-    fee_bps = data.get('fee_bps', 0.0)
-    top_n = data.get('top_n', 5)
-    res = optimize_best_ema(
-        symbol,
-        period=period,
-        interval=interval,
-        min_len=min_len,
-        max_len=max_len,
-        step=step,
-        fee_bps=fee_bps,
-        top_n=top_n
-    )
-    if res.get('error'):
-        return jsonify(res), 400
-    return jsonify(res)
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -3655,7 +3071,6 @@ def _run_once(symbols, period, notify_telegram):
         _notify_telegram_from_results(results)
     print(json.dumps({"results": results}, ensure_ascii=False))
     return 0
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

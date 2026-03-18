@@ -487,9 +487,11 @@
                 let tradeConfidence = null;
                 let tradeStop = null;
                 let tradeTarget = null;
+                let tradePlan = null;
                 if (cdcVixFix && cdcVixFix.signal && cdcVixFix.signal !== 'WAIT') {
                     tradeSource = 'CDC+VixFix 15m';
                     tradeSignal = cdcVixFix.signal;
+                    tradePlan = cdcVixFix;
                     if (typeof cdcVixFix.confidence === 'number') {
                         tradeConfidence = cdcVixFix.confidence;
                     }
@@ -505,6 +507,7 @@
                 if (tradeSource === 'ทั่วไป' && actionZone && actionZone.signal && actionZone.signal !== 'WAIT') {
                     tradeSource = 'ActionZone 15m';
                     tradeSignal = actionZone.signal;
+                    tradePlan = actionZone;
                     if (typeof actionZone.win_prob === 'number') {
                         tradeConfidence = actionZone.win_prob;
                     } else if (typeof actionZone.confidence === 'number') {
@@ -517,6 +520,7 @@
                 if (tradeSource === 'ทั่วไป' && emaCross && emaCross.signal && emaCross.signal !== 'WAIT') {
                     tradeSource = 'EMA Cross 15m';
                     tradeSignal = emaCross.signal;
+                    tradePlan = emaCross;
                     if (typeof emaCross.predicted_win_prob === 'number') {
                         tradeConfidence = emaCross.predicted_win_prob;
                     } else if (typeof emaCross.confidence === 'number') {
@@ -532,6 +536,7 @@
                 if (tradeSource === 'ทั่วไป' && shortTerm && shortTerm.setup && shortTerm.setup.indexOf('WAIT') === -1) {
                     tradeSource = 'Short Term 15m';
                     tradeSignal = shortTerm.setup;
+                    tradePlan = shortTerm;
                     if (typeof shortTerm.predicted_win_prob === 'number') {
                         tradeConfidence = shortTerm.predicted_win_prob;
                     } else if (typeof shortTerm.confidence === 'number') {
@@ -547,6 +552,7 @@
                 if (tradeSource === 'ทั่วไป' && sovereign && sovereign.recommendation) {
                     tradeSource = 'Sovereign 4H';
                     tradeSignal = sovereign.recommendation;
+                    tradePlan = sovereign;
                     if (typeof sovereign.entry_stop_loss === 'number') {
                         tradeStop = sovereign.entry_stop_loss;
                     }
@@ -560,6 +566,31 @@
                 if (tradeStop === null && shortTerm && typeof shortTerm.stop_loss === 'number') {
                     tradeStop = shortTerm.stop_loss;
                 }
+                let essentialExitLevels = [];
+                if (tradePlan && Array.isArray(tradePlan.exit_levels) && tradePlan.exit_levels.length) {
+                    essentialExitLevels = tradePlan.exit_levels;
+                }
+                const entryRiskText = (tradePlan && typeof tradePlan.entry_risk_pct === 'number')
+                    ? formatNumber(tradePlan.entry_risk_pct, 2) + '%'
+                    : 'N/A';
+                const entryRiskLine = (tradePlan && typeof tradePlan.entry_risk_pct === 'number')
+                    ? `<div class="small mb-1">ความเสี่ยงตั้งต้นต่อไม้ (จุดเข้า): ${entryRiskText}</div>`
+                    : `<div class="small mb-1 text-muted">ความเสี่ยงตั้งต้นต่อไม้คำนวณเมื่อมีสัญญาณเข้าจริง</div>`;
+                const essentialExitHtml = essentialExitLevels.length
+                    ? `<div class="mt-2">
+                        <div class="small fw-semibold mb-1">จุดออกทำกำไรแนะนำ</div>
+                        ${entryRiskLine}
+                        ${essentialExitLevels.slice(0, 3).map(lv => {
+                            const label = lv && lv.label ? lv.label : 'TP';
+                            const target = (lv && typeof lv.target_price === 'number') ? formatNumber(lv.target_price, 5) : 'N/A';
+                            const profitPct = (lv && typeof lv.profit_pct === 'number') ? formatNumber(lv.profit_pct, 2) + '%' : 'N/A';
+                            const spacingPct = (lv && typeof lv.spacing_pct === 'number') ? formatNumber(lv.spacing_pct, 2) + '%' : 'N/A';
+                            const riskRemain = (lv && typeof lv.risk_remaining_pct === 'number') ? formatNumber(lv.risk_remaining_pct, 2) + '%' : 'N/A';
+                            const closeRatio = (lv && typeof lv.close_ratio_pct === 'number') ? formatNumber(lv.close_ratio_pct, 0) + '%' : 'N/A';
+                            return `<div class="small">${label} → ราคา ${target} | กำไร ${profitPct} | ระยะห่าง ${spacingPct} | ความเสี่ยงคงเหลือ ${riskRemain} | แนะนำขาย ${closeRatio}</div>`;
+                        }).join('')}
+                    </div>`
+                    : '';
                 const essentialConfidenceText = typeof tradeConfidence === 'number' ? formatNumber(tradeConfidence, 1) + '%' : 'N/A';
                 const essentialStopText = typeof tradeStop === 'number' ? formatNumber(tradeStop, 5) : 'N/A';
                 const essentialTargetText = typeof tradeTarget === 'number' ? formatNumber(tradeTarget, 5) : 'N/A';
@@ -588,6 +619,7 @@
                                 <div class="result-value">${essentialTargetText}</div>
                             </div>
                         </div>
+                        ${essentialExitHtml}
                     </div>
                 `;
 

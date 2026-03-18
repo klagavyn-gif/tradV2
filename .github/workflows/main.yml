@@ -31,10 +31,15 @@ jobs:
       SYMBOLS: ${{ github.event.inputs.symbols || vars.SYMBOLS || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD' }}
       PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
       TELEGRAM_ALERT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_MIN_CONFIDENCE || '75' }}
+      TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE || '60' }}
       TELEGRAM_ALERT_TTL_SECONDS: ${{ vars.TELEGRAM_ALERT_TTL_SECONDS || '1800' }}
       TELEGRAM_ALERT_MAX_PER_RUN: ${{ vars.TELEGRAM_ALERT_MAX_PER_RUN || '5' }}
       ACTIONZONE_15M_ALERT_BARS: ${{ vars.ACTIONZONE_15M_ALERT_BARS || '2' }}
+      ACTIONZONE_15M_MIN_STOP_PCT: ${{ vars.ACTIONZONE_15M_MIN_STOP_PCT || '1.0' }}
+      EMA_CROSS_15M_MIN_STOP_PCT: ${{ vars.EMA_CROSS_15M_MIN_STOP_PCT || '1.0' }}
       CDC_VIXFIX_15M_ALERT_BARS: ${{ vars.CDC_VIXFIX_15M_ALERT_BARS || '2' }}
+      CDC_VIXFIX_15M_MIN_STOP_PCT: ${{ vars.CDC_VIXFIX_15M_MIN_STOP_PCT || '1.5' }}
+      CDC_VIXFIX_15M_SL_ATR_MULT: ${{ vars.CDC_VIXFIX_15M_SL_ATR_MULT || '3.0' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -154,6 +154,258 @@ def _format_price_value(value):
     return f"{val:,.6f}"
 
 
+def _generate_exit_levels(entry_price, stop_loss, signal="BUY", take_profit=None):
+    try:
+        entry = float(entry_price)
+        stop = float(stop_loss)
+    except Exception:
+        return None, []
+    if not math.isfinite(entry) or not math.isfinite(stop) or entry == 0:
+        return None, []
+    risk_dist = abs(entry - stop)
+    if risk_dist <= 0:
+        return None, []
+    risk_pct = (risk_dist / abs(entry)) * 100.0
+    tp_r = None
+    try:
+        if isinstance(take_profit, (int, float)):
+            tp_val = float(take_profit)
+            if math.isfinite(tp_val):
+                tp_move = abs(tp_val - entry)
+                if tp_move > 0:
+                    tp_r = tp_move / risk_dist
+    except Exception:
+        tp_r = None
+    if isinstance(tp_r, (int, float)) and tp_r >= 1.0:
+        r3 = max(3.0, float(tp_r))
+        r2 = max(1.9, min(2.6, r3 * 0.72))
+        r1 = max(1.2, min(1.6, r2 - 0.7))
+        r_levels = [r1, r2, r3]
+    else:
+        if risk_pct < 0.8:
+            r_levels = [1.4, 2.4, 3.8]
+        elif risk_pct < 1.5:
+            r_levels = [1.2, 2.1, 3.2]
+        else:
+            r_levels = [1.0, 1.8, 2.8]
+    normalized = []
+    for r in r_levels:
+        try:
+            val = float(r)
+        except Exception:
+            continue
+        if val <= 0:
+            continue
+        normalized.append(val)
+    normalized = sorted(normalized)
+    if not normalized:
+        return risk_pct, []
+    while len(normalized) < 3:
+        last_val = normalized[-1]
+        next_val = last_val + (0.8 if last_val < 2.0 else 1.0)
+        normalized.append(next_val)
+    direction = -1.0 if str(signal or "").upper() == "SELL" else 1.0
+    close_weights = [35, 35, 30]
+    risk_after = [risk_pct * 0.55, risk_pct * 0.25, 0.0]
+    levels = []
+    prev_move_pct = 0.0
+    for idx, r_mult in enumerate(normalized[:3]):
+        target_price = entry + (direction * risk_dist * r_mult)
+        move_pct = (abs(target_price - entry) / abs(entry)) * 100.0
+        spacing_pct = max(0.0, move_pct - prev_move_pct)
+        prev_move_pct = move_pct
+        close_ratio = close_weights[idx] if idx < len(close_weights) else 0
+        remain_risk = risk_after[idx] if idx < len(risk_after) else 0.0
+        levels.append(
+            {
+                "label": f"TP{idx + 1}",
+                "target_price": float(target_price),
+                "reward_r": float(r_mult),
+                "profit_pct": float(move_pct),
+                "spacing_pct": float(spacing_pct),
+                "close_ratio_pct": float(close_ratio),
+                "risk_remaining_pct": float(max(0.0, remain_risk)),
+            }
+        )
+    return float(risk_pct), levels
+
+
+def _pick_plan_value(plan, keys):
+    if not isinstance(plan, dict):
+        return None
+    for key in keys:
+        value = plan.get(key)
+        if value is None:
+            continue
+        return value
+    return None
+
+
+def _infer_plan_signal(plan, default_signal="BUY"):
+    if not isinstance(plan, dict):
+        return default_signal
+    candidates = [
+        plan.get("signal"),
+        plan.get("raw_signal"),
+        plan.get("setup"),
+        plan.get("recommendation"),
+    ]
+    text = " ".join([str(c) for c in candidates if c is not None]).upper()
+    if "EXIT" in text and "BUY" not in text and "SELL" not in text and "LONG" not in text and "SHORT" not in text:
+        return default_signal
+    if "SELL" in text or "SHORT" in text:
+        return "SELL"
+    if "BUY" in text or "LONG" in text:
+        return "BUY"
+    return default_signal
+
+
+def _is_entry_signal(plan, signal_hint=None):
+    sig = str(signal_hint or _infer_plan_signal(plan, "")).upper()
+    if sig in ("BUY", "SELL"):
+        return True
+    text = " ".join(
+        [
+            str(plan.get("signal") or ""),
+            str(plan.get("raw_signal") or ""),
+            str(plan.get("setup") or ""),
+            str(plan.get("recommendation") or ""),
+        ]
+    ).upper() if isinstance(plan, dict) else ""
+    if "WAIT" in text or "EXIT" in text:
+        return False
+    return ("BUY" in text) or ("SELL" in text) or ("LONG" in text) or ("SHORT" in text)
+
+
+def _compute_entry_risk_pct_with_context(entry, stop, signal, plan=None, context=None):
+    if entry is None or stop is None or entry == 0:
+        return None
+    raw_risk_pct = (abs(entry - stop) / abs(entry)) * 100.0
+    if not math.isfinite(raw_risk_pct) or raw_risk_pct <= 0:
+        return None
+    factor = 1.0
+    support = None
+    resistance = None
+    volume_status = None
+    if isinstance(context, dict):
+        support = context.get("support")
+        resistance = context.get("resistance")
+        volume_status = str(context.get("volume_status") or "").upper()
+    direction = str(signal or "BUY").upper()
+    if direction == "BUY":
+        if isinstance(support, (int, float)) and support > 0 and support < entry:
+            support_gap = ((entry - float(support)) / entry) * 100.0
+            if support_gap < raw_risk_pct * 0.7:
+                factor += 0.12
+            elif support_gap > raw_risk_pct * 1.8:
+                factor -= 0.05
+        if isinstance(resistance, (int, float)) and resistance > entry:
+            upside_room = ((float(resistance) - entry) / entry) * 100.0
+            if upside_room < raw_risk_pct * 1.2:
+                factor += 0.25
+            elif upside_room > raw_risk_pct * 2.8:
+                factor -= 0.08
+    elif direction == "SELL":
+        if isinstance(resistance, (int, float)) and resistance > entry:
+            resistance_gap = ((float(resistance) - entry) / entry) * 100.0
+            if resistance_gap < raw_risk_pct * 0.7:
+                factor += 0.12
+            elif resistance_gap > raw_risk_pct * 1.8:
+                factor -= 0.05
+        if isinstance(support, (int, float)) and support < entry:
+            downside_room = ((entry - float(support)) / entry) * 100.0
+            if downside_room < raw_risk_pct * 1.2:
+                factor += 0.25
+            elif downside_room > raw_risk_pct * 2.8:
+                factor -= 0.08
+    if volume_status == "HIGH":
+        factor += 0.12
+    elif volume_status == "LOW":
+        factor -= 0.05
+    conf = None
+    if isinstance(plan, dict):
+        conf = _normalize_confidence(plan.get("confidence"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("predicted_win_prob"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("win_prob"))
+    if isinstance(conf, (int, float)):
+        if conf >= 80:
+            factor -= 0.08
+        elif conf <= 55:
+            factor += 0.1
+    if factor < 0.6:
+        factor = 0.6
+    if factor > 1.6:
+        factor = 1.6
+    risk_pct = raw_risk_pct * factor
+    return float(max(0.2, min(10.0, risk_pct)))
+
+
+def _attach_exit_levels(plan, signal=None, entry_keys=None, stop_keys=None, tp_keys=None, context=None):
+    if not isinstance(plan, dict):
+        return plan
+    entry_keys = entry_keys or ["entry_price", "current_price", "price"]
+    stop_keys = stop_keys or ["stop_loss", "entry_stop_loss"]
+    tp_keys = tp_keys or ["take_profit", "take_profit_2", "trailing_stop", "exit_price"]
+    sig_hint = str(signal or _infer_plan_signal(plan, "")).upper()
+    sig = sig_hint
+    if sig not in ("BUY", "SELL"):
+        sig = "BUY"
+    entry = _pick_plan_value(plan, entry_keys)
+    stop = _pick_plan_value(plan, stop_keys)
+    tp = _pick_plan_value(plan, tp_keys)
+    risk_pct, levels = _generate_exit_levels(entry, stop, signal=sig, take_profit=tp)
+    if _is_entry_signal(plan, sig_hint):
+        contextual_risk = _compute_entry_risk_pct_with_context(entry, stop, sig, plan=plan, context=context)
+        if isinstance(contextual_risk, (int, float)):
+            plan["entry_risk_pct"] = float(contextual_risk)
+        elif isinstance(risk_pct, (int, float)):
+            plan["entry_risk_pct"] = float(risk_pct)
+    else:
+        plan.pop("entry_risk_pct", None)
+    if levels:
+        plan["exit_levels"] = levels
+    else:
+        plan["exit_levels"] = []
+    return plan
+
+
+def _format_exit_levels_lines(plan):
+    if not isinstance(plan, dict):
+        return []
+    levels = plan.get("exit_levels")
+    if not isinstance(levels, list) or not levels:
+        return []
+    lines = ["🎯 แผนออกทำกำไร 3 จุด"]
+    risk_pct = plan.get("entry_risk_pct")
+    if isinstance(risk_pct, (int, float)):
+        lines.append(f"ความเสี่ยงตั้งต้นต่อไม้: {float(risk_pct):.2f}%")
+    for level in levels[:3]:
+        if not isinstance(level, dict):
+            continue
+        label = str(level.get("label") or "TP")
+        target = _format_price_value(level.get("target_price"))
+        move = level.get("profit_pct")
+        spacing = level.get("spacing_pct")
+        risk_remain = level.get("risk_remaining_pct")
+        close_ratio = level.get("close_ratio_pct")
+        details = []
+        if target:
+            details.append(target)
+        if isinstance(move, (int, float)):
+            details.append(f"กำไร {float(move):.2f}%")
+        if isinstance(spacing, (int, float)):
+            details.append(f"ระยะห่าง {float(spacing):.2f}%")
+        if isinstance(risk_remain, (int, float)):
+            details.append(f"ความเสี่ยงคงเหลือ {float(risk_remain):.2f}%")
+        if isinstance(close_ratio, (int, float)) and close_ratio > 0:
+            details.append(f"แนะนำขาย {float(close_ratio):.0f}%")
+        if details:
+            lines.append(f"• {label}: " + " | ".join(details))
+    return lines
+
+
 def _collect_alert_sources(item, min_conf):
     sources = []
 
@@ -201,11 +453,39 @@ def _get_best_confidence(item):
     return best
 
 
+def _pick_primary_trade_plan(item):
+    candidates = [
+        item.get("cdc_vixfix_15m"),
+        item.get("actionzone_15m"),
+        item.get("ema_cross_15m"),
+        item.get("short_term_15m"),
+        item.get("sniper_15m"),
+        item.get("quantum_15m"),
+        item.get("crypto_reversal_15m"),
+    ]
+    best_plan = None
+    best_conf = -1.0
+    for plan in candidates:
+        if not isinstance(plan, dict):
+            continue
+        conf = _normalize_confidence(plan.get("confidence"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("predicted_win_prob"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("win_prob"))
+        if conf is None:
+            conf = 0.0
+        if conf > best_conf:
+            best_conf = conf
+            best_plan = plan
+    return best_plan
+
+
 def _build_telegram_message(item, signal, best_conf, sources):
     emoji = "🟢" if signal == "BUY" else "🔴"
     symbol = normalize_symbol(item.get("symbol") or "")
     name = str(item.get("name") or "").strip()
-    lines = [f"{emoji} {signal}"]
+    lines = [f"{emoji} สัญญาณหลัก {signal}"]
     line_symbol = f"สินทรัพย์: {symbol}"
     if name:
         line_symbol += f" • {name}"
@@ -222,6 +502,9 @@ def _build_telegram_message(item, signal, best_conf, sources):
         lines.append(f"ความมั่นใจ: {best_conf:.0f}%")
     if sources:
         lines.append("แหล่งสัญญาณ: " + ", ".join(sources))
+    primary_plan = _pick_primary_trade_plan(item)
+    if isinstance(primary_plan, dict):
+        lines.extend(_format_exit_levels_lines(primary_plan))
     lines.append("เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     return "\n".join(lines)
 
@@ -250,7 +533,7 @@ def _build_actionzone_message(item, az_plan):
                 parts.append(f"ราคาปัจจุบัน: {curr_text} ({change:+.2f}%)")
             else:
                 parts.append(f"ราคาปัจจุบัน: {curr_text}")
-        lines.append(" | ".join(parts))
+        lines.append("📍 " + " | ".join(parts))
     zone = az_plan.get("zone")
     trend = az_plan.get("trend_1h")
     conf = az_plan.get("confidence")
@@ -260,17 +543,18 @@ def _build_actionzone_message(item, az_plan):
             parts.append(f"โซน: {zone}")
         if trend:
             parts.append(f"เทรนด์ 1H: {trend}")
-        lines.append(" • ".join(parts))
+        lines.append("🧭 " + " • ".join(parts))
     if isinstance(conf, (int, float)):
-        lines.append(f"โอกาสจุดตัดสำเร็จ: {float(conf):.0f}%")
+        lines.append(f"📊 โอกาสจุดตัดสำเร็จ: {float(conf):.0f}%")
     sl = az_plan.get("stop_loss")
     sl_text = _format_price_value(sl)
     if sl_text:
-        lines.append(f"จุดตัดขาดทุน (SL): {sl_text}")
+        lines.append(f"🛡️ จุดตัดขาดทุน (SL): {sl_text}")
+    lines.extend(_format_exit_levels_lines(az_plan))
     bars = az_plan.get("bars_since_signal")
     if isinstance(bars, (int, float)):
         lines.append(f"แท่งนับจากสัญญาณ: {int(bars)}")
-    lines.append("เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append("⏱️ เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     return "\n".join(lines)
 
 
@@ -300,33 +584,47 @@ def _build_cdc_vixfix_message(item, plan):
     if stop_text:
         move_parts.append(f"SL: {stop_text}")
     if move_parts:
-        lines.append(" | ".join(move_parts))
+        lines.append("📍 " + " | ".join(move_parts))
+    lines.extend(_format_exit_levels_lines(plan))
     profit_pct = plan.get("expected_profit_pct")
     if isinstance(profit_pct, (int, float)):
-        lines.append(f"กำไรคาดการณ์: {profit_pct:+.2f}%")
+        lines.append(f"💹 กำไรคาดการณ์: {profit_pct:+.2f}%")
     running_pct = plan.get("running_profit_pct")
     if isinstance(running_pct, (int, float)):
-        lines.append(f"กำไรปัจจุบันจากจุดเข้า: {running_pct:+.2f}%")
+        lines.append(f"📈 กำไรปัจจุบันจากจุดเข้า: {running_pct:+.2f}%")
+    exit_trigger = str(plan.get("exit_trigger") or "").strip().upper()
+    if exit_trigger:
+        trigger_text = exit_trigger
+        if exit_trigger == "VIXFIX_TOP":
+            trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
+        elif exit_trigger == "CDC_RED_REVERSAL":
+            trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
+        lines.append("🚨 ทริกเกอร์จุดออก: " + trigger_text)
     reason = plan.get("reason")
     if isinstance(reason, str) and reason.strip():
-        lines.append("เหตุผล: " + reason.strip())
+        lines.append("🧠 เหตุผล: " + reason.strip())
     conf = _normalize_confidence(plan.get("confidence"))
     if conf is not None:
-        lines.append(f"ความมั่นใจ: {conf:.0f}%")
+        lines.append(f"📊 ความมั่นใจ: {conf:.0f}%")
     last_signal_time = plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append("เวลาสัญญาณล่าสุด: " + last_signal_time)
-    lines.append("เวลาแจ้งเตือน: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+        lines.append("🕒 เวลาสัญญาณล่าสุด: " + last_signal_time)
+    lines.append("⏱️ เวลาแจ้งเตือน: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     return "\n".join(lines)
 
 
 def _notify_telegram_from_results(results):
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
+    exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
     try:
         min_conf = float(min_conf)
     except Exception:
         min_conf = 75.0
+    try:
+        exit_min_conf = float(exit_min_conf)
+    except Exception:
+        exit_min_conf = 60.0
     try:
         max_per_run = int(max_per_run)
     except Exception:
@@ -346,7 +644,8 @@ def _notify_telegram_from_results(results):
         if isinstance(cdc_plan, dict):
             cdc_signal = str(cdc_plan.get("signal") or "").upper()
             cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
-            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= min_conf:
+            required_conf = exit_min_conf if cdc_signal == "EXIT" else min_conf
+            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
                 cdc_key = f"CDCVIX15|{symbol}|{cdc_signal}"
                 if not _TELEGRAM_ALERT_CACHE.get(cdc_key):
                     cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
@@ -2066,6 +2365,16 @@ class EMACross15m:
                 risk_dist = atr_val
                 if risk_dist <= 0:
                     risk_dist = abs(entry_price) * 0.005
+                min_stop_pct = getattr(config, "EMA_CROSS_15M_MIN_STOP_PCT", 0.8)
+                try:
+                    min_stop_pct = float(min_stop_pct)
+                except Exception:
+                    min_stop_pct = 0.8
+                if min_stop_pct < 0:
+                    min_stop_pct = 0.0
+                min_risk_dist = abs(entry_price) * (min_stop_pct / 100.0)
+                if risk_dist < min_risk_dist:
+                    risk_dist = min_risk_dist
                 reward_mult = getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0)
                 try:
                     reward_mult = float(reward_mult)
@@ -2376,13 +2685,23 @@ def _actionzone_15m_alert(symbol):
         stop_loss = None
         if entry_price is not None and atr_val is not None and atr_val > 0:
             stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+            min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 0.8)
             try:
                 stop_mult = float(stop_mult)
             except Exception:
                 stop_mult = 1.5
+            try:
+                min_stop_pct = float(min_stop_pct)
+            except Exception:
+                min_stop_pct = 0.8
             if stop_mult <= 0:
                 stop_mult = 1.0
+            if min_stop_pct < 0:
+                min_stop_pct = 0.0
             risk_dist = atr_val * stop_mult
+            min_risk_dist = abs(entry_price) * (min_stop_pct / 100.0)
+            if risk_dist < min_risk_dist:
+                risk_dist = min_risk_dist
             if filtered_signal == "BUY":
                 stop_loss = entry_price - risk_dist
             elif filtered_signal == "SELL":
@@ -2531,6 +2850,28 @@ def _cdc_vixfix_15m_plan(symbol):
         atr_series = tr.rolling(14).mean()
         if pd.notna(atr_series.iloc[-1]):
             atr = float(atr_series.iloc[-1])
+        min_sl_pct = getattr(config, "CDC_VIXFIX_15M_MIN_STOP_PCT", 1.0)
+        sl_atr_mult = getattr(config, "CDC_VIXFIX_15M_SL_ATR_MULT", 2.0)
+        try:
+            min_sl_pct = float(min_sl_pct)
+        except Exception:
+            min_sl_pct = 1.0
+        try:
+            sl_atr_mult = float(sl_atr_mult)
+        except Exception:
+            sl_atr_mult = 2.0
+        if min_sl_pct < 0:
+            min_sl_pct = 0.0
+        if sl_atr_mult <= 0:
+            sl_atr_mult = 2.0
+        if entry_price is not None:
+            min_stop_price = entry_price - (abs(entry_price) * (min_sl_pct / 100.0))
+            atr_stop_price = None
+            if atr is not None and atr > 0:
+                atr_stop_price = entry_price - (atr * sl_atr_mult)
+            candidate_stops = [x for x in (stop_loss, min_stop_price, atr_stop_price) if isinstance(x, (int, float))]
+            if candidate_stops:
+                stop_loss = float(min(candidate_stops))
         take_profit = None
         if entry_price is not None:
             if stop_loss is not None and entry_price > stop_loss:
@@ -2541,6 +2882,7 @@ def _cdc_vixfix_15m_plan(symbol):
         last_time_str = entry_idx.strftime("%Y-%m-%d %H:%M") if entry_idx is not None else None
         signal = "WAIT"
         reason = "ยังไม่เกิดจังหวะเข้าหรือออกตาม CDC+StochRSI+VixFix"
+        exit_trigger = None
         if entry_recent:
             signal = "BUY"
             reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
@@ -2548,9 +2890,11 @@ def _cdc_vixfix_15m_plan(symbol):
             if bool(is_market_top.iloc[-1]):
                 signal = "EXIT"
                 reason = "VixFix บอกโซนยืดตัวสูง ควรทยอยปิดกำไร"
+                exit_trigger = "VIXFIX_TOP"
             elif bool(red.iloc[-1]):
                 signal = "EXIT"
                 reason = "โครงสร้าง CDC พลิกเป็น Red ควรปิดสถานะ"
+                exit_trigger = "CDC_RED_REVERSAL"
         expected_profit_pct = None
         if entry_price is not None:
             ref_exit = take_profit
@@ -2587,6 +2931,7 @@ def _cdc_vixfix_15m_plan(symbol):
             "last_signal_time": last_time_str,
             "bars_since_entry": bars_since_entry,
             "is_market_top": bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
+            "exit_trigger": exit_trigger,
             "trend_color": "GREEN" if bool(green.iloc[-1]) else "RED" if bool(red.iloc[-1]) else "NEUTRAL",
             "stoch_k": float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None,
             "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
@@ -2968,6 +3313,61 @@ def analyze_single_symbol(symbol, period):
         ema_cross_plan = EMACross15m.analyze(symbol)
         actionzone_plan = _actionzone_15m_alert(symbol)
         cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol)
+        exit_context = {
+            "support": float(support) if pd.notna(support) else None,
+            "resistance": float(resistance) if pd.notna(resistance) else None,
+            "volume_status": vol_status,
+        }
+        short_term_plan = _attach_exit_levels(
+            short_term_plan,
+            signal="BUY",
+            entry_keys=["current_price", "entry_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit_2", "take_profit"],
+            context=exit_context,
+        )
+        sniper_plan = _attach_exit_levels(
+            sniper_plan,
+            entry_keys=["current_price", "entry_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit"],
+            context=exit_context,
+        )
+        quantum_plan = _attach_exit_levels(
+            quantum_plan,
+            entry_keys=["current_price", "entry_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit"],
+            context=exit_context,
+        )
+        ema_cross_plan = _attach_exit_levels(
+            ema_cross_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit"],
+            context=exit_context,
+        )
+        actionzone_plan = _attach_exit_levels(
+            actionzone_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit", "exit_price"],
+            context=exit_context,
+        )
+        cdc_vixfix_plan = _attach_exit_levels(
+            cdc_vixfix_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit", "exit_price"],
+            context=exit_context,
+        )
+        crypto_reversal_plan = _attach_exit_levels(
+            crypto_reversal_plan,
+            entry_keys=["current_price", "entry_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit", "smc_take_profit"],
+            context=exit_context,
+        )
         order_blocks_15m = _order_block_levels_15m(symbol)
         prediction = build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_cross_plan, sovereign_4h_plan, resonance_score, phase_status, crypto_reversal_plan)
         return {

@@ -1,0 +1,1733 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ระบบวิเคราะห์หุ้น</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.10.0/font/bootstrap-icons.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <div class="topbar">
+            <div class="header">
+                <h1><i class="bi bi-graph-up"></i> แดชบอร์ดวิเคราะห์สินทรัพย์</h1>
+                <p>โฟกัสสัญญาณเทรดที่จำเป็นสำหรับตัดสินใจ</p>
+            </div>
+        </div>
+
+        <div class="layout">
+            <div class="sidebar" id="watchlistSection">
+                <div class="search-card mt-0">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <h5 class="mb-0"><i class="bi bi-star"></i> รายการหุ้นที่ติดตาม</h5>
+                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="analyzeWatchlist()">
+                            วิเคราะห์รายการติดตาม
+                        </button>
+                    </div>
+                    <div class="watchlist-add mb-2">
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               id="watchlistAddInput"
+                               placeholder="เพิ่ม Symbol เช่น NVDA"
+                               onkeydown="if(event.key==='Enter'){event.preventDefault(); addFromWatchlistInput();}">
+                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="addFromWatchlistInput()">
+                            <i class="bi bi-plus-lg"></i> เพิ่ม
+                        </button>
+                    </div>
+                    <div class="mb-2">
+                        <input type="text"
+                               class="form-control form-control-sm"
+                               placeholder="ค้นหา Symbol ในรายการติดตาม"
+                               oninput="setWatchlistSearch(this.value)">
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mb-2 gap-2">
+                        <small class="text-muted" id="watchlistCountText"></small>
+                        <div class="d-flex align-items-center gap-2">
+                            <label class="form-label mb-0 small">เรียงตาม</label>
+                            <select class="form-select form-select-sm" onchange="setWatchlistSort(this.value)">
+                                <option value="added" selected>ตามที่เพิ่ม</option>
+                                <option value="az">A → Z</option>
+                                <option value="za">Z → A</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="watchlistItems" class="watchlist-list"></div>
+                </div>
+            </div>
+
+            <div class="main-content" id="analysisSection">
+                <div class="search-card">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h5 class="mb-0"><i class="bi bi-search"></i> ค้นหาและวิเคราะห์หุ้น</h5>
+                        <span class="text-muted small">รองรับหลาย Symbol พร้อมกัน</span>
+                    </div>
+                    <form id="searchForm">
+                        <div class="row g-3 align-items-end">
+                            <div class="col-md-8">
+                                <label for="symbolInput" class="form-label">Symbol สินทรัพย์ (หุ้น/คริปโต/ดัชนี) คั่นด้วย ,</label>
+                                <input type="text" 
+                                       class="form-control" 
+                                       id="symbolInput" 
+                                       placeholder="เช่น AAPL,MSFT,GOOGL"
+                                       required>
+                            </div>
+                            <div class="col-md-4">
+                                <label for="periodSelect" class="form-label">ช่วงเวลา</label>
+                                <select class="form-select" id="periodSelect">
+                                    <option value="15m">15 นาที (Intraday)</option>
+                                    <option value="1h">1 ชั่วโมง (Intraday)</option>
+                                    <option value="1d">1 วัน</option>
+                                    <option value="5d">5 วัน</option>
+                                    <option value="1mo" selected>1 เดือน</option>
+                                    <option value="3mo">3 เดือน</option>
+                                    <option value="6mo">6 เดือน</option>
+                                    <option value="1y">1 ปี</option>
+                                    <option value="ytd">ตั้งแต่ต้นปี</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="d-flex flex-wrap gap-2 mt-3">
+                            <button type="submit" class="btn btn-primary">
+                                <i class="bi bi-play-circle"></i> เริ่มวิเคราะห์
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+                                <i class="bi bi-arrow-counterclockwise"></i> ล้างค่า
+                            </button>
+                            <div class="form-check form-switch ms-auto notify-toggle">
+                                <input class="form-check-input" type="checkbox" role="switch" id="notifyTelegramToggle">
+                                <label class="form-check-label" for="notifyTelegramToggle">ส่งแจ้งเตือน Telegram (เฉพาะสัญญาณสำคัญ)</label>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+
+                <div id="loading" class="loading" style="display: none;">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-3">กำลังวิเคราะห์ข้อมูล...</p>
+                </div>
+
+                <div id="alertContainer"></div>
+
+                <div id="resultsContainer"></div>
+            </div>
+
+            <div class="alert-sidebar" id="alertsSection">
+                <div class="alert-panel">
+                    <div class="alert-panel-header">
+                        <div>
+                            <h5 class="mb-0"><i class="bi bi-bell"></i> สัญญาณน่าสนใจล่าสุด</h5>
+                            <small class="text-muted">จาก Quantum Hunter, Sniper, Sovereign สำหรับหุ้นที่ติดตาม</small>
+                        </div>
+                        <span class="badge bg-warning text-dark" id="alertCountBadge" style="display:none;"></span>
+                    </div>
+                    <div id="watchlistAlerts" class="alert-list"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let chartInstances = {};
+        let watchlist = [];
+        let watchlistAutoTimer = null;
+        let watchlistRequestInFlight = false;
+        let currentAnalyzeController = null;
+        let currentWatchlistController = null;
+        let watchlistSearchText = '';
+        let watchlistSortMode = 'added';
+        let latestResultsMap = {};
+        let buyPriceStore = {};
+
+        function formatNumber(value, maxDecimals) {
+            if (typeof value !== 'number' || isNaN(value)) return 'N/A';
+            return parseFloat(value.toFixed(maxDecimals)).toString();
+        }
+
+        function getSymbolKey(symbol) {
+            if (!symbol) return '';
+            return symbol.toString().trim().toUpperCase();
+        }
+
+        function getSymbolDomId(symbol) {
+            const key = getSymbolKey(symbol);
+            return key.replace(/[^A-Z0-9]/g, '_');
+        }
+
+        function loadBuyPriceStore() {
+            const raw = localStorage.getItem('buyPriceStore');
+            if (!raw) return;
+            try {
+                const parsed = JSON.parse(raw);
+                if (parsed && typeof parsed === 'object') {
+                    buyPriceStore = parsed;
+                }
+            } catch (e) {
+                buyPriceStore = {};
+            }
+        }
+
+        function saveBuyPriceStore() {
+            try {
+                localStorage.setItem('buyPriceStore', JSON.stringify(buyPriceStore));
+            } catch (e) {
+            }
+        }
+
+        document.getElementById('searchForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            analyzeSymbols();
+        });
+
+        function loadWatchlist() {
+            const stored = localStorage.getItem('watchlistSymbols');
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    if (Array.isArray(parsed)) {
+                        watchlist = parsed;
+                    }
+                } catch (e) {
+                    watchlist = [];
+                }
+            }
+            renderWatchlist();
+            startWatchlistAutoAnalyze();
+        }
+
+        function saveWatchlist() {
+            localStorage.setItem('watchlistSymbols', JSON.stringify(watchlist));
+        }
+
+        function renderWatchlist() {
+            const container = document.getElementById('watchlistItems');
+            if (!container) return;
+            const countEl = document.getElementById('watchlistCountText');
+            const total = watchlist.length;
+            const setCount = (visible, max) => {
+                if (!countEl) return;
+                if (!max) {
+                    countEl.textContent = '0 รายการ';
+                    return;
+                }
+                if (visible === max) {
+                    countEl.textContent = max + ' รายการ';
+                    return;
+                }
+                countEl.textContent = visible + '/' + max + ' รายการ';
+            };
+            if (!watchlist.length) {
+                container.innerHTML = '<span class="text-muted">ยังไม่มีหุ้นที่ติดตาม</span>';
+                setCount(0, 0);
+                return;
+            }
+            let items = watchlist.slice();
+            if (watchlistSearchText) {
+                const term = watchlistSearchText;
+                items = items.filter(sym => sym.toUpperCase().includes(term));
+            }
+            if (!items.length) {
+                container.innerHTML = '<span class="text-muted">ไม่พบหุ้นที่ตรงกับการค้นหา</span>';
+                setCount(0, total);
+                return;
+            }
+            if (watchlistSortMode === 'az') {
+                items = items.slice().sort((a, b) => a.localeCompare(b));
+            } else if (watchlistSortMode === 'za') {
+                items = items.slice().sort((a, b) => b.localeCompare(a));
+            }
+            setCount(items.length, total);
+            container.innerHTML = items.map(sym => `
+                <div class="watchlist-item" onclick="viewWatchlistSymbol('${sym}')">
+                    <span class="watchlist-symbol">${sym}</span>
+                    <button type="button" class="watchlist-remove-btn" onclick="event.stopPropagation(); removeFromWatchlist('${sym}')">
+                        <i class="bi bi-x-circle"></i>
+                    </button>
+                </div>
+            `).join('');
+        }
+
+        function viewWatchlistSymbol(symbol) {
+            if (!symbol) return;
+            document.getElementById('symbolInput').value = symbol;
+            analyzeSymbols();
+        }
+
+        function addToWatchlist(symbol) {
+            if (!symbol) return;
+            const s = symbol.trim().toUpperCase();
+            if (!s || watchlist.includes(s)) return;
+            if (watchlist.length >= 30) {
+                showAlert('ไม่สามารถเพิ่มเกิน 30 ตัวในรายการติดตาม', 'warning');
+                return;
+            }
+            watchlist.push(s);
+            saveWatchlist();
+            renderWatchlist();
+            showAlert('เพิ่ม ' + s + ' ในรายการติดตามแล้ว', 'success');
+        }
+
+        function addFromWatchlistInput() {
+            const input = document.getElementById('watchlistAddInput');
+            if (!input) return;
+            const raw = (input.value || '').trim();
+            if (!raw) return;
+            addToWatchlist(raw);
+            input.value = '';
+        }
+
+        function setWatchlistSearch(text) {
+            watchlistSearchText = (text || '').trim().toUpperCase();
+            renderWatchlist();
+        }
+
+        function setWatchlistSort(mode) {
+            watchlistSortMode = mode || 'added';
+            renderWatchlist();
+        }
+
+        function removeFromWatchlist(symbol) {
+            const s = symbol.trim().toUpperCase();
+            watchlist = watchlist.filter(x => x !== s);
+            saveWatchlist();
+            renderWatchlist();
+        }
+
+        async function analyzeWatchlist() {
+            if (!watchlist.length) {
+                showAlert('ยังไม่มี Symbol ในรายการติดตาม', 'info');
+                return;
+            }
+            await autoAnalyzeWatchlistForAlerts(true);
+        }
+
+        function startWatchlistAutoAnalyze() {
+            if (watchlistAutoTimer !== null) return;
+            watchlistAutoTimer = setInterval(autoAnalyzeWatchlistForAlerts, 5 * 60 * 1000);
+        }
+
+        async function autoAnalyzeWatchlistForAlerts(showMessage) {
+            if (!watchlist.length) return;
+            if (watchlistRequestInFlight) return;
+            const period = document.getElementById('periodSelect').value;
+            const symbols = watchlist.join(',');
+            if (!symbols) return;
+            try {
+                watchlistRequestInFlight = true;
+                if (currentWatchlistController) {
+                    currentWatchlistController.abort();
+                }
+                currentWatchlistController = new AbortController();
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ symbols: symbols, period: period }),
+                    signal: currentWatchlistController.signal
+                });
+                const data = await response.json();
+                if (data && Array.isArray(data.results)) {
+                    data.results.forEach(r => {
+                        if (!r || r.error || !r.symbol) return;
+                        const key = getSymbolKey(r.symbol);
+                        if (key) {
+                            latestResultsMap[key] = r;
+                        }
+                    });
+                    checkWatchlistAlerts(data.results);
+                    if (showMessage) {
+                        showAlert('อัปเดตข้อมูลแจ้งเตือนจากรายการติดตามเรียบร้อยแล้ว', 'success');
+                    }
+                } else if (showMessage && data && data.error) {
+                    showAlert('ไม่สามารถอัปเดตข้อมูลแจ้งเตือนได้: ' + data.error, 'danger');
+                }
+            } catch (e) {
+                if (showMessage) {
+                    showAlert('เกิดข้อผิดพลาดในการอัปเดตแจ้งเตือน: ' + (e && e.message ? e.message : e), 'danger');
+                }
+            } finally {
+                watchlistRequestInFlight = false;
+            }
+        }
+
+        async function analyzeSymbols() {
+            const symbols = document.getElementById('symbolInput').value.trim();
+            const period = document.getElementById('periodSelect').value;
+            const notifyToggle = document.getElementById('notifyTelegramToggle');
+            const notifyTelegram = !!(notifyToggle && notifyToggle.checked);
+
+            if (!symbols) {
+                showAlert('กรุณากรอก Symbol อย่างน้อยหนึ่งตัว', 'warning');
+                return;
+            }
+
+            showLoading(true);
+            clearResults();
+
+            try {
+                if (currentAnalyzeController) {
+                    currentAnalyzeController.abort();
+                }
+                currentAnalyzeController = new AbortController();
+                const response = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ symbols: symbols, period: period, notify_telegram: notifyTelegram }),
+                    signal: currentAnalyzeController.signal
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    showAlert(data.error, 'danger');
+                    return;
+                }
+
+                displayResults(data.results);
+
+            } catch (error) {
+                console.error('Error:', error);
+                showAlert('เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + error.message, 'danger');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        function displayResults(results) {
+            const resultsContainer = document.getElementById('resultsContainer');
+            resultsContainer.innerHTML = ''; // Clear previous results
+
+            if (results.length === 0) {
+                showAlert('ไม่พบข้อมูลสำหรับ Symbol ที่ระบุ', 'info');
+                return;
+            }
+
+            latestResultsMap = {};
+
+            results.forEach(result => {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+
+                if (result.error) {
+                    card.innerHTML = `
+                        <div class="alert alert-danger" role="alert">
+                            <strong>${result.symbol}:</strong> ${result.error}
+                        </div>
+                    `;
+                    resultsContainer.appendChild(card);
+                    return;
+                }
+
+                const symbolKey = getSymbolKey(result.symbol);
+                const symbolDomId = getSymbolDomId(result.symbol);
+                if (symbolKey) {
+                    latestResultsMap[symbolKey] = result;
+                }
+                const storedBuyPrice = symbolKey && buyPriceStore[symbolKey] ? buyPriceStore[symbolKey] : '';
+
+                const resonanceScore = (typeof result.resonance_score === 'number') ? formatNumber(result.resonance_score, 3) : 'N/A';
+                const price = (typeof result.price === 'number') ? formatNumber(result.price, 5) : 'N/A';
+                const change = (typeof result.change === 'number') ? formatNumber(result.change, 3) : 'N/A';
+                const prediction = result.prediction || null;
+                let predictionHtml = '';
+                if (prediction) {
+                    const dir = prediction.direction || 'NEUTRAL';
+                    const prob = (typeof prediction.probability === 'number') ? formatNumber(prediction.probability, 1) + '%' : 'N/A';
+                    const move = (typeof prediction.expected_move_pct === 'number') ? formatNumber(prediction.expected_move_pct, 1) + '%' : 'N/A';
+                    let holdingText = 'N/A';
+                    if (typeof prediction.expected_holding_hours === 'number') {
+                        holdingText = formatNumber(prediction.expected_holding_hours, 1) + ' ชม.';
+                    }
+                    const shortSignal = prediction.short_term_signal || '';
+                    let dirText = 'กลาง/Sideway';
+                    let dirBadgeClass = 'bg-secondary';
+                    if (dir === 'UP') {
+                        dirText = 'ขาขึ้น';
+                        dirBadgeClass = 'bg-success';
+                    } else if (dir === 'DOWN') {
+                        dirText = 'ขาลง';
+                        dirBadgeClass = 'bg-danger';
+                    }
+                    predictionHtml = `
+                        <div class="mt-3">
+                            <h5>สรุปการคาดการณ์จากทุกกลยุทธ์</h5>
+                            <div class="mb-2">
+                                <span class="badge ${dirBadgeClass}">แนวโน้มหลัก: ${dirText}</span>
+                                <span class="badge bg-info text-dark ms-2">ความน่าจะเป็น: ${prob}</span>
+                                ${shortSignal ? `<span class="badge bg-warning text-dark ms-2">สัญญาณ EMA: ${shortSignal}</span>` : ''}
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">คาดว่าราคาเคลื่อนที่ได้ประมาณ</div>
+                                    <div class="result-value">${move}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">กรอบเวลาถือคร่าว ๆ</div>
+                                    <div class="result-value">${holdingText}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+                const actionZone = result.actionzone_15m || null;
+                const cdcVixFix = result.cdc_vixfix_15m || null;
+                const emaCross = result.ema_cross_15m || null;
+                const shortTerm = result.short_term_15m || null;
+                const sovereign = result.sovereign_4h || null;
+                let tradeSource = 'ทั่วไป';
+                let tradeSignal = result.signal || 'Hold';
+                let tradeConfidence = null;
+                let tradeStop = null;
+                let tradeTarget = null;
+                if (cdcVixFix && cdcVixFix.signal && cdcVixFix.signal !== 'WAIT') {
+                    tradeSource = 'CDC+VixFix 15m';
+                    tradeSignal = cdcVixFix.signal;
+                    if (typeof cdcVixFix.confidence === 'number') {
+                        tradeConfidence = cdcVixFix.confidence;
+                    }
+                    if (typeof cdcVixFix.stop_loss === 'number') {
+                        tradeStop = cdcVixFix.stop_loss;
+                    }
+                    if (typeof cdcVixFix.take_profit === 'number') {
+                        tradeTarget = cdcVixFix.take_profit;
+                    } else if (typeof cdcVixFix.exit_price === 'number') {
+                        tradeTarget = cdcVixFix.exit_price;
+                    }
+                }
+                if (tradeSource === 'ทั่วไป' && actionZone && actionZone.signal && actionZone.signal !== 'WAIT') {
+                    tradeSource = 'ActionZone 15m';
+                    tradeSignal = actionZone.signal;
+                    if (typeof actionZone.win_prob === 'number') {
+                        tradeConfidence = actionZone.win_prob;
+                    } else if (typeof actionZone.confidence === 'number') {
+                        tradeConfidence = actionZone.confidence;
+                    }
+                    if (typeof actionZone.stop_loss === 'number') {
+                        tradeStop = actionZone.stop_loss;
+                    }
+                }
+                if (tradeSource === 'ทั่วไป' && emaCross && emaCross.signal && emaCross.signal !== 'WAIT') {
+                    tradeSource = 'EMA Cross 15m';
+                    tradeSignal = emaCross.signal;
+                    if (typeof emaCross.predicted_win_prob === 'number') {
+                        tradeConfidence = emaCross.predicted_win_prob;
+                    } else if (typeof emaCross.confidence === 'number') {
+                        tradeConfidence = emaCross.confidence;
+                    }
+                    if (typeof emaCross.stop_loss === 'number') {
+                        tradeStop = emaCross.stop_loss;
+                    }
+                    if (typeof emaCross.take_profit === 'number') {
+                        tradeTarget = emaCross.take_profit;
+                    }
+                }
+                if (tradeSource === 'ทั่วไป' && shortTerm && shortTerm.setup && shortTerm.setup.indexOf('WAIT') === -1) {
+                    tradeSource = 'Short Term 15m';
+                    tradeSignal = shortTerm.setup;
+                    if (typeof shortTerm.predicted_win_prob === 'number') {
+                        tradeConfidence = shortTerm.predicted_win_prob;
+                    } else if (typeof shortTerm.confidence === 'number') {
+                        tradeConfidence = shortTerm.confidence;
+                    }
+                    if (typeof shortTerm.stop_loss === 'number') {
+                        tradeStop = shortTerm.stop_loss;
+                    }
+                    if (typeof shortTerm.take_profit === 'number') {
+                        tradeTarget = shortTerm.take_profit;
+                    }
+                }
+                if (tradeSource === 'ทั่วไป' && sovereign && sovereign.recommendation) {
+                    tradeSource = 'Sovereign 4H';
+                    tradeSignal = sovereign.recommendation;
+                    if (typeof sovereign.entry_stop_loss === 'number') {
+                        tradeStop = sovereign.entry_stop_loss;
+                    }
+                    if (typeof sovereign.trailing_stop === 'number') {
+                        tradeTarget = sovereign.trailing_stop;
+                    }
+                }
+                if (tradeTarget === null && shortTerm && typeof shortTerm.take_profit === 'number') {
+                    tradeTarget = shortTerm.take_profit;
+                }
+                if (tradeStop === null && shortTerm && typeof shortTerm.stop_loss === 'number') {
+                    tradeStop = shortTerm.stop_loss;
+                }
+                const essentialConfidenceText = typeof tradeConfidence === 'number' ? formatNumber(tradeConfidence, 1) + '%' : 'N/A';
+                const essentialStopText = typeof tradeStop === 'number' ? formatNumber(tradeStop, 5) : 'N/A';
+                const essentialTargetText = typeof tradeTarget === 'number' ? formatNumber(tradeTarget, 5) : 'N/A';
+                const essentialsHtml = `
+                    <div class="mt-3">
+                        <h5>แผนเทรดที่จำเป็น</h5>
+                        <div class="result-grid">
+                            <div class="result-item">
+                                <div class="result-label">สัญญาณหลัก</div>
+                                <div class="result-value">${tradeSignal}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-label">แหล่งสัญญาณ</div>
+                                <div class="result-value">${tradeSource}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-label">ความมั่นใจ</div>
+                                <div class="result-value">${essentialConfidenceText}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-label">Stop Loss</div>
+                                <div class="result-value">${essentialStopText}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-label">เป้าทำกำไร</div>
+                                <div class="result-value">${essentialTargetText}</div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                let shortTermHtml = '';
+                if (result.short_term_15m) {
+                    const st = result.short_term_15m;
+                    const stPrice = (typeof st.current_price === 'number') ? formatNumber(st.current_price, 5) : 'N/A';
+                    const stDir = st.direction_15m || '-';
+                    const stEntryType = st.entry_type || '-';
+                    const stEma = (typeof st.ema50 === 'number') ? formatNumber(st.ema50, 5) : 'N/A';
+                    const stEma20 = (typeof st.ema20 === 'number') ? formatNumber(st.ema20, 5) : 'N/A';
+                    const stEma200 = (typeof st.ema200 === 'number') ? formatNumber(st.ema200, 5) : 'N/A';
+                    const stRsi = (typeof st.rsi === 'number') ? formatNumber(st.rsi, 3) : 'N/A';
+                    const stAdx = (typeof st.adx === 'number') ? formatNumber(st.adx, 2) : 'N/A';
+                    const stAtr = (typeof st.atr === 'number') ? formatNumber(st.atr, 5) : 'N/A';
+                    const stSl = (typeof st.stop_loss === 'number') ? formatNumber(st.stop_loss, 5) : 'N/A';
+                    const stTp = (typeof st.take_profit === 'number') ? formatNumber(st.take_profit, 5) : 'N/A';
+                    const stTp2 = (typeof st.take_profit_2 === 'number') ? formatNumber(st.take_profit_2, 5) : 'N/A';
+                    const stWinProb = (typeof st.predicted_win_prob === 'number') ? formatNumber(st.predicted_win_prob, 1) + '%' : 'N/A';
+                    const stConf = typeof st.confidence === 'number' ? st.confidence + '%' : (st.confidence || 'N/A');
+                    const stRR = st.risk_reward || 'N/A';
+                    const stTrend = st.trend_1h || 'N/A';
+                    const stTrendStrength = st.trend_strength_1h || '';
+                    const stRvol = (typeof st.rvol === 'number' && !isNaN(st.rvol)) ? formatNumber(st.rvol, 3) + 'x' : (st.rvol || 'N/A');
+                    let stZone = 'N/A';
+                    if (typeof st.entry_zone_low === 'number' && typeof st.entry_zone_high === 'number') {
+                        stZone = formatNumber(st.entry_zone_low, 5) + ' ~ ' + formatNumber(st.entry_zone_high, 5);
+                    }
+                    const stDataUsed = Array.isArray(st.required_data) ? st.required_data.join(' • ') : '';
+
+                    let fiboHtml = '';
+                    if (st.fibo_levels) {
+                        const entries = Object.entries(st.fibo_levels);
+                        fiboHtml = entries.map(([level, value]) => {
+                            const v = (typeof value === 'number') ? formatNumber(value, 5) : value;
+                            return `<div>${level}: ${v}</div>`;
+                        }).join('');
+                    }
+
+                    shortTermHtml = `
+                        <div class="mt-3">
+                            <h5>แผนเทรดระยะสั้น 15 นาที (${st.setup || 'WAIT'})</h5>
+                            <div class="mb-2">
+                                <span class="badge bg-info text-dark">ความมั่นใจ: ${stConf}</span>
+                                <span class="badge bg-secondary ms-2">Risk/Reward: ${stRR}</span>
+                                <span class="badge bg-info text-dark ms-2">Win Prob (จากข้อมูล): ${stWinProb}</span>
+                                <span class="badge ${stDir === 'UP' ? 'bg-success' : (stDir === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">ทิศทาง 15m: ${stDir}</span>
+                                <span class="badge bg-dark ms-2">Trend 1H: ${stTrend}${stTrendStrength ? ' (' + stTrendStrength + ')' : ''}</span>
+                                <span class="badge bg-warning text-dark ms-2">RVOL: ${stRvol}</span>
+                                <span class="badge bg-secondary ms-2">Entry Type: ${stEntryType}</span>
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
+                                    <div class="result-value">${stPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA20 (15m)</div>
+                                    <div class="result-value">${stEma20}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA50 (15m)</div>
+                                    <div class="result-value">${stEma}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA200 (15m)</div>
+                                    <div class="result-value">${stEma200}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">RSI (15m)</div>
+                                    <div class="result-value">${stRsi}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">ADX (15m)</div>
+                                    <div class="result-value">${stAdx}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">ATR (15m)</div>
+                                    <div class="result-value">${stAtr}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss</div>
+                                    <div class="result-value">${stSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit (TP1)</div>
+                                    <div class="result-value">${stTp}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit (TP2)</div>
+                                    <div class="result-value">${stTp2}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">โซนเข้า (Entry Zone)</div>
+                                    <div class="result-value">${stZone}</div>
+                                </div>
+                            </div>
+                            <div class="mt-2"><strong>เหตุผลสัญญาณระยะสั้น:</strong> ${st.reason || '-'}</div>
+                            ${stDataUsed ? `<div class="mt-2 small text-muted">ข้อมูลที่ใช้: ${stDataUsed}</div>` : ''}
+                            ${fiboHtml ? `<div class="mt-2"><strong>Fibonacci 15m:</strong>${fiboHtml}</div>` : ''}
+                        </div>
+                    `;
+                }
+
+                let emaCrossHtml = '';
+                if (result.ema_cross_15m) {
+                    const ec = result.ema_cross_15m;
+                    const ecSignal = ec.signal || 'WAIT';
+                    const ecZone = ec.zone || '-';
+                    const ecTrend = ec.trend || (ecZone === 'GREEN' ? 'UP' : (ecZone === 'RED' ? 'DOWN' : '-'));
+                    const ecPrice = (typeof ec.current_price === 'number') ? formatNumber(ec.current_price, 5) : 'N/A';
+                    const ecEmaFast = (typeof ec.ema_fast === 'number') ? formatNumber(ec.ema_fast, 5) : 'N/A';
+                    const ecEmaSlow = (typeof ec.ema_slow === 'number') ? formatNumber(ec.ema_slow, 5) : 'N/A';
+                    const ecFastLen = (typeof ec.ema_fast_length === 'number') ? ec.ema_fast_length : 12;
+                    const ecSlowLen = (typeof ec.ema_slow_length === 'number') ? ec.ema_slow_length : 26;
+                    const ecSl = (typeof ec.stop_loss === 'number') ? formatNumber(ec.stop_loss, 5) : 'N/A';
+                    const ecTp = (typeof ec.take_profit === 'number') ? formatNumber(ec.take_profit, 5) : 'N/A';
+                    const ecRr = (typeof ec.risk_reward === 'number') ? '1:' + formatNumber(ec.risk_reward, 1) : 'N/A';
+                    const ecConf = typeof ec.predicted_win_prob === 'number'
+                        ? formatNumber(ec.predicted_win_prob, 1) + '%'
+                        : (typeof ec.confidence === 'number' ? formatNumber(ec.confidence, 1) + '%' : 'N/A');
+                    const ecBars = typeof ec.expected_holding_bars_15m === 'number' ? ec.expected_holding_bars_15m : null;
+                    const ecMovePct = (typeof ec.expected_move_pct === 'number') ? formatNumber(ec.expected_move_pct, 1) + '%' : 'N/A';
+                    const ecLastTime = ec.last_cross_time || '-';
+                    const ecBarsSince = typeof ec.bars_since_cross === 'number' ? ec.bars_since_cross : null;
+                    const ecHistTrades = typeof ec.historical_trades === 'number' ? ec.historical_trades : null;
+                    const ecHistWin = typeof ec.historical_win_rate === 'number'
+                        ? formatNumber(ec.historical_win_rate, 1) + '%'
+                        : 'N/A';
+                    const ecHistRr = typeof ec.historical_avg_rr === 'number'
+                        ? '1:' + formatNumber(Math.abs(ec.historical_avg_rr), 2)
+                        : 'N/A';
+                    let ecExpectText = '';
+                    if (ecBars !== null) {
+                        const hours = (ecBars * 15) / 60;
+                        ecExpectText = ecMovePct + ' ~ ' + ecBars + ' แท่ง (' + formatNumber(hours, 1) + ' ชม.)';
+                    }
+                    const zoneLabel = ecZone === 'GREEN' ? ('Zone เขียว (EMA' + ecFastLen + ' อยู่เหนือ EMA' + ecSlowLen + ')') :
+                        ecZone === 'RED' ? ('Zone แดง (EMA' + ecFastLen + ' อยู่ใต้ EMA' + ecSlowLen + ')') : ecZone;
+                    let recentText = '';
+                    if (ecBarsSince !== null) {
+                        recentText = 'เกิดสัญญาณตัดกันมาแล้วประมาณ ' + ecBarsSince + ' แท่ง 15 นาที';
+                    }
+                    emaCrossHtml = `
+                        <div class="mt-3">
+                            <h5>EMA Cross 15 นาที (สัญญาณ: ${ecSignal})</h5>
+                            <div class="mb-2">
+                                <span class="badge ${ecZone === 'GREEN' ? 'bg-success' : (ecZone === 'RED' ? 'bg-danger' : 'bg-secondary')}">โซน: ${zoneLabel}</span>
+                                <span class="badge ${ecTrend === 'UP' ? 'bg-success' : (ecTrend === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">Trend: ${ecTrend}</span>
+                                <span class="badge bg-secondary ms-2">Risk : Reward: ${ecRr}</span>
+                                <span class="badge bg-info text-dark ms-2">โอกาสชนะ (ปรับสูตร): ${ecConf}</span>
+                                <span class="badge bg-dark ms-2">RVOL: ${(typeof ec.rvol === 'number') ? formatNumber(ec.rvol, 2) : 'N/A'}</span>
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
+                                    <div class="result-value">${ecPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA${ecFastLen}</div>
+                                    <div class="result-value">${ecEmaFast}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA${ecSlowLen}</div>
+                                    <div class="result-value">${ecEmaSlow}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss</div>
+                                    <div class="result-value">${ecSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit</div>
+                                    <div class="result-value">${ecTp}</div>
+                                </div>
+                                ${ecHistTrades !== null ? `
+                                <div class="result-item">
+                                    <div class="result-label">ประวัติสัญญาณในกรอบข้อมูลนี้</div>
+                                    <div class="result-value">${ecHistTrades} ครั้ง ชนะ ${ecHistWin} (ค่าเฉลี่ย R:R ${ecHistRr})</div>
+                                </div>` : ''}
+                                ${ecExpectText ? `
+                                <div class="result-item">
+                                    <div class="result-label">คาดว่าราคาเคลื่อนที่ได้ประมาณ</div>
+                                    <div class="result-value">${ecExpectText}</div>
+                                </div>` : ''}
+                            </div>
+                            <div class="mt-2 small text-muted">
+                                จุดเข้าใช้หลักการ EMA${ecFastLen} ตัด EMA${ecSlowLen} (ปรับค่าจากระบบหา EMA ที่ดีที่สุด)
+                                <br>จุดตัดล่าสุด: ${ecLastTime} ${recentText ? '(' + recentText + ')' : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                let actionZoneHtml = '';
+                if (result.actionzone_15m) {
+                    const az = result.actionzone_15m;
+                    const azSignal = az.signal || 'WAIT';
+                    const azZone = az.zone || '-';
+                    const azRaw = az.raw_signal || 'WAIT';
+                    const azTrend = az.trend_1h || '-';
+                    const azTrendStrength = az.trend_strength_1h || '-';
+                    const azAlign = az.trend_alignment;
+                    const azReco = az.recommendation || azSignal || 'WAIT';
+                    const azPrice = (typeof az.current_price === 'number') ? formatNumber(az.current_price, 5) : 'N/A';
+                    const azEmaFast = (typeof az.ema_fast === 'number') ? formatNumber(az.ema_fast, 5) : 'N/A';
+                    const azEmaSlow = (typeof az.ema_slow === 'number') ? formatNumber(az.ema_slow, 5) : 'N/A';
+                    const azFastLen = (typeof az.ema_fast_length === 'number') ? az.ema_fast_length : 12;
+                    const azSlowLen = (typeof az.ema_slow_length === 'number') ? az.ema_slow_length : 26;
+                    const azSmooth = (typeof az.smooth === 'number') ? az.smooth : 1;
+                    const azWin = typeof az.win_prob === 'number' ? formatNumber(az.win_prob, 1) + '%' : (typeof az.confidence === 'number' ? formatNumber(az.confidence, 1) + '%' : 'N/A');
+                    const azBarsSince = typeof az.bars_since_signal === 'number' ? az.bars_since_signal : null;
+                    const azLastTime = az.last_signal_time || '-';
+                    const azGap = (typeof az.ema_gap_pct === 'number') ? formatNumber(az.ema_gap_pct, 2) + '%' : 'N/A';
+                    const azRvol = (typeof az.rvol === 'number') ? formatNumber(az.rvol, 2) : 'N/A';
+                    const azSl = (typeof az.stop_loss === 'number') ? formatNumber(az.stop_loss, 5) : 'N/A';
+                    const azAtr = (typeof az.atr === 'number') ? formatNumber(az.atr, 5) : 'N/A';
+                    const ob = result.order_blocks_15m || {};
+                    const obSupport = (typeof ob.nearest_support === 'number') ? formatNumber(ob.nearest_support, 5) : 'N/A';
+                    const obResistance = (typeof ob.nearest_resistance === 'number') ? formatNumber(ob.nearest_resistance, 5) : 'N/A';
+                    const obSupports = Array.isArray(ob.support_levels) ? ob.support_levels.slice(0, 3).map(v => formatNumber(v, 5)).join(', ') : '';
+                    const obResists = Array.isArray(ob.resistance_levels) ? ob.resistance_levels.slice(0, 3).map(v => formatNumber(v, 5)).join(', ') : '';
+                    let azRecent = '';
+                    if (azBarsSince !== null) {
+                        azRecent = 'ผ่านไป ' + azBarsSince + ' แท่ง 15 นาที';
+                    }
+                    actionZoneHtml = `
+                        <div class="mt-3">
+                            <h5>ActionZone 15 นาที (สัญญาณ: ${azSignal})</h5>
+                            <div class="mb-2">
+                                <span class="badge ${azZone === 'GREEN' ? 'bg-success' : (azZone === 'RED' ? 'bg-danger' : 'bg-secondary')}">โซน: ${azZone}</span>
+                                <span class="badge ${azTrend === 'UP' ? 'bg-success' : (azTrend === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">Trend 1H: ${azTrend}</span>
+                                <span class="badge ${azAlign ? 'bg-success' : 'bg-warning text-dark'} ms-2">Trend Alignment: ${azAlign ? 'OK' : 'Mismatch'}</span>
+                                <span class="badge bg-info text-dark ms-2">โอกาสชนะ: ${azWin}</span>
+                                <span class="badge bg-dark ms-2">RVOL: ${azRvol}</span>
+                                <span class="badge ${azReco.indexOf('BUY') !== -1 ? 'bg-success' : (azReco.indexOf('SELL') !== -1 ? 'bg-danger' : 'bg-secondary')} ms-2">คำแนะนำ: ${azReco}</span>
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
+                                    <div class="result-value">${azPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA${azFastLen} (Smooth ${azSmooth})</div>
+                                    <div class="result-value">${azEmaFast}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA${azSlowLen}</div>
+                                    <div class="result-value">${azEmaSlow}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">EMA Gap</div>
+                                    <div class="result-value">${azGap}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">แนวรับ Order Block ใกล้สุด</div>
+                                    <div class="result-value">${obSupport}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">แนวต้าน Order Block ใกล้สุด</div>
+                                    <div class="result-value">${obResistance}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss แนะนำ</div>
+                                    <div class="result-value">${azSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">ATR (15m)</div>
+                                    <div class="result-value">${azAtr}</div>
+                                </div>
+                            </div>
+                            <div class="mt-2 small text-muted">
+                                สัญญาณดิบ: ${azRaw} • จุดตัดล่าสุด: ${azLastTime} ${azRecent ? '(' + azRecent + ')' : ''} • Trend Strength 1H: ${azTrendStrength}
+                                ${obSupports ? '<br>แนวรับล่าสุด: ' + obSupports : ''}
+                                ${obResists ? '<br>แนวต้านล่าสุด: ' + obResists : ''}
+                            </div>
+                        </div>
+                    `;
+                }
+
+                let sniperHtml = '';
+                if (result.sniper_15m) {
+                    const sn = result.sniper_15m;
+                    const snPrice = (typeof sn.current_price === 'number') ? formatNumber(sn.current_price, 5) : 'N/A';
+                    const snSl = (typeof sn.stop_loss === 'number') ? formatNumber(sn.stop_loss, 5) : 'N/A';
+                    const snTp = (typeof sn.take_profit === 'number') ? formatNumber(sn.take_profit, 5) : 'N/A';
+                    const snConf = typeof sn.confidence === 'number' ? sn.confidence + '%' : (sn.confidence || 'N/A');
+                    const snRR = sn.risk_reward || 'N/A';
+                    const snReason = sn.reason || '-';
+
+                    sniperHtml = `
+                        <div class="mt-3">
+                            <h5>โหมด Sniper 15 นาที (${sn.setup || 'WAIT / DO NOTHING'})</h5>
+                            <div class="mb-2">
+                                <span class="badge bg-danger">ความมั่นใจ (Sniper): ${snConf}</span>
+                                <span class="badge bg-secondary ms-2">Risk/Reward: ${snRR}</span>
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคาเข้า (Sniper)</div>
+                                    <div class="result-value">${snPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss (Sniper)</div>
+                                    <div class="result-value">${snSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit (Sniper)</div>
+                                    <div class="result-value">${snTp}</div>
+                                </div>
+                            </div>
+                            <div class="mt-2"><strong>เหตุผลโหมด Sniper:</strong> ${snReason}</div>
+                        </div>
+                    `;
+                }
+
+                let quantumHtml = '';
+                if (result.quantum_15m) {
+                    const q = result.quantum_15m;
+                    const qPrice = (typeof q.current_price === 'number') ? formatNumber(q.current_price, 5) : 'N/A';
+                    const qSl = (typeof q.stop_loss === 'number') ? formatNumber(q.stop_loss, 5) : 'N/A';
+                    const qTp = (typeof q.take_profit === 'number') ? formatNumber(q.take_profit, 5) : 'N/A';
+                    const qConf = typeof q.confidence === 'number' ? q.confidence + '%' : (q.confidence || 'N/A');
+                    const qAdx = (typeof q.adx === 'number') ? formatNumber(q.adx, 3) : (q.adx || 'N/A');
+                    const qVolZ = (typeof q.vol_z_score === 'number') ? formatNumber(q.vol_z_score, 3) : (q.vol_z_score || 'N/A');
+                    const qReason = q.reason || '-';
+
+                    quantumHtml = `
+                        <div class="mt-3">
+                            <h5>Quantum Hunter 15 นาที (${q.setup || 'WAIT'})</h5>
+                            <div class="mb-2">
+                                <span class="badge bg-primary">ความมั่นใจ (Quantum): ${qConf}</span>
+                                <span class="badge bg-secondary ms-2">ADX: ${qAdx}</span>
+                                <span class="badge bg-warning text-dark ms-2">Vol Z-Score: ${qVolZ}</span>
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคาเข้า (Quantum)</div>
+                                    <div class="result-value">${qPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss (Quantum)</div>
+                                    <div class="result-value">${qSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit (Quantum)</div>
+                                    <div class="result-value">${qTp}</div>
+                                </div>
+                            </div>
+                            <div class="mt-2"><strong>เหตุผลโหมด Quantum:</strong> ${qReason}</div>
+                        </div>
+                    `;
+                }
+
+                let cryptoReversalHtml = '';
+                if (result.crypto_reversal_15m) {
+                    const cr = result.crypto_reversal_15m;
+                    const crPrice = (typeof cr.current_price === 'number') ? formatNumber(cr.current_price, 5) : 'N/A';
+                    const crRsi = (typeof cr.rsi === 'number') ? formatNumber(cr.rsi, 3) : 'N/A';
+                    const crAtr = (typeof cr.atr === 'number') ? formatNumber(cr.atr, 5) : 'N/A';
+                    const crSl = (typeof cr.stop_loss === 'number') ? formatNumber(cr.stop_loss, 5) : 'N/A';
+                    const crTp = (typeof cr.take_profit === 'number') ? formatNumber(cr.take_profit, 5) : 'N/A';
+                    const crConf = typeof cr.confidence === 'number' ? cr.confidence + '%' : (cr.confidence || 'N/A');
+                    const crSetup = cr.setup || 'WAIT';
+                    const crPattern = cr.pattern || '-';
+                    const crReason = cr.reason || '-';
+                    let crRrText = 'N/A';
+                    if (typeof cr.risk_reward === 'number' && cr.risk_reward > 0) {
+                        crRrText = '1:' + formatNumber(cr.risk_reward, 2);
+                    }
+                    let crWinProbText = '';
+                    if (typeof cr.win_prob === 'number') {
+                        crWinProbText = formatNumber(cr.win_prob, 1) + '%';
+                    }
+                    let crExpectText = '';
+                    if (typeof cr.expected_move_pct === 'number') {
+                        const move = formatNumber(cr.expected_move_pct, 1);
+                        const bars = typeof cr.expected_holding_bars_15m === 'number' ? cr.expected_holding_bars_15m : null;
+                        if (bars !== null) {
+                            const hours = (bars * 15) / 60;
+                            crExpectText = move + '% ~ ' + bars + ' แท่ง (' + formatNumber(hours, 1) + ' ชม.)';
+                        } else {
+                            crExpectText = move + '%';
+                        }
+                    }
+                    let smcHtml = '';
+                    if (cr.smc_setup && cr.smc_setup !== 'NONE') {
+                        const smcEntry = (typeof cr.smc_entry === 'number') ? formatNumber(cr.smc_entry, 5) : 'N/A';
+                        const smcSl = (typeof cr.smc_stop_loss === 'number') ? formatNumber(cr.smc_stop_loss, 5) : 'N/A';
+                        const smcTp = (typeof cr.smc_take_profit === 'number') ? formatNumber(cr.smc_take_profit, 5) : 'N/A';
+                        const smcRr = (typeof cr.smc_rr === 'number') ? '1:' + formatNumber(cr.smc_rr, 2) : 'N/A';
+                        smcHtml = `
+                            <div class="mt-2">
+                                <h6>SMC Liquidity Sweep Entry (${cr.smc_setup})</h6>
+                                <div class="result-grid">
+                                    <div class="result-item">
+                                        <div class="result-label">จุดเข้า (SMC)</div>
+                                        <div class="result-value">${smcEntry}</div>
+                                    </div>
+                                    <div class="result-item">
+                                        <div class="result-label">Stop Loss (SMC)</div>
+                                        <div class="result-value">${smcSl}</div>
+                                    </div>
+                                    <div class="result-item">
+                                        <div class="result-label">Take Profit (SMC)</div>
+                                        <div class="result-value">${smcTp}</div>
+                                    </div>
+                                    <div class="result-item">
+                                        <div class="result-label">Risk : Reward (SMC)</div>
+                                        <div class="result-value">${smcRr}</div>
+                                    </div>
+                                </div>
+                            </div>
+                        `;
+                    }
+
+                    cryptoReversalHtml = `
+                        <div class="mt-3">
+                            <h5>Crypto Reversal 15 นาที (${crSetup})</h5>
+                            <div class="mb-2">
+                                <span class="badge bg-success">ความมั่นใจ (Reversal): ${crConf}</span>
+                                <span class="badge bg-secondary ms-2">รูปแบบ: ${crPattern}</span>
+                                <span class="badge bg-dark ms-2">Risk : Reward (Reversal): ${crRrText}</span>
+                                ${crWinProbText ? `<span class="badge bg-info text-dark ms-2">Win Prob: ${crWinProbText}</span>` : ''}
+                            </div>
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
+                                    <div class="result-value">${crPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">RSI (15m)</div>
+                                    <div class="result-value">${crRsi}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">ATR (15m)</div>
+                                    <div class="result-value">${crAtr}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss</div>
+                                    <div class="result-value">${crSl}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Take Profit</div>
+                                    <div class="result-value">${crTp}</div>
+                                </div>
+                                ${crExpectText ? `
+                                <div class="result-item">
+                                    <div class="result-label">คาดว่าไปได้ประมาณ</div>
+                                    <div class="result-value">${crExpectText}</div>
+                                </div>` : ''}
+                            </div>
+                            <div class="mt-2"><strong>เหตุผลสัญญาณ Crypto Reversal:</strong> ${crReason}</div>
+                            ${smcHtml}
+                        </div>
+                    `;
+                }
+
+                let sovereignHtml = '';
+                if (result.sovereign_4h) {
+                    const s = result.sovereign_4h;
+                    const sPrice = (typeof s.current_price === 'number') ? formatNumber(s.current_price, 5) : 'N/A';
+                    const sTrail = (typeof s.trailing_stop === 'number') ? formatNumber(s.trailing_stop, 5) : 'N/A';
+                    const sEntrySl = (typeof s.entry_stop_loss === 'number') ? formatNumber(s.entry_stop_loss, 5) : 'N/A';
+                    const sScore = s.score_confidence || 'N/A';
+                    const sPos = s.position_size_suggest || 'N/A';
+                    const sTrend = s.trend_status || 'N/A';
+                    const sReco = s.recommendation || 'N/A';
+                    const sAlert = s.critical_alert || '';
+                    const sReason = s.reason || '-';
+
+                    sovereignHtml = `
+                        <div class="mt-3">
+                            <h5>Quantum Sovereign 4H (${s.timeframe || '4H'})</h5>
+                            <div class="mb-2">
+                                <span class="badge bg-success">คำแนะนำ: ${sReco}</span>
+                                <span class="badge bg-secondary ms-2">Trend: ${sTrend}</span>
+                                <span class="badge bg-dark ms-2">Score: ${sScore}</span>
+                                <span class="badge bg-info text-dark ms-2">ขนาดไม้แนะนำ: ${sPos}</span>
+                            </div>
+                            ${sAlert ? `<div class="alert alert-warning mt-2">${sAlert}</div>` : ''}
+                            <div class="result-grid">
+                                <div class="result-item">
+                                    <div class="result-label">ราคา 4H ปัจจุบัน</div>
+                                    <div class="result-value">${sPrice}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Trailing Stop</div>
+                                    <div class="result-value">${sTrail}</div>
+                                </div>
+                                <div class="result-item">
+                                    <div class="result-label">Stop Loss สำหรับไม้ใหม่</div>
+                                    <div class="result-value">${sEntrySl}</div>
+                                </div>
+                            </div>
+                            <div class="mt-2"><strong>เหตุผลโหมด Sovereign 4H:</strong> ${sReason}</div>
+                        </div>
+                    `;
+                }
+
+                card.innerHTML = `
+                    <div class="result-header d-flex justify-content-between align-items-center">
+                        <div class="d-flex flex-column">
+                            <h2 class="result-title mb-1">${result.name} (${result.symbol})</h2>
+                            <div>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addToWatchlist('${result.symbol}')">
+                                    <i class="bi bi-star"></i> เพิ่มในรายการติดตาม
+                                </button>
+                            </div>
+                        </div>
+                        <span class="badge ${getSignalClass(result.signal)}">${result.signal}</span>
+                    </div>
+                    <div class="result-grid">
+                        <div class="result-item">
+                            <div class="result-label">ราคาปัจจุบัน</div>
+                            <div class="result-value">${price}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">เปลี่ยนแปลง (%)</div>
+                            <div class="result-value">${change}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">Resonance Score</div>
+                            <div class="result-value">${resonanceScore}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">Phase Status</div>
+                            <div class="result-value">${result.phase_status}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">RSI</div>
+                            <div class="result-value">${(typeof result.rsi === 'number') ? formatNumber(result.rsi, 3) : 'N/A'}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">MACD</div>
+                            <div class="result-value">${(typeof result.macd === 'number') ? formatNumber(result.macd, 3) : 'N/A'}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">แนวรับ (Support)</div>
+                            <div class="result-value">${(typeof result.support === 'number') ? formatNumber(result.support, 5) : 'N/A'}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">แนวต้าน (Resistance)</div>
+                            <div class="result-value">${(typeof result.resistance === 'number') ? formatNumber(result.resistance, 5) : 'N/A'}</div>
+                        </div>
+                        <div class="result-item">
+                            <div class="result-label">สถานะวอลุ่ม</div>
+                            <div class="result-value">${result.volume_status}</div>
+                        </div>
+                    </div>
+                    ${predictionHtml}
+                    ${essentialsHtml}
+                    <div class="mt-3">
+                        <label for="buyPrice-${symbolDomId}" class="form-label small">ราคาที่ซื้อ/ถืออยู่ (ต่อหุ้น)</label>
+                        <div class="input-group input-group-sm mb-1">
+                            <input type="number"
+                                   class="form-control"
+                                   id="buyPrice-${symbolDomId}"
+                                   min="0"
+                                   step="0.0001"
+                                   placeholder="กรอกราคาที่ซื้อ"
+                                   value="${storedBuyPrice}">
+                            <button type="button"
+                                    class="btn btn-outline-success"
+                                    onclick="calculateDecision('${symbolKey}')">
+                                คำนวณการตัดสินใจ
+                            </button>
+                        </div>
+                        <div id="decision-${symbolDomId}" class="small mt-1"></div>
+                    </div>
+                    ${actionZoneHtml}
+                    ${shortTermHtml}
+                    ${emaCrossHtml}
+                    ${sniperHtml}
+                    ${quantumHtml}
+                    ${cryptoReversalHtml}
+                    ${sovereignHtml}
+                    <div class="chart-container">
+                        <canvas id="chart-${result.symbol}"></canvas>
+                    </div>
+                `;
+                resultsContainer.appendChild(card);
+
+                renderChart(`chart-${result.symbol}`, result.chart_data);
+            });
+        }
+
+        function calculateDecision(symbol) {
+            const key = getSymbolKey(symbol);
+            if (!key) return;
+            const domId = getSymbolDomId(symbol);
+            const input = document.getElementById('buyPrice-' + domId);
+            const decisionEl = document.getElementById('decision-' + domId);
+            if (!input || !decisionEl) return;
+            const raw = input.value.trim();
+            const buyPrice = parseFloat(raw);
+            if (!raw || isNaN(buyPrice) || buyPrice <= 0) {
+                decisionEl.innerHTML = '<span class="text-danger">กรุณากรอกราคาซื้อที่ถูกต้อง</span>';
+                return;
+            }
+            const result = latestResultsMap[key];
+            if (!result) {
+                decisionEl.innerHTML = '<span class="text-danger">ไม่พบข้อมูลวิเคราะห์ล่าสุด โปรดกดวิเคราะห์สัญลักษณ์นี้ก่อน</span>';
+                return;
+            }
+            buyPriceStore[key] = buyPrice;
+            saveBuyPriceStore();
+            const context = buildDecisionContext(result, buyPrice);
+            const advice = buildDecisionAdvice(context);
+            decisionEl.innerHTML = renderDecisionAdvice(advice);
+        }
+
+        function buildDecisionContext(result, buyPrice) {
+            const s = result.sovereign_4h || null;
+            const st = result.short_term_15m || null;
+            const q = result.quantum_15m || null;
+            const ema = result.ema_cross_15m || null;
+            const pred = result.prediction || null;
+            let currentPrice = null;
+            if (typeof result.price === 'number') {
+                currentPrice = result.price;
+            } else if (s && typeof s.current_price === 'number') {
+                currentPrice = s.current_price;
+            } else if (st && typeof st.current_price === 'number') {
+                currentPrice = st.current_price;
+            }
+            const profitPct = currentPrice && buyPrice ? ((currentPrice - buyPrice) / buyPrice) * 100 : null;
+            let atrPct = null;
+            if (st && typeof st.atr === 'number' && typeof st.current_price === 'number' && st.current_price > 0) {
+                atrPct = (st.atr / st.current_price) * 100;
+            }
+            let rvol = null;
+            if (st && typeof st.rvol === 'number') {
+                rvol = st.rvol;
+            }
+            const adx = q && typeof q.adx === 'number' ? q.adx : null;
+            let emaWinProb = null;
+            let emaExpectedMovePct = null;
+            let emaExpectedBars = null;
+            if (ema) {
+                if (typeof ema.predicted_win_prob === 'number') {
+                    emaWinProb = ema.predicted_win_prob;
+                } else if (typeof ema.confidence === 'number') {
+                    emaWinProb = ema.confidence;
+                }
+                if (typeof ema.expected_move_pct === 'number') {
+                    emaExpectedMovePct = ema.expected_move_pct;
+                }
+                if (typeof ema.expected_holding_bars_15m === 'number') {
+                    emaExpectedBars = ema.expected_holding_bars_15m;
+                }
+            }
+            let predDirection = '';
+            let predProbability = null;
+            if (pred) {
+                if (typeof pred.direction === 'string') {
+                    predDirection = pred.direction;
+                }
+                if (typeof pred.probability === 'number') {
+                    predProbability = pred.probability;
+                }
+            }
+            return {
+                currentPrice: currentPrice,
+                buyPrice: buyPrice,
+                profitPct: profitPct,
+                rsi: typeof result.rsi === 'number' ? result.rsi : null,
+                resonanceScore: typeof result.resonance_score === 'number' ? result.resonance_score : null,
+                signal: result.signal || '',
+                trend: s && s.trend_status ? s.trend_status : (result.phase_status || ''),
+                sovereignReco: s && s.recommendation ? s.recommendation : '',
+                sovereignStop: s && typeof s.entry_stop_loss === 'number' ? s.entry_stop_loss : null,
+                sovereignTrail: s && typeof s.trailing_stop === 'number' ? s.trailing_stop : null,
+                shortStop: st && typeof st.stop_loss === 'number' ? st.stop_loss : null,
+                shortTakeProfit: st && typeof st.take_profit === 'number' ? st.take_profit : null,
+                atrPct: typeof atrPct === 'number' ? atrPct : null,
+                rvol: rvol,
+                adx: adx,
+                emaWinProb: emaWinProb,
+                emaExpectedMovePct: emaExpectedMovePct,
+                emaExpectedBars: emaExpectedBars,
+                predDirection: predDirection,
+                predProbability: predProbability
+            };
+        }
+
+        function classifyRisk(context) {
+            const atrPct = typeof context.atrPct === 'number' ? context.atrPct : null;
+            const rvol = typeof context.rvol === 'number' ? context.rvol : null;
+            const adx = typeof context.adx === 'number' ? context.adx : null;
+            const resonance = typeof context.resonanceScore === 'number' ? context.resonanceScore : null;
+            const trend = (context.trend || '').toUpperCase();
+            if (atrPct !== null || rvol !== null) {
+                if ((atrPct !== null && atrPct >= 5) || (rvol !== null && rvol >= 3)) {
+                    return 'HIGH';
+                }
+                if ((atrPct !== null && atrPct <= 2.5) && (rvol === null || rvol <= 1.5)) {
+                    return 'LOW';
+                }
+            }
+            if (adx !== null) {
+                if (adx >= 45) return 'HIGH';
+                if (adx <= 20 && atrPct !== null && atrPct <= 2) return 'LOW';
+            }
+            if (resonance !== null) {
+                if (resonance >= 60 && trend.indexOf('BULL') !== -1) return 'LOW';
+                if (resonance <= -60 && trend.indexOf('BEAR') !== -1) return 'HIGH';
+            }
+            return 'MEDIUM';
+        }
+
+        function buildDecisionAdvice(context) {
+            const advice = {
+                stance: '',
+                summary: '',
+                profitPct: context.profitPct,
+                stopLoss: null,
+                takeProfit: null,
+                notes: [],
+                risk: 'MEDIUM'
+            };
+            const profit = typeof context.profitPct === 'number' ? context.profitPct : null;
+            const rsi = context.rsi;
+            const resonance = context.resonanceScore;
+            const trend = (context.trend || '').toUpperCase();
+            const reco = (context.sovereignReco || '').toUpperCase();
+            const signal = (context.signal || '').toUpperCase();
+            const risk = classifyRisk(context);
+            advice.risk = risk;
+            const emaWinProb = typeof context.emaWinProb === 'number' ? context.emaWinProb : null;
+            const predDir = (context.predDirection || '').toUpperCase();
+            const predProb = typeof context.predProbability === 'number' ? context.predProbability : null;
+            let maxLoss = risk === 'LOW' ? 5 : (risk === 'HIGH' ? 12 : 8);
+            if (predProb !== null) {
+                if (predDir === 'DOWN' && predProb >= 65) {
+                    maxLoss -= 2;
+                } else if (predDir === 'UP' && predProb >= 70) {
+                    maxLoss += 1;
+                }
+            }
+            if (emaWinProb !== null) {
+                if (emaWinProb >= 75) {
+                    maxLoss += 1;
+                } else if (emaWinProb <= 45) {
+                    maxLoss -= 1;
+                }
+            }
+            if (maxLoss < 3) {
+                maxLoss = 3;
+            }
+            if (maxLoss > 15) {
+                maxLoss = 15;
+            }
+            const lossLimit = -maxLoss;
+            let baseStop = context.sovereignStop || context.shortStop || null;
+            let stopFromRisk = null;
+            if (context.buyPrice && context.buyPrice > 0) {
+                stopFromRisk = context.buyPrice * (1 - maxLoss / 100);
+            }
+            if (stopFromRisk !== null) {
+                if (!baseStop) {
+                    baseStop = stopFromRisk;
+                } else {
+                    if (risk === 'HIGH') {
+                        baseStop = Math.min(baseStop, stopFromRisk);
+                    } else {
+                        baseStop = Math.max(baseStop, stopFromRisk);
+                    }
+                }
+            }
+            let baseTp = context.shortTakeProfit || null;
+            if (!baseTp && context.buyPrice && context.buyPrice > 0) {
+                baseTp = context.buyPrice * 1.15;
+            }
+            advice.stopLoss = baseStop;
+            advice.takeProfit = baseTp;
+            const isUptrend = trend.indexOf('BULL') !== -1 || signal === 'BUY' || reco.indexOf('BUY') !== -1;
+            const isDowntrend = trend.indexOf('BEAR') !== -1 || signal === 'SELL';
+            const strongResonance = typeof resonance === 'number' && resonance >= 60;
+            const weakResonance = typeof resonance === 'number' && resonance <= -20;
+            if (profit === null || context.currentPrice === null) {
+                advice.stance = 'WATCH';
+                advice.summary = 'ข้อมูลราคายังไม่ครบ แนะนำเฝ้าดูและไม่เพิ่มความเสี่ยง';
+                advice.notes.push('ระบบไม่พบราคาปัจจุบันที่ชัดเจนจากการวิเคราะห์ล่าสุด');
+                return advice;
+            }
+            if (profit < lossLimit) {
+                advice.stance = 'CUT_LOSS';
+                advice.summary = 'ขาดทุนเกินกรอบความเสี่ยงที่กำหนด แนะนำพิจารณาตัดขาดทุนเพื่อลดความเสี่ยง';
+                advice.stopLoss = baseStop || stopFromRisk || (context.currentPrice * 0.97);
+                advice.takeProfit = context.buyPrice;
+                advice.notes.push('การปล่อยให้ขาดทุนลึกอาจกระทบพอร์ตในระยะยาว');
+                if (isDowntrend || weakResonance) {
+                    advice.notes.push('แนวโน้มตอนนี้ไม่สนับสนุน ให้เน้นรักษาทุนมากกว่าลุ้นกลับตัว');
+                }
+                return advice;
+            }
+            if (profit >= 15) {
+                advice.stance = 'TAKE_PROFIT';
+                advice.summary = 'กำไรมากกว่า 15% แนะนำทยอยขายทำกำไรและเลื่อนจุดตัดขาดทุนตาม';
+                advice.stopLoss = context.currentPrice * 0.95;
+                advice.takeProfit = context.currentPrice * 1.03;
+                advice.notes.push('การล็อกกำไรบางส่วนช่วยลดผลกระทบหากตลาดกลับตัวแรง');
+                if (isUptrend && strongResonance) {
+                    advice.notes.push('แนวโน้มยังดี สามารถถือส่วนที่เหลือให้กำไรวิ่งต่อได้');
+                }
+                return advice;
+            }
+            if (profit >= 3 && profit < 15) {
+                if (isUptrend && !weakResonance && (rsi === null || rsi < 70)) {
+                    advice.stance = 'HOLD';
+                    advice.summary = 'กำไรอยู่ในโซนปลอดภัย แนวโน้มยังสนับสนุน แนะนำถือและเลื่อนจุดตัดขาดทุน';
+                    advice.stopLoss = context.currentPrice * 0.95;
+                    advice.takeProfit = context.currentPrice * 1.08;
+                    advice.notes.push('เลื่อนจุดตัดขาดทุนขึ้นตามราคาเพื่อล็อกกำไรบางส่วน');
+                } else {
+                    advice.stance = 'TAKE_PROFIT';
+                    advice.summary = 'แนวโน้มเริ่มอ่อนแรง แม้ยังมีกำไร แนะนำทยอยขายบางส่วน';
+                    advice.stopLoss = context.currentPrice * 0.96;
+                    advice.takeProfit = context.currentPrice * 1.03;
+                    advice.notes.push('RSI สูงหรือแนวโน้มไม่ชัดเจนอาจบ่งชี้ภาวะใกล้จบรอบ');
+                }
+                return advice;
+            }
+            if (profit > lossLimit && profit < 3) {
+                if (isUptrend && !weakResonance && (rsi === null || (rsi > 35 && rsi < 70))) {
+                    advice.stance = 'HOLD';
+                    advice.summary = 'กำไร/ขาดทุนยังไม่มาก และแนวโน้มยังไม่เสียหาย แนะนำถือและตั้งจุดตัดขาดทุนให้ชัดเจน';
+                    advice.stopLoss = baseStop || stopFromRisk || (context.buyPrice * 0.93);
+                    advice.takeProfit = context.buyPrice * 1.12;
+                } else if (isDowntrend && weakResonance) {
+                    advice.stance = 'CUT_LOSS';
+                    advice.summary = 'แนวโน้มไม่สนับสนุนและไม่มีสัญญาณเชิงบวก แนะนำจำกัดการขาดทุน';
+                    advice.stopLoss = baseStop || stopFromRisk || (context.currentPrice * 0.97);
+                    advice.takeProfit = context.buyPrice * 1.03;
+                } else {
+                    advice.stance = 'WATCH';
+                    advice.summary = 'สัญญาณผสมกัน ยังไม่ชัดเจน ให้ใช้ขนาดไม้เล็กและเฝ้าดูใกล้ชิด';
+                    advice.stopLoss = baseStop || stopFromRisk || (context.buyPrice * 0.94);
+                    advice.takeProfit = context.buyPrice * 1.08;
+                }
+                return advice;
+            }
+            advice.stance = 'WATCH';
+            advice.summary = 'สภาวะไม่เข้าเกณฑ์ชัดเจน แนะนำรอดูสัญญาณรอบใหม่';
+            advice.notes.push('ใช้ข้อมูล Quantum Sovereign และสัญญาณระยะสั้นประกอบการตัดสินใจเพิ่มเติม');
+            return advice;
+        }
+
+        function renderDecisionAdvice(advice) {
+            if (!advice) return '';
+            const profitText = typeof advice.profitPct === 'number'
+                ? 'กำไร/ขาดทุนปัจจุบัน: ' + formatNumber(advice.profitPct, 2) + '%'
+                : 'กำไร/ขาดทุนปัจจุบัน: N/A';
+            let riskText = '';
+            if (advice.risk === 'HIGH') {
+                riskText = 'กลุ่มความเสี่ยง: สูง';
+            } else if (advice.risk === 'LOW') {
+                riskText = 'กลุ่มความเสี่ยง: ต่ำ';
+            } else {
+                riskText = 'กลุ่มความเสี่ยง: กลาง';
+            }
+            let stanceLabel = '';
+            if (advice.stance === 'HOLD') {
+                stanceLabel = '<span class="badge bg-primary me-1">ถือ</span>';
+            } else if (advice.stance === 'TAKE_PROFIT') {
+                stanceLabel = '<span class="badge bg-success me-1">ทำกำไร</span>';
+            } else if (advice.stance === 'CUT_LOSS') {
+                stanceLabel = '<span class="badge bg-danger me-1">ตัดขาดทุน</span>';
+            } else {
+                stanceLabel = '<span class="badge bg-secondary me-1">เฝ้าดู</span>';
+            }
+            const stopLossText = advice.stopLoss
+                ? 'Stop loss โดยประมาณ: ' + formatNumber(advice.stopLoss, 5)
+                : 'Stop loss โดยประมาณ: N/A';
+            const takeProfitText = advice.takeProfit
+                ? 'เป้าทำกำไรถัดไป: ' + formatNumber(advice.takeProfit, 5)
+                : 'เป้าทำกำไรถัดไป: N/A';
+            const notesHtml = advice.notes && advice.notes.length
+                ? '<ul class="mb-0">' + advice.notes.map(n => '<li>' + n + '</li>').join('') + '</ul>'
+                : '';
+            return `
+                <div class="border rounded p-2 bg-light">
+                    <div>${stanceLabel}${advice.summary}</div>
+                    <div class="small mt-1">${profitText}</div>
+                    <div class="small">${riskText}</div>
+                    <div class="small">${stopLossText}</div>
+                    <div class="small">${takeProfitText}</div>
+                    ${notesHtml}
+                </div>
+            `;
+        }
+
+        function renderChart(canvasId, chartData) {
+            const canvas = document.getElementById(canvasId);
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const existing = chartInstances[canvasId];
+            if (existing) {
+                existing.destroy();
+            }
+
+            chartInstances[canvasId] = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: chartData.dates,
+                    datasets: [
+                        {
+                            label: 'Close Price',
+                            data: chartData.close,
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                            fill: true,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'SMA20',
+                            data: chartData.sma20,
+                            borderColor: 'rgba(153, 102, 255, 1)',
+                            backgroundColor: 'rgba(153, 102, 255, 0.2)',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'BB Upper',
+                            data: chartData.bb_upper,
+                            borderColor: 'rgba(255, 159, 64, 1)',
+                            backgroundColor: 'rgba(255, 159, 64, 0.2)',
+                            fill: false,
+                            tension: 0.1
+                        },
+                        {
+                            label: 'BB Lower',
+                            data: chartData.bb_lower,
+                            borderColor: 'rgba(255, 99, 132, 1)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                            fill: false,
+                            tension: 0.1
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            type: 'category',
+                            title: {
+                                display: true,
+                                text: 'Date'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Price'
+                            }
+                        }
+                    },
+                    plugins: {
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false
+                        }
+                    }
+                }
+            });
+        }
+
+        function showLoading(show) {
+            document.getElementById('loading').style.display = show ? 'block' : 'none';
+        }
+
+        function showAlert(message, type) {
+            const alertContainer = document.getElementById('alertContainer');
+            alertContainer.innerHTML = `<div class="alert alert-${type} alert-dismissible fade show" role="alert">
+                                            ${message}
+                                            <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                                        </div>`;
+        }
+
+        function clearResults() {
+            document.getElementById('resultsContainer').innerHTML = '';
+            document.getElementById('alertContainer').innerHTML = '';
+            const charts = Object.values(chartInstances);
+            charts.forEach(c => {
+                if (c && typeof c.destroy === 'function') {
+                    c.destroy();
+                }
+            });
+            chartInstances = {};
+        }
+
+        function resetForm() {
+            const symbolInput = document.getElementById('symbolInput');
+            const periodSelect = document.getElementById('periodSelect');
+            if (symbolInput) symbolInput.value = '';
+            if (periodSelect) periodSelect.value = '1mo';
+            clearResults();
+        }
+
+        function getSignalClass(signal) {
+            if (signal === 'Buy') return 'bg-success';
+            if (signal === 'Sell') return 'bg-danger';
+            return 'bg-secondary';
+        }
+
+        function checkWatchlistAlerts(results) {
+            const alertsContainer = document.getElementById('watchlistAlerts');
+            const countBadge = document.getElementById('alertCountBadge');
+            if (!alertsContainer) return;
+            const important = [];
+            results.forEach(result => {
+                if (!result || !result.symbol) return;
+                const symbol = (result.symbol || '').toString().toUpperCase();
+                if (!watchlist.includes(symbol)) return;
+                const tags = [];
+                const q = result.quantum_15m;
+                if (q && q.setup && q.setup !== 'WAIT') {
+                    const conf = typeof q.confidence === 'number' ? q.confidence : 0;
+                    if (conf >= 80) {
+                        tags.push({
+                            label: 'Quantum Hunter 15m',
+                            detail: q.setup + ' (' + conf + '%)'
+                        });
+                    }
+                }
+                const sn = result.sniper_15m;
+                if (sn && sn.setup && sn.setup.indexOf('WAIT') === -1) {
+                    const confSn = typeof sn.confidence === 'number' ? sn.confidence : 0;
+                    if (confSn >= 80) {
+                        tags.push({
+                            label: 'Sniper 15m',
+                            detail: sn.setup + ' (' + confSn + '%)'
+                        });
+                    }
+                }
+                const az = result.actionzone_15m;
+                if (az && az.alert && az.signal && az.signal !== 'WAIT') {
+                    const confAz = typeof az.confidence === 'number' ? az.confidence : 0;
+                    const trendText = az.trend_1h ? (' 1H ' + az.trend_1h) : '';
+                    tags.push({
+                        label: 'ActionZone 15m',
+                        detail: az.signal + trendText + (confAz ? ' (' + formatNumber(confAz, 1) + '%)' : '')
+                    });
+                }
+                const cr = result.crypto_reversal_15m;
+                if (cr && cr.setup && cr.setup.indexOf('WAIT') === -1) {
+                    const confCr = typeof cr.confidence === 'number' ? cr.confidence : 0;
+                    if (confCr >= 80) {
+                        tags.push({
+                            label: 'Crypto Reversal 15m',
+                            detail: cr.setup + ' (' + confCr + '%)'
+                        });
+                    }
+                }
+                if (cr && cr.smc_setup && cr.smc_setup !== 'NONE') {
+                    const smcRr = typeof cr.smc_rr === 'number' ? cr.smc_rr : 0;
+                    if (smcRr >= 1.5) {
+                        tags.push({
+                            label: 'Crypto SMC 15m',
+                            detail: cr.smc_setup + ' (R:R 1:' + smcRr.toFixed(1) + ')'
+                        });
+                    }
+                }
+                const ec = result.ema_cross_15m;
+                if (ec && ec.signal && ec.signal !== 'WAIT') {
+                    const rr = typeof ec.risk_reward === 'number' ? ec.risk_reward : 0;
+                    const confEc = typeof ec.predicted_win_prob === 'number'
+                        ? ec.predicted_win_prob
+                        : (typeof ec.confidence === 'number' ? ec.confidence : 0);
+                    if (rr >= 5 && confEc >= 70) {
+                        tags.push({
+                            label: 'EMA Cross 15m',
+                            detail: ec.signal + ' (R:R 1:' + rr.toFixed(1) + ', ' + confEc + '%)'
+                        });
+                    }
+                }
+                const s = result.sovereign_4h;
+                if (s) {
+                    if (s.recommendation && s.recommendation.indexOf('NOW') !== -1) {
+                        tags.push({
+                            label: 'Sovereign 4H',
+                            detail: s.recommendation
+                        });
+                    }
+                    if (s.critical_alert) {
+                        tags.push({
+                            label: 'Sovereign 4H',
+                            detail: s.critical_alert
+                        });
+                    }
+                }
+                if (tags.length) {
+                    important.push({ symbol: symbol, tags: tags });
+                }
+            });
+            if (!important.length) {
+                alertsContainer.innerHTML = '<span class="text-muted">ยังไม่มีสัญญาณสำคัญจากหุ้นที่ติดตาม</span>';
+                if (countBadge) {
+                    countBadge.style.display = 'none';
+                }
+                return;
+            }
+            const scored = important.map(item => {
+                let score = 0;
+                item.tags.forEach(t => {
+                    if (t.label === 'Sovereign 4H') score += 300;
+                    if (t.label === 'Sniper 15m') score += 200;
+                    if (t.label === 'Quantum Hunter 15m') score += 150;
+                    if (t.detail) {
+                        const m = t.detail.match(/(\d+)%/);
+                        if (m && m[1]) {
+                            const v = parseInt(m[1], 10);
+                            if (!isNaN(v)) score += v;
+                        }
+                        if (/NOW|ALERT|CRITICAL/i.test(t.detail)) score += 50;
+                    }
+                });
+                return { symbol: item.symbol, tags: item.tags, score: score };
+            });
+            scored.sort((a, b) => b.score - a.score);
+            if (countBadge) {
+                countBadge.textContent = scored.length + ' สัญญาณ';
+                countBadge.style.display = 'inline-block';
+            }
+            alertsContainer.innerHTML = scored.map(item => `
+                <div class="alert-item" onclick="viewWatchlistSymbol('${item.symbol}')">
+                    <div class="alert-item-symbol">${item.symbol}</div>
+                    <div class="alert-item-tags">
+                        ${item.tags.map(t => `
+                            <span class="badge bg-warning text-dark alert-tag">${t.label}</span>
+                            <span class="badge bg-light text-dark alert-tag">${t.detail}</span>
+                        `).join('')}
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        loadWatchlist();
+        loadBuyPriceStore();
+    </script>
+</body>
+</html>

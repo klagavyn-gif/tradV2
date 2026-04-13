@@ -28,31 +28,59 @@ jobs:
     env:
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
       SYMBOLS: ${{ github.event.inputs.symbols || vars.SYMBOLS || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD' }}
       PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
       TELEGRAM_ALERT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_MIN_CONFIDENCE || '75' }}
       TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE || '60' }}
       TELEGRAM_ALERT_TTL_SECONDS: ${{ vars.TELEGRAM_ALERT_TTL_SECONDS || '1800' }}
       TELEGRAM_ALERT_MAX_PER_RUN: ${{ vars.TELEGRAM_ALERT_MAX_PER_RUN || '5' }}
+      YF_CACHE_TTL_SECONDS: ${{ vars.YF_CACHE_TTL_SECONDS || '180' }}
+      YF_INFO_CACHE_TTL_SECONDS: ${{ vars.YF_INFO_CACHE_TTL_SECONDS || '21600' }}
+      ANALYZE_MAX_WORKERS: ${{ vars.ANALYZE_MAX_WORKERS || '5' }}
       ACTIONZONE_15M_ALERT_BARS: ${{ vars.ACTIONZONE_15M_ALERT_BARS || '2' }}
       ACTIONZONE_15M_MIN_STOP_PCT: ${{ vars.ACTIONZONE_15M_MIN_STOP_PCT || '1.0' }}
       EMA_CROSS_15M_MIN_STOP_PCT: ${{ vars.EMA_CROSS_15M_MIN_STOP_PCT || '1.0' }}
       CDC_VIXFIX_15M_ALERT_BARS: ${{ vars.CDC_VIXFIX_15M_ALERT_BARS || '2' }}
       CDC_VIXFIX_15M_MIN_STOP_PCT: ${{ vars.CDC_VIXFIX_15M_MIN_STOP_PCT || '1.5' }}
       CDC_VIXFIX_15M_SL_ATR_MULT: ${{ vars.CDC_VIXFIX_15M_SL_ATR_MULT || '3.0' }}
+      ACTIONZONE_15M_USE_OPTIMIZATION: ${{ vars.ACTIONZONE_15M_USE_OPTIMIZATION || 'true' }}
+      ACTIONZONE_15M_TP_MULT: ${{ vars.ACTIONZONE_15M_TP_MULT || '5.0' }}
+      ACTIONZONE_15M_STOP_ATR_MULT: ${{ vars.ACTIONZONE_15M_STOP_ATR_MULT || '1.5' }}
+      ACTIONZONE_15M_MAX_FORWARD_BARS: ${{ vars.ACTIONZONE_15M_MAX_FORWARD_BARS || '64' }}
+      ACTIONZONE_15M_YF_PERIOD: ${{ vars.ACTIONZONE_15M_YF_PERIOD || '30d' }}
+      ACTIONZONE_15M_FAST_MIN: ${{ vars.ACTIONZONE_15M_FAST_MIN || '6' }}
+      ACTIONZONE_15M_FAST_MAX: ${{ vars.ACTIONZONE_15M_FAST_MAX || '24' }}
+      ACTIONZONE_15M_FAST_STEP: ${{ vars.ACTIONZONE_15M_FAST_STEP || '2' }}
+      ACTIONZONE_15M_SLOW_MIN: ${{ vars.ACTIONZONE_15M_SLOW_MIN || '18' }}
+      ACTIONZONE_15M_SLOW_MAX: ${{ vars.ACTIONZONE_15M_SLOW_MAX || '80' }}
+      ACTIONZONE_15M_SLOW_STEP: ${{ vars.ACTIONZONE_15M_SLOW_STEP || '2' }}
+      ACTIONZONE_15M_MIN_TRADES: ${{ vars.ACTIONZONE_15M_MIN_TRADES || '8' }}
+      ACTIONZONE_15M_VOL_LOW_PCT: ${{ vars.ACTIONZONE_15M_VOL_LOW_PCT || '0.35' }}
+      ACTIONZONE_15M_VOL_HIGH_PCT: ${{ vars.ACTIONZONE_15M_VOL_HIGH_PCT || '3.50' }}
+      PRICE_FORECAST_DEFAULT_HOURS: ${{ vars.PRICE_FORECAST_DEFAULT_HOURS || '6' }}
+      PRICE_FORECAST_BASE_ATR_MULT: ${{ vars.PRICE_FORECAST_BASE_ATR_MULT || '1.2' }}
+      PRICE_FORECAST_STRETCH_ATR_MULT: ${{ vars.PRICE_FORECAST_STRETCH_ATR_MULT || '2.4' }}
+      EMA_CROSS_15M_FAST_MIN: ${{ vars.EMA_CROSS_15M_FAST_MIN || '6' }}
+      EMA_CROSS_15M_FAST_MAX: ${{ vars.EMA_CROSS_15M_FAST_MAX || '24' }}
+      EMA_CROSS_15M_SLOW_MIN: ${{ vars.EMA_CROSS_15M_SLOW_MIN || '18' }}
+      EMA_CROSS_15M_SLOW_MAX: ${{ vars.EMA_CROSS_15M_SLOW_MAX || '80' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
       - name: Validate Telegram secrets
         run: |
           test -n "$TELEGRAM_BOT_TOKEN"
           test -n "$TELEGRAM_CHAT_ID"
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip --no-input
+          python -m pip install -r requirements.txt --no-input
       - name: Run analysis and notify
         run: |
           python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram

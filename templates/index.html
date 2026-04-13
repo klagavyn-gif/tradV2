@@ -23,7 +23,7 @@
                 <div class="search-card mt-0">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <h5 class="mb-0"><i class="bi bi-star"></i> รายการหุ้นที่ติดตาม</h5>
-                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="analyzeWatchlist()">
+                        <button type="button" class="btn btn-outline-primary btn-sm" id="analyzeWatchlistBtn" onclick="analyzeWatchlist()">
                             วิเคราะห์รายการติดตาม
                         </button>
                     </div>
@@ -90,10 +90,10 @@
                             </div>
                         </div>
                         <div class="d-flex flex-wrap gap-2 mt-3">
-                            <button type="submit" class="btn btn-primary">
+                            <button type="submit" class="btn btn-primary" id="analyzeBtn">
                                 <i class="bi bi-play-circle"></i> เริ่มวิเคราะห์
                             </button>
-                            <button type="button" class="btn btn-outline-secondary" onclick="resetForm()">
+                            <button type="button" class="btn btn-outline-secondary" id="resetBtn" onclick="resetForm()">
                                 <i class="bi bi-arrow-counterclockwise"></i> ล้างค่า
                             </button>
                             <div class="form-check form-switch ms-auto notify-toggle">
@@ -143,6 +143,7 @@
         let watchlistSortMode = 'added';
         let latestResultsMap = {};
         let buyPriceStore = {};
+        const MAX_SYMBOLS_PER_REQUEST = 30;
 
         function formatNumber(value, maxDecimals) {
             if (typeof value !== 'number' || isNaN(value)) return 'N/A';
@@ -151,12 +152,38 @@
 
         function getSymbolKey(symbol) {
             if (!symbol) return '';
-            return symbol.toString().trim().toUpperCase();
+            return symbol.toString().trim().toUpperCase().replace(/^\$+/, '');
         }
 
         function getSymbolDomId(symbol) {
             const key = getSymbolKey(symbol);
             return key.replace(/[^A-Z0-9]/g, '_');
+        }
+
+        function parseSymbolsInput(rawInput, maxCount) {
+            const cap = Math.max(1, Number(maxCount) || MAX_SYMBOLS_PER_REQUEST);
+            const tokens = (rawInput || '').toString().replace(/\n/g, ',').replace(/;/g, ',').split(',');
+            const deduped = [];
+            const seen = new Set();
+            for (let i = 0; i < tokens.length; i += 1) {
+                const key = getSymbolKey(tokens[i]);
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                deduped.push(key);
+            }
+            return {
+                symbols: deduped.slice(0, cap),
+                totalUnique: deduped.length,
+            };
+        }
+
+        function setAnalyzeControlsDisabled(disabled) {
+            const analyzeBtn = document.getElementById('analyzeBtn');
+            const resetBtn = document.getElementById('resetBtn');
+            const watchlistBtn = document.getElementById('analyzeWatchlistBtn');
+            if (analyzeBtn) analyzeBtn.disabled = !!disabled;
+            if (resetBtn) resetBtn.disabled = !!disabled;
+            if (watchlistBtn) watchlistBtn.disabled = !!disabled;
         }
 
         function loadBuyPriceStore() {
@@ -260,7 +287,7 @@
 
         function addToWatchlist(symbol) {
             if (!symbol) return;
-            const s = symbol.trim().toUpperCase();
+            const s = getSymbolKey(symbol);
             if (!s || watchlist.includes(s)) return;
             if (watchlist.length >= 30) {
                 showAlert('ไม่สามารถเพิ่มเกิน 30 ตัวในรายการติดตาม', 'warning');
@@ -314,6 +341,7 @@
         async function autoAnalyzeWatchlistForAlerts(showMessage) {
             if (!watchlist.length) return;
             if (watchlistRequestInFlight) return;
+            if (!showMessage && document.hidden) return;
             const period = document.getElementById('periodSelect').value;
             const symbols = watchlist.join(',');
             if (!symbols) return;
@@ -331,6 +359,9 @@
                     body: JSON.stringify({ symbols: symbols, period: period }),
                     signal: currentWatchlistController.signal
                 });
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
                 const data = await response.json();
                 if (data && Array.isArray(data.results)) {
                     data.results.forEach(r => {
@@ -348,6 +379,9 @@
                     showAlert('ไม่สามารถอัปเดตข้อมูลแจ้งเตือนได้: ' + data.error, 'danger');
                 }
             } catch (e) {
+                if (e && e.name === 'AbortError') {
+                    return;
+                }
                 if (showMessage) {
                     showAlert('เกิดข้อผิดพลาดในการอัปเดตแจ้งเตือน: ' + (e && e.message ? e.message : e), 'danger');
                 }
@@ -357,7 +391,9 @@
         }
 
         async function analyzeSymbols() {
-            const symbols = document.getElementById('symbolInput').value.trim();
+            const rawInput = document.getElementById('symbolInput').value.trim();
+            const parsed = parseSymbolsInput(rawInput, MAX_SYMBOLS_PER_REQUEST);
+            const symbols = parsed.symbols.join(',');
             const period = document.getElementById('periodSelect').value;
             const notifyToggle = document.getElementById('notifyTelegramToggle');
             const notifyTelegram = !!(notifyToggle && notifyToggle.checked);
@@ -366,8 +402,13 @@
                 showAlert('กรุณากรอก Symbol อย่างน้อยหนึ่งตัว', 'warning');
                 return;
             }
+            if (parsed.totalUnique > MAX_SYMBOLS_PER_REQUEST) {
+                showAlert('รองรับได้สูงสุด ' + MAX_SYMBOLS_PER_REQUEST + ' Symbol ต่อครั้ง', 'warning');
+                return;
+            }
 
             showLoading(true);
+            setAnalyzeControlsDisabled(true);
             clearResults();
 
             try {
@@ -383,6 +424,9 @@
                     body: JSON.stringify({ symbols: symbols, period: period, notify_telegram: notifyTelegram }),
                     signal: currentAnalyzeController.signal
                 });
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
 
                 const data = await response.json();
 
@@ -394,10 +438,14 @@
                 displayResults(data.results);
 
             } catch (error) {
+                if (error && error.name === 'AbortError') {
+                    return;
+                }
                 console.error('Error:', error);
                 showAlert('เกิดข้อผิดพลาดในการเชื่อมต่อ: ' + error.message, 'danger');
             } finally {
                 showLoading(false);
+                setAnalyzeControlsDisabled(false);
             }
         }
 

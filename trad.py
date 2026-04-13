@@ -10,11 +10,13 @@ import certifi
 import math
 import time
 import threading
+import tempfile
 import pytz
 from collections import OrderedDict
 from datetime import datetime, timedelta
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
+from itertools import repeat
 from curl_cffi import requests as curl_requests
 import config
 try:
@@ -27,6 +29,34 @@ if getattr(config, "SECRET_KEY", ""):
     app.config["SECRET_KEY"] = config.SECRET_KEY
 
 logger = logging.getLogger(__name__)
+_YF_TZ_CACHE_LOCK = threading.Lock()
+_YF_TZ_CACHE_READY = False
+
+
+def _configure_yf_tz_cache(force_temp=False):
+    global _YF_TZ_CACHE_READY
+    if _YF_TZ_CACHE_READY and not force_temp:
+        return
+    with _YF_TZ_CACHE_LOCK:
+        if _YF_TZ_CACHE_READY and not force_temp:
+            return
+        candidates = []
+        if not force_temp:
+            try:
+                project_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yf_cache")
+                candidates.append(project_cache)
+            except Exception:
+                pass
+        candidates.append(os.path.join(tempfile.gettempdir(), "trad_yf_cache"))
+        for cache_dir in candidates:
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+                yf.set_tz_cache_location(cache_dir)
+                _YF_TZ_CACHE_READY = True
+                return
+            except Exception:
+                continue
+        _YF_TZ_CACHE_READY = True
 
 # Helper to get current Thai time (naive)
 def get_thai_now():
@@ -35,6 +65,7 @@ def get_thai_now():
 
 VALID_PERIODS = ['1d', '5d', '1mo', '3mo', '6mo', '1y', 'ytd', '1h', '15m']
 EMA_CROSS_15M_OPT_CACHE = {}
+_YF_EMPTY_SENTINEL = object()
 
 _THREAD_LOCAL = threading.local()
 
@@ -86,6 +117,13 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
     ttl_seconds=int(getattr(config, "TELEGRAM_ALERT_TTL_SECONDS", 1800)),
 )
 
+try:
+    _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
+except Exception:
+    _MAX_SYMBOLS_PER_REQUEST = 30
+if _MAX_SYMBOLS_PER_REQUEST < 1:
+    _MAX_SYMBOLS_PER_REQUEST = 1
+
 
 def _get_config_warnings():
     warnings = []
@@ -102,6 +140,34 @@ def _get_config_warnings():
     except Exception:
         warnings.append("ANALYZE_MAX_WORKERS ไม่ถูกต้อง")
     return warnings
+
+
+def _parse_symbols_input(raw_symbols, max_symbols=None):
+    max_count = _MAX_SYMBOLS_PER_REQUEST if max_symbols is None else int(max_symbols)
+    if max_count < 1:
+        max_count = 1
+    symbols_raw = str(raw_symbols or "").upper().replace("\n", ",").replace(";", ",").split(",")
+    unique_symbols = []
+    seen = set()
+    for raw in symbols_raw:
+        sym = normalize_symbol(raw)
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        unique_symbols.append(sym)
+        if len(unique_symbols) >= max_count:
+            break
+    return unique_symbols
+
+
+def _clean_json_value(v):
+    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+        return None
+    if isinstance(v, (list, tuple)):
+        return [_clean_json_value(x) for x in v]
+    if isinstance(v, dict):
+        return {k: _clean_json_value(x) for k, x in v.items()}
+    return v
 
 
 def send_telegram_alert(message):
@@ -406,6 +472,15 @@ def _format_exit_levels_lines(plan):
     return lines
 
 
+def _is_actionable_setup_value(value):
+    if value is None:
+        return False
+    text = str(value).strip().upper()
+    if not text:
+        return False
+    return text not in {"WAIT", "HOLD", "NONE", "NEUTRAL"}
+
+
 def _collect_alert_sources(item, min_conf):
     sources = []
 
@@ -416,6 +491,8 @@ def _collect_alert_sources(item, min_conf):
         if conf is None or conf < min_conf:
             return
         setup = plan.get(setup_key)
+        if setup_key in ("setup", "signal") and not _is_actionable_setup_value(setup):
+            return
         text = label
         if isinstance(setup, str) and setup.strip():
             text = f"{label} {setup.strip()}"
@@ -445,6 +522,9 @@ def _get_best_confidence(item):
     ):
         if not isinstance(plan, dict):
             continue
+        setup = plan.get(setup_key)
+        if setup_key in ("setup", "signal") and not _is_actionable_setup_value(setup):
+            continue
         conf = _normalize_confidence(plan.get(conf_key))
         if conf is None:
             continue
@@ -467,6 +547,10 @@ def _pick_primary_trade_plan(item):
     best_conf = -1.0
     for plan in candidates:
         if not isinstance(plan, dict):
+            continue
+        if "signal" in plan and not _is_actionable_setup_value(plan.get("signal")):
+            continue
+        if "setup" in plan and not _is_actionable_setup_value(plan.get("setup")):
             continue
         conf = _normalize_confidence(plan.get("confidence"))
         if conf is None:
@@ -505,12 +589,13 @@ def _build_telegram_message(item, signal, best_conf, sources):
     primary_plan = _pick_primary_trade_plan(item)
     if isinstance(primary_plan, dict):
         lines.extend(_format_exit_levels_lines(primary_plan))
+    lines.extend(_format_price_forecast_lines(item.get("price_forecast")))
     lines.append("เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     return "\n".join(lines)
 
 
 def _build_actionzone_message(item, az_plan):
-    signal = str(az_plan.get("raw_signal") or az_plan.get("signal") or "").upper()
+    signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴"
     symbol = normalize_symbol(item.get("symbol") or "")
     name = str(item.get("name") or "").strip()
@@ -546,14 +631,43 @@ def _build_actionzone_message(item, az_plan):
         lines.append("🧭 " + " • ".join(parts))
     if isinstance(conf, (int, float)):
         lines.append(f"📊 โอกาสจุดตัดสำเร็จ: {float(conf):.0f}%")
+    
+    # Add EMA lengths and market behavior
+    fast_len = az_plan.get("fast_len")
+    slow_len = az_plan.get("slow_len")
+    if fast_len and slow_len:
+        lines.append(f"⚙️ ค่าเฉลี่ยที่ดีที่สุด (EMA): {fast_len}/{slow_len}")
+    
+    avg_range = az_plan.get("avg_range_pct")
+    if isinstance(avg_range, (int, float)):
+        lines.append(f"📈 ความผันผวนเฉลี่ย (20 แท่ง): {avg_range:.2f}%")
+    optimizer = az_plan.get("optimizer")
+    best = optimizer.get("best") if isinstance(optimizer, dict) else None
+    if isinstance(best, dict):
+        trades = best.get("trades")
+        exp_rr = best.get("expectancy_rr")
+        win_rate = best.get("win_rate_pct")
+        stats = []
+        if isinstance(trades, (int, float)):
+            stats.append(f"ย้อนหลัง {int(trades)} ไม้")
+        if isinstance(win_rate, (int, float)):
+            stats.append(f"Win {float(win_rate):.0f}%")
+        if isinstance(exp_rr, (int, float)):
+            stats.append(f"ExpRR {float(exp_rr):.2f}")
+        if stats:
+            lines.append("🧪 " + " | ".join(stats))
     sl = az_plan.get("stop_loss")
     sl_text = _format_price_value(sl)
     if sl_text:
         lines.append(f"🛡️ จุดตัดขาดทุน (SL): {sl_text}")
     lines.extend(_format_exit_levels_lines(az_plan))
+    lines.extend(_format_price_forecast_lines(item.get("price_forecast")))
     bars = az_plan.get("bars_since_signal")
     if isinstance(bars, (int, float)):
         lines.append(f"แท่งนับจากสัญญาณ: {int(bars)}")
+    last_signal_time = az_plan.get("last_signal_time")
+    if isinstance(last_signal_time, str) and last_signal_time:
+        lines.append("🕒 เวลาสัญญาณล่าสุด: " + last_signal_time)
     lines.append("⏱️ เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     return "\n".join(lines)
 
@@ -613,6 +727,85 @@ def _build_cdc_vixfix_message(item, plan):
     return "\n".join(lines)
 
 
+def _normalize_trade_direction(value):
+    if value is None:
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    if "BUY" in text or "LONG" in text or text == "UP":
+        return "BUY"
+    if "SELL" in text or "SHORT" in text or text == "DOWN":
+        return "SELL"
+    return None
+
+
+def _pick_price_forecast_candidate(*plans):
+    best = None
+    best_conf = -1.0
+    for label, plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        direction = _normalize_trade_direction(plan.get("signal") or plan.get("setup") or plan.get("recommendation"))
+        if direction not in ("BUY", "SELL"):
+            continue
+        conf = _normalize_confidence(plan.get("confidence"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("predicted_win_prob"))
+        if conf is None:
+            conf = _normalize_confidence(plan.get("win_prob"))
+        if conf is None:
+            conf = 50.0
+        if conf > best_conf:
+            best_conf = conf
+            best = {
+                "label": label,
+                "plan": plan,
+                "direction": direction,
+                "confidence": float(conf),
+            }
+    return best
+
+
+def _format_price_forecast_lines(forecast):
+    if not isinstance(forecast, dict):
+        return []
+    direction = str(forecast.get("direction") or "").upper()
+    horizon = forecast.get("horizon_hours")
+    base_price = _format_price_value(forecast.get("base_price"))
+    low_price = _format_price_value(forecast.get("range_low"))
+    high_price = _format_price_value(forecast.get("range_high"))
+    invalidation = _format_price_value(forecast.get("invalidation_price"))
+    source = str(forecast.get("source") or "").strip()
+    bias = str(forecast.get("decision_bias") or "").strip()
+    lines = []
+    parts = []
+    if direction:
+        parts.append(direction)
+    if isinstance(horizon, (int, float)) and horizon > 0:
+        parts.append(f"{float(horizon):.1f}h")
+    if source:
+        parts.append(source)
+    header = "🔮 คาดการณ์ราคา"
+    if parts:
+        header += ": " + " | ".join(parts)
+    lines.append(header)
+    detail = []
+    if base_price:
+        detail.append(f"ฐาน {base_price}")
+    if low_price and high_price:
+        detail.append(f"กรอบ {low_price} - {high_price}")
+    elif high_price:
+        detail.append(f"เป้า {high_price}")
+    if detail:
+        lines.append("📐 " + " | ".join(detail))
+    if invalidation:
+        lines.append("🚫 จุดยกเลิกมุมมอง: " + invalidation)
+    if bias:
+        lines.append("🧠 มุมมอง: " + bias)
+    return lines
+
+
 def _notify_telegram_from_results(results):
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
     exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
@@ -658,11 +851,13 @@ def _notify_telegram_from_results(results):
             break
         az_plan = item.get("actionzone_15m")
         if isinstance(az_plan, dict):
-            az_signal = str(az_plan.get("raw_signal") or az_plan.get("signal") or "").upper()
+            az_signal = str(az_plan.get("signal") or "").upper()
             if az_signal in ("BUY", "SELL") and az_plan.get("alert"):
                 az_conf = _normalize_confidence(az_plan.get("confidence"))
                 if az_conf is not None and az_conf >= min_conf:
-                    az_key = f"AZ15|{symbol}|{az_signal}"
+                    last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
+                    entry_price = _format_price_value(az_plan.get("entry_price")) or ""
+                    az_key = f"AZ15|{symbol}|{az_signal}|{last_signal_time or entry_price}"
                     if not _TELEGRAM_ALERT_CACHE.get(az_key):
                         az_message = _build_actionzone_message(item, az_plan)
                         if send_telegram_alert(az_message):
@@ -713,29 +908,123 @@ def _normalize_df_index(df):
     return df
 
 
+def _normalize_price_columns(df, symbol=None):
+    if df is None or getattr(df, "empty", True):
+        return df
+    cols = getattr(df, "columns", None)
+    if isinstance(cols, pd.MultiIndex):
+        # yfinance.download may return MultiIndex columns (Price, Ticker).
+        # For this app we analyze a single symbol per fetch, so flatten to OHLCV.
+        try:
+            df = df.copy()
+            if len(cols.levels) >= 2:
+                lvl0 = [str(x) for x in cols.get_level_values(0)]
+                lvl1 = [str(x) for x in cols.get_level_values(1)]
+                sym = normalize_symbol(symbol)
+                if sym and sym in set(lvl1):
+                    keep = [i for i, t in enumerate(lvl1) if t == sym]
+                    if keep:
+                        df = df.iloc[:, keep]
+                        lvl0 = [lvl0[i] for i in keep]
+                df.columns = pd.Index(lvl0)
+        except Exception:
+            pass
+    if not isinstance(df.columns, pd.Index):
+        return df
+    seen = set()
+    keep_cols = []
+    for name in ("Open", "High", "Low", "Close", "Volume"):
+        if name in df.columns and name not in seen:
+            keep_cols.append(name)
+            seen.add(name)
+    if keep_cols:
+        return df[keep_cols].copy()
+    return df
+
+
 def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
     sym = normalize_symbol(symbol)
     if not sym:
         return None
     key = ("hist", sym, str(period or ""), str(interval or ""), bool(auto_adjust))
     cached = _YF_CACHE.get(key)
+    if cached is _YF_EMPTY_SENTINEL:
+        return None
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached.copy()
-    try:
-        session = _get_thread_curl_session()
-        ticker = yf.Ticker(sym, session=session)
-        if interval:
-            df = ticker.history(period=period, interval=interval, auto_adjust=auto_adjust)
-        else:
-            df = ticker.history(period=period, auto_adjust=auto_adjust)
-        if df is None or df.empty:
+    _configure_yf_tz_cache()
+    for attempt in range(2):
+        try:
+            session = _get_thread_curl_session()
+            ticker = yf.Ticker(sym, session=session)
+            if interval:
+                df = ticker.history(period=period, interval=interval, auto_adjust=auto_adjust)
+            else:
+                df = ticker.history(period=period, auto_adjust=auto_adjust)
+            if df is None or df.empty:
+                # Fallback: yfinance Ticker.history may sporadically return empty.
+                dl_kwargs = {
+                    "period": period,
+                    "auto_adjust": auto_adjust,
+                    "progress": False,
+                    "threads": False,
+                    "session": session,
+                }
+                if interval:
+                    dl_kwargs["interval"] = interval
+                try:
+                    df = yf.download(sym, **dl_kwargs)
+                except Exception as dl_e:
+                    dl_msg = str(dl_e).lower()
+                    if "certificate verify locations" in dl_msg or "curl: (77)" in dl_msg:
+                        try:
+                            insecure_session = curl_requests.Session(
+                                verify=False,
+                                impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                            )
+                            _THREAD_LOCAL.curl_session = insecure_session
+                            dl_kwargs["session"] = insecure_session
+                            df = yf.download(sym, **dl_kwargs)
+                        except Exception:
+                            df = None
+                    else:
+                        df = None
+                if df is None or df.empty:
+                    # Some SSL failures in yfinance return empty data instead of raising.
+                    try:
+                        insecure_session = curl_requests.Session(
+                            verify=False,
+                            impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                        )
+                        _THREAD_LOCAL.curl_session = insecure_session
+                        dl_kwargs["session"] = insecure_session
+                        df = yf.download(sym, **dl_kwargs)
+                    except Exception:
+                        df = None
+                if df is None or df.empty:
+                    _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
+                    return None
+            df = _normalize_df_index(df)
+            df = _normalize_price_columns(df, sym)
+            _YF_CACHE.set(key, df, ttl_seconds=cache_ttl_seconds)
+            return df.copy()
+        except Exception as e:
+            msg = str(e).lower()
+            if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
+                _configure_yf_tz_cache(force_temp=True)
+                _THREAD_LOCAL.curl_session = None
+                continue
+            if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
+                _THREAD_LOCAL.curl_session = curl_requests.Session(
+                    verify=False,
+                    impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                )
+                continue
+            logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
+            _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
             return None
-        df = _normalize_df_index(df)
-        _YF_CACHE.set(key, df, ttl_seconds=cache_ttl_seconds)
-        return df.copy()
-    except Exception as e:
-        logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
-        return None
+    _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
+    return None
 
 
 def _get_http_verify_setting():
@@ -744,16 +1033,25 @@ def _get_http_verify_setting():
         return False
     ca_bundle = getattr(config, "HTTP_CA_BUNDLE", "")
     if isinstance(ca_bundle, str) and ca_bundle.strip():
-        return ca_bundle.strip()
-    try:
-        return certifi.where()
-    except Exception:
-        return True
+        bundle = ca_bundle.strip()
+        if os.path.exists(bundle):
+            return bundle
+        logger.warning("HTTP_CA_BUNDLE not found: %s; falling back to system cert store", bundle)
+    # Use system trust store by default. Passing certifi path may fail on some Windows setups.
+    return True
 
 
 def _create_curl_session():
     impersonate = getattr(config, "CURL_IMPERSONATE", "chrome110")
-    return curl_requests.Session(verify=_get_http_verify_setting(), impersonate=impersonate)
+    verify = _get_http_verify_setting()
+    try:
+        return curl_requests.Session(verify=verify, impersonate=impersonate)
+    except Exception as e:
+        msg = str(e).lower()
+        if "certificate verify locations" in msg or "curl: (77)" in msg:
+            logger.warning("Falling back to verify=False due to CA configuration error: %s", e)
+            return curl_requests.Session(verify=False, impersonate=impersonate)
+        raise
 
 
 def _ema_cross_15m_get_cached(symbol):
@@ -830,16 +1128,29 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     close = df["Close"].astype(float)
     ema_fast = close.ewm(span=fast_len, adjust=False).mean()
     ema_slow = close.ewm(span=slow_len, adjust=False).mean()
-    zone = np.where(ema_fast > ema_slow, 1, -1)
-    zone_change = pd.Series(zone, index=df.index).diff().fillna(0)
+    
+    bull = ema_fast > ema_slow
+    bear = ema_fast < ema_slow
+    
+    # ActionZone Green/Red logic
+    green = bull & (close > ema_fast)
+    red = bear & (close < ema_fast)
+    
+    buy_signal = green & (~green.shift(1).fillna(False))
+    sell_signal = red & (~red.shift(1).fillna(False))
+    
     wins = 0
     losses = 0
     total_rr = 0.0
     rr_list = [] if return_rr_list else None
     for i in range(1, len(df)):
-        zc = zone_change.iloc[i]
-        if zc not in (2, -2):
+        if buy_signal.iloc[i]:
+            direction_i = "BUY"
+        elif sell_signal.iloc[i]:
+            direction_i = "SELL"
+        else:
             continue
+            
         atr_i = df["ATR"].iloc[i]
         vol_avg_i = df["Vol_Avg"].iloc[i]
         if pd.isna(atr_i) or atr_i <= 0 or pd.isna(vol_avg_i) or vol_avg_i <= 0:
@@ -847,10 +1158,12 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         entry_i = close.iloc[i]
         if pd.isna(entry_i) or entry_i <= 0:
             continue
-        direction_i = "BUY" if zc == 2 else "SELL"
-        risk_i = float(atr_i)
+        
+        # Risk based on ATR and multiplier
+        risk_i = float(atr_i * stop_mult)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
+        
         outcome = None
         end_j = min(len(df), i + 1 + max_forward)
         for j in range(i + 1, end_j):
@@ -912,7 +1225,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     sym = normalize_symbol(symbol)
     if not sym:
         return None
-    yf_period = str(yf_period or getattr(config, "EMA_CROSS_15M_YF_PERIOD", "90d"))
+    yf_period = str(yf_period or getattr(config, "ACTIONZONE_15M_YF_PERIOD", getattr(config, "EMA_CROSS_15M_YF_PERIOD", "90d")))
     raw = get_yf_history(sym, period=yf_period, interval="15m", auto_adjust=True)
     if raw is None or getattr(raw, "empty", True):
         return None
@@ -939,8 +1252,15 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         fast_len, slow_len = 12, 26
     if fast_len < 2 or slow_len < 2 or fast_len >= slow_len:
         fast_len, slow_len = 12, 26
-    tp_mult = float(tp_mult if tp_mult is not None else getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
-    max_forward = int(max_forward if max_forward is not None else getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
+    tp_mult = float(tp_mult if tp_mult is not None else getattr(config, "ACTIONZONE_15M_TP_MULT", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0)))
+    max_forward = int(max_forward if max_forward is not None else getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64)))
+    stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+    try:
+        stop_mult = float(stop_mult)
+    except Exception:
+        stop_mult = 1.5
+    if stop_mult <= 0:
+        stop_mult = 1.0
     if tp_mult <= 0 or max_forward < 1:
         return None
     close = df["Close"].astype(float)
@@ -1036,18 +1356,18 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
 def optimize_best_ema_cross_15m(symbol, df):
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None
-    enable = getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True)
+    enable = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True))
     if not enable:
         return None
-    fast_min = getattr(config, "EMA_CROSS_15M_FAST_MIN", 6)
-    fast_max = getattr(config, "EMA_CROSS_15M_FAST_MAX", 24)
-    fast_step = getattr(config, "EMA_CROSS_15M_FAST_STEP", 2)
-    slow_min = getattr(config, "EMA_CROSS_15M_SLOW_MIN", 18)
-    slow_max = getattr(config, "EMA_CROSS_15M_SLOW_MAX", 80)
-    slow_step = getattr(config, "EMA_CROSS_15M_SLOW_STEP", 2)
-    min_trades = getattr(config, "EMA_CROSS_15M_MIN_TRADES", 8)
-    tp_mult = getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0)
-    max_forward = getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64)
+    fast_min = getattr(config, "ACTIONZONE_15M_FAST_MIN", getattr(config, "EMA_CROSS_15M_FAST_MIN", 6))
+    fast_max = getattr(config, "ACTIONZONE_15M_FAST_MAX", getattr(config, "EMA_CROSS_15M_FAST_MAX", 24))
+    fast_step = getattr(config, "ACTIONZONE_15M_FAST_STEP", getattr(config, "EMA_CROSS_15M_FAST_STEP", 2))
+    slow_min = getattr(config, "ACTIONZONE_15M_SLOW_MIN", getattr(config, "EMA_CROSS_15M_SLOW_MIN", 18))
+    slow_max = getattr(config, "ACTIONZONE_15M_SLOW_MAX", getattr(config, "EMA_CROSS_15M_SLOW_MAX", 80))
+    slow_step = getattr(config, "ACTIONZONE_15M_SLOW_STEP", getattr(config, "EMA_CROSS_15M_SLOW_STEP", 2))
+    min_trades = getattr(config, "ACTIONZONE_15M_MIN_TRADES", getattr(config, "EMA_CROSS_15M_MIN_TRADES", 8))
+    tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
+    max_forward = getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
     try:
         fast_min = int(fast_min)
         fast_max = int(fast_max)
@@ -1093,13 +1413,24 @@ def optimize_best_ema_cross_15m(symbol, df):
                 continue
             if not isinstance(exp_rr, (int, float)):
                 continue
-            key = (float(exp_rr), float(win_rate) if isinstance(win_rate, (int, float)) else -1e9, float(trades))
+            target_trades = max(min_trades * 2, 12)
+            robustness = min(1.0, float(trades) / float(target_trades))
+            opt_score = float(exp_rr) * (0.65 + 0.35 * robustness)
+            candidate = r.copy()
+            candidate["robustness_score"] = float(robustness * 100.0)
+            candidate["opt_score"] = float(opt_score)
+            key = (
+                float(opt_score),
+                float(exp_rr),
+                float(win_rate) if isinstance(win_rate, (int, float)) else -1e9,
+                float(trades),
+            )
             if best is None:
-                best = r.copy()
+                best = candidate
                 best["_key"] = key
             else:
                 if key > best.get("_key", (-1e18, -1e18, -1e18)):
-                    best = r.copy()
+                    best = candidate
                     best["_key"] = key
     if best is None:
         return {
@@ -1128,7 +1459,12 @@ def is_crypto_symbol(symbol):
 def normalize_symbol(symbol):
     if not symbol:
         return ""
-    return str(symbol).strip().upper()
+    s = str(symbol).strip().upper()
+    # Users often paste symbols with a leading '$' (e.g. $BTC-USD).
+    # Yahoo Finance expects raw tickers without '$'.
+    while s.startswith("$"):
+        s = s[1:].strip()
+    return s
 
 # --- Particle A Logic Engine ---
 class ParticleAAnalyzer:
@@ -1235,22 +1571,38 @@ def get_basic_info(symbol):
     cached = _YF_INFO_CACHE.get(cache_key)
     if isinstance(cached, dict) and cached:
         return dict(cached)
-    try:
-        session = _get_thread_curl_session()
-        info = yf.Ticker(sym, session=session).info or {}
-        payload = {
-            'name': info.get('shortName', sym),
-            'sector': info.get('sector', 'N/A'),
-            'market_cap': info.get('marketCap', 0),
-            'pe_ratio': info.get('forwardPE', 'N/A'),
-            'dividend_yield': (info.get('dividendYield', 0) * 100) if info.get('dividendYield') else 0
-        }
-        _YF_INFO_CACHE.set(cache_key, payload)
-        return dict(payload)
-    except Exception:
-        payload = {'name': sym, 'sector': 'N/A', 'market_cap': 0, 'pe_ratio': 'N/A', 'dividend_yield': 0}
-        _YF_INFO_CACHE.set(cache_key, payload)
-        return dict(payload)
+    _configure_yf_tz_cache()
+    for attempt in range(2):
+        try:
+            session = _get_thread_curl_session()
+            info = yf.Ticker(sym, session=session).info or {}
+            payload = {
+                'name': info.get('shortName', sym),
+                'sector': info.get('sector', 'N/A'),
+                'market_cap': info.get('marketCap', 0),
+                'pe_ratio': info.get('forwardPE', 'N/A'),
+                'dividend_yield': (info.get('dividendYield', 0) * 100) if info.get('dividendYield') else 0
+            }
+            _YF_INFO_CACHE.set(cache_key, payload)
+            return dict(payload)
+        except Exception as e:
+            msg = str(e).lower()
+            if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
+                _configure_yf_tz_cache(force_temp=True)
+                _THREAD_LOCAL.curl_session = None
+                continue
+            if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
+                _THREAD_LOCAL.curl_session = curl_requests.Session(
+                    verify=False,
+                    impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                )
+                continue
+            payload = {'name': sym, 'sector': 'N/A', 'market_cap': 0, 'pe_ratio': 'N/A', 'dividend_yield': 0}
+            _YF_INFO_CACHE.set(cache_key, payload)
+            return dict(payload)
+    payload = {'name': sym, 'sector': 'N/A', 'market_cap': 0, 'pe_ratio': 'N/A', 'dividend_yield': 0}
+    _YF_INFO_CACHE.set(cache_key, payload)
+    return dict(payload)
 
 # --- Short Term 15m Strategy (Advanced) ---
 
@@ -2537,10 +2889,70 @@ def _actionzone_trend_1h(symbol):
     except Exception:
         return None
 
+def _actionzone_compute_confidence(signal, trend_dir, bars_since_signal, avg_range_pct, rvol, opt_meta):
+    base = 55.0
+    best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
+    trades = best.get("trades") if isinstance(best, dict) else None
+    win_rate = best.get("win_rate_pct") if isinstance(best, dict) else None
+    expectancy = best.get("expectancy_rr") if isinstance(best, dict) else None
+    robustness = best.get("robustness_score") if isinstance(best, dict) else None
+    if isinstance(win_rate, (int, float)):
+        base += max(-10.0, min(12.0, (float(win_rate) - 50.0) * 0.45))
+    if isinstance(expectancy, (int, float)):
+        base += max(-12.0, min(14.0, float(expectancy) * 18.0))
+    if isinstance(trades, (int, float)):
+        base += max(-6.0, min(10.0, (float(trades) - 8.0) * 0.5))
+    if isinstance(robustness, (int, float)):
+        base += max(-8.0, min(8.0, (float(robustness) - 50.0) * 0.12))
+    if signal in ("BUY", "SELL"):
+        base += 6.0
+    trend_aligned = (
+        trend_dir is None
+        or (signal == "BUY" and trend_dir == "UP")
+        or (signal == "SELL" and trend_dir == "DOWN")
+    )
+    if signal in ("BUY", "SELL") and trend_dir in ("UP", "DOWN"):
+        base += 8.0 if trend_aligned else -12.0
+    if isinstance(bars_since_signal, (int, float)):
+        bars = int(bars_since_signal)
+        if bars <= 0:
+            base += 6.0
+        elif bars == 1:
+            base += 3.0
+        elif bars > 2:
+            base -= min(12.0, float((bars - 2) * 4))
+    low_vol = getattr(config, "ACTIONZONE_15M_VOL_LOW_PCT", 0.35)
+    high_vol = getattr(config, "ACTIONZONE_15M_VOL_HIGH_PCT", 3.50)
+    try:
+        low_vol = float(low_vol)
+    except Exception:
+        low_vol = 0.35
+    try:
+        high_vol = float(high_vol)
+    except Exception:
+        high_vol = 3.50
+    if high_vol < low_vol:
+        high_vol = low_vol
+    if isinstance(avg_range_pct, (int, float)):
+        if float(avg_range_pct) < low_vol:
+            base -= 8.0
+        elif float(avg_range_pct) > high_vol:
+            base -= 6.0
+    if isinstance(rvol, (int, float)):
+        if float(rvol) >= 1.20:
+            base += 4.0
+        elif float(rvol) <= 0.80:
+            base -= 5.0
+    if base < 0:
+        base = 0.0
+    if base > 100:
+        base = 100.0
+    return float(base)
+
 def _actionzone_15m_alert(symbol):
     try:
         sym = normalize_symbol(symbol)
-        yf_period = getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d")
+        yf_period = getattr(config, "ACTIONZONE_15M_YF_PERIOD", "30d")
         data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
         if data_15m is None or data_15m.empty:
             data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
@@ -2549,12 +2961,21 @@ def _actionzone_15m_alert(symbol):
         df = _ema_cross_15m_prepare_df(data_15m)
         if df is None or df.empty:
             return None
+        
+        # Calculate performance metrics/average behavior
+        avg_vol = float(df["Volume"].tail(20).mean())
+        avg_range_pct = float(((df["High"] - df["Low"]) / df["Close"] * 100).tail(20).mean())
+        
         best_fast_len = None
         best_slow_len = None
+        opt_meta = None
+        
         cached = _ema_cross_15m_get_cached(sym)
         if isinstance(cached, dict):
             best_fast_len = cached.get("fast_len")
             best_slow_len = cached.get("slow_len")
+            opt_meta = cached.get("opt_meta")
+            
         use_opt = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", True)
         if use_opt and (best_fast_len is None or best_slow_len is None):
             opt_meta = optimize_best_ema_cross_15m(sym, df)
@@ -2563,13 +2984,16 @@ def _actionzone_15m_alert(symbol):
                 best_fast_len = best.get("fast_len")
                 best_slow_len = best.get("slow_len")
                 _ema_cross_15m_set_cached(sym, {"fast_len": best_fast_len, "slow_len": best_slow_len, "opt_meta": opt_meta})
+        
         try:
             best_fast_len = int(best_fast_len) if best_fast_len is not None else 12
             best_slow_len = int(best_slow_len) if best_slow_len is not None else 26
         except Exception:
             best_fast_len, best_slow_len = 12, 26
+            
         if best_fast_len < 2 or best_slow_len < 2 or best_fast_len >= best_slow_len:
             best_fast_len, best_slow_len = 12, 26
+            
         smooth = getattr(config, "ACTIONZONE_15M_SMOOTH", 1)
         try:
             smooth = int(smooth)
@@ -2577,34 +3001,43 @@ def _actionzone_15m_alert(symbol):
             smooth = 1
         if smooth < 1:
             smooth = 1
+            
         close = df["Close"].astype(float)
         x_confirm = close.ewm(span=smooth, adjust=False).mean() if smooth > 1 else close
         fast = x_confirm.ewm(span=best_fast_len, adjust=False).mean()
         slow = x_confirm.ewm(span=best_slow_len, adjust=False).mean()
+        
         bull = fast > slow
         bear = fast < slow
+        
         green = bull & (x_confirm > fast)
         blue = bear & (x_confirm > fast) & (x_confirm > slow)
         lblue = bear & (x_confirm > fast) & (x_confirm < slow)
         red = bear & (x_confirm < fast)
         orange = bull & (x_confirm < fast) & (x_confirm < slow)
         yellow = bull & (x_confirm < fast) & (x_confirm > slow)
+        
         zone = np.where(green, "GREEN",
                 np.where(blue, "BLUE",
                 np.where(lblue, "LBLUE",
                 np.where(red, "RED",
                 np.where(orange, "ORANGE",
                 np.where(yellow, "YELLOW", "NEUTRAL"))))))
+        
         zone_now = zone[-1]
+        
         buy_signal = green & (~green.shift(1).fillna(False))
         sell_signal = red & (~red.shift(1).fillna(False))
+        
         raw_signal = "WAIT"
         if bool(buy_signal.iloc[-1]):
             raw_signal = "BUY"
         elif bool(sell_signal.iloc[-1]):
             raw_signal = "SELL"
+            
         last_buy_time = buy_signal[buy_signal].index[-1] if buy_signal.any() else None
         last_sell_time = sell_signal[sell_signal].index[-1] if sell_signal.any() else None
+        
         last_signal_type = None
         last_signal_time = None
         if last_buy_time is not None and (last_sell_time is None or last_buy_time > last_sell_time):
@@ -2613,6 +3046,7 @@ def _actionzone_15m_alert(symbol):
         elif last_sell_time is not None:
             last_signal_type = "SELL"
             last_signal_time = last_sell_time
+            
         bars_since_signal = None
         if last_signal_time is not None:
             try:
@@ -2620,6 +3054,7 @@ def _actionzone_15m_alert(symbol):
                 bars_since_signal = max(0, len(df) - idx_pos - 1)
             except Exception:
                 bars_since_signal = None
+                
         signal = "WAIT"
         if raw_signal in ("BUY", "SELL"):
             signal = raw_signal
@@ -2633,115 +3068,96 @@ def _actionzone_15m_alert(symbol):
                 alert_bars = 0
             if bars_since_signal is not None and bars_since_signal <= alert_bars:
                 signal = last_signal_type
+                
         trend_1h = _actionzone_trend_1h(sym)
         trend_dir = trend_1h.get("trend") if isinstance(trend_1h, dict) else None
         trend_strength = trend_1h.get("strength") if isinstance(trend_1h, dict) else None
+        entry_idx = len(close) - 1
+        if last_signal_time is not None:
+            try:
+                entry_idx = int(df.index.get_loc(last_signal_time))
+            except Exception:
+                entry_idx = len(close) - 1
+        entry_price = float(close.iloc[entry_idx]) if pd.notna(close.iloc[entry_idx]) else None
+        current_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+        atr_now = float(df["ATR"].iloc[-1]) if pd.notna(df["ATR"].iloc[-1]) else None
+        rvol = None
+        vol_avg_now = df["Vol_Avg"].iloc[-1]
+        if pd.notna(vol_avg_now) and float(vol_avg_now) > 0 and pd.notna(df["Volume"].iloc[-1]):
+            rvol = float(df["Volume"].iloc[-1] / vol_avg_now)
         trend_ok = True
         if signal == "BUY" and trend_dir not in (None, "UP"):
             trend_ok = False
         if signal == "SELL" and trend_dir not in (None, "DOWN"):
             trend_ok = False
         filtered_signal = signal if trend_ok else "WAIT"
-        entry_idx = None
-        if last_signal_time is not None:
-            try:
-                entry_idx = df.index.get_loc(last_signal_time)
-            except Exception:
-                entry_idx = None
-        if entry_idx is None:
-            entry_idx = len(close) - 1
-        entry_price = float(close.iloc[entry_idx]) if pd.notna(close.iloc[entry_idx]) else None
-        current_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
-        ema_fast = float(fast.iloc[-1]) if pd.notna(fast.iloc[-1]) else None
-        ema_slow = float(slow.iloc[-1]) if pd.notna(slow.iloc[-1]) else None
-        rvol = None
-        if pd.notna(df["Vol_Avg"].iloc[-1]) and df["Vol_Avg"].iloc[-1] > 0:
-            rvol = float(df["Volume"].iloc[-1] / df["Vol_Avg"].iloc[-1])
-        ema_gap_pct = None
-        if entry_price and ema_fast is not None and ema_slow is not None:
-            ema_gap_pct = abs(ema_fast - ema_slow) / entry_price * 100
-        atr_val = None
-        if pd.notna(df["ATR"].iloc[-1]):
-            atr_val = float(df["ATR"].iloc[-1])
-        conf = 0.45
-        if filtered_signal in ("BUY", "SELL"):
-            conf += 0.2
-        if trend_ok and trend_dir in ("UP", "DOWN"):
-            conf += 0.15
-        if ema_gap_pct is not None:
-            if ema_gap_pct >= 0.3:
-                conf += 0.1
-            elif ema_gap_pct <= 0.15:
-                conf -= 0.05
-        if rvol is not None:
-            if rvol >= 1.2:
-                conf += 0.05
-            elif rvol <= 0.8:
-                conf -= 0.05
-        if conf < 0:
-            conf = 0
-        if conf > 1:
-            conf = 1
+        stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+        min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 1.0)
+        tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", 5.0)
+        try:
+            stop_mult = float(stop_mult)
+        except Exception:
+            stop_mult = 1.5
+        try:
+            min_stop_pct = float(min_stop_pct)
+        except Exception:
+            min_stop_pct = 1.0
+        try:
+            tp_mult = float(tp_mult)
+        except Exception:
+            tp_mult = 5.0
+        if stop_mult <= 0:
+            stop_mult = 1.0
+        if min_stop_pct < 0:
+            min_stop_pct = 0.0
+        if tp_mult <= 0:
+            tp_mult = 5.0
         stop_loss = None
-        if entry_price is not None and atr_val is not None and atr_val > 0:
-            stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
-            min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 0.8)
-            try:
-                stop_mult = float(stop_mult)
-            except Exception:
-                stop_mult = 1.5
-            try:
-                min_stop_pct = float(min_stop_pct)
-            except Exception:
-                min_stop_pct = 0.8
-            if stop_mult <= 0:
-                stop_mult = 1.0
-            if min_stop_pct < 0:
-                min_stop_pct = 0.0
-            risk_dist = atr_val * stop_mult
-            min_risk_dist = abs(entry_price) * (min_stop_pct / 100.0)
-            if risk_dist < min_risk_dist:
-                risk_dist = min_risk_dist
+        take_profit = None
+        risk_dist = None
+        if entry_price is not None and atr_now is not None and atr_now > 0 and filtered_signal in ("BUY", "SELL"):
+            risk_dist = max(float(atr_now) * stop_mult, abs(float(entry_price)) * (min_stop_pct / 100.0))
             if filtered_signal == "BUY":
-                stop_loss = entry_price - risk_dist
-            elif filtered_signal == "SELL":
-                stop_loss = entry_price + risk_dist
-        alert_active = filtered_signal in ("BUY", "SELL")
-        recommendation = "WAIT"
-        if filtered_signal == "BUY":
-            recommendation = "BUY"
-        elif filtered_signal == "SELL":
-            recommendation = "SELL"
-        elif signal in ("BUY", "SELL") and not trend_ok:
-            recommendation = "WAIT (Trend mismatch)"
+                stop_loss = float(entry_price - risk_dist)
+                take_profit = float(entry_price + (risk_dist * tp_mult))
+            else:
+                stop_loss = float(entry_price + risk_dist)
+                take_profit = float(entry_price - (risk_dist * tp_mult))
+        confidence = _actionzone_compute_confidence(
+            filtered_signal,
+            trend_dir,
+            bars_since_signal,
+            avg_range_pct,
+            rvol,
+            opt_meta,
+        )
         last_signal_time_str = last_signal_time.strftime("%Y-%m-%d %H:%M") if last_signal_time is not None else None
         return {
+            "symbol": sym,
             "signal": filtered_signal,
-            "raw_signal": signal,
+            "raw_signal": raw_signal,
             "zone": zone_now,
-            "last_signal_type": last_signal_type,
-            "last_signal_time": last_signal_time_str,
-            "bars_since_signal": bars_since_signal,
-            "trend_1h": trend_dir,
-            "trend_strength_1h": trend_strength,
-            "trend_alignment": trend_ok,
-            "entry_price": entry_price,
+            "fast_len": best_fast_len,
+            "slow_len": best_slow_len,
             "current_price": current_price,
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
-            "ema_fast_length": best_fast_len,
-            "ema_slow_length": best_slow_len,
-            "smooth": smooth,
-            "ema_gap_pct": ema_gap_pct,
-            "rvol": rvol,
-            "alert": alert_active,
-            "confidence": conf * 100.0,
-            "win_prob": conf * 100.0,
+            "entry_price": entry_price if filtered_signal in ("BUY", "SELL") else None,
             "stop_loss": stop_loss,
-            "atr": atr_val,
-            "recommendation": recommendation
+            "take_profit": take_profit,
+            "bars_since_signal": bars_since_signal,
+            "last_signal_time": last_signal_time_str,
+            "trend_1h": trend_dir,
+            "trend_strength": trend_strength,
+            "trend_alignment": trend_ok,
+            "alert": filtered_signal in ("BUY", "SELL"),
+            "confidence": confidence,
+            "avg_range_pct": avg_range_pct,
+            "avg_vol": avg_vol,
+            "atr": atr_now,
+            "rvol": rvol,
+            "optimizer": opt_meta,
         }
-    except Exception:
+    except Exception as e:
+        print(f"Error in _actionzone_15m_alert for {symbol}: {e}")
         return None
 
 
@@ -3203,7 +3619,7 @@ def generate_gemini_particle_a_analysis(info, data, resonance_score, phase_statu
     return ui_signal, text
 
 
-def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, sovereign_plan, resonance_score, phase_status, crypto_plan=None):
+def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, actionzone_plan, sovereign_plan, resonance_score, phase_status, crypto_plan=None, cdc_plan=None):
     up_score = 0.0
     down_score = 0.0
     conf_sum = 0.0
@@ -3236,6 +3652,22 @@ def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_pla
         }
         process_plan(ema_proxy)
         add_conf(ema_plan.get("predicted_win_prob", ema_plan.get("confidence")))
+    if isinstance(actionzone_plan, dict):
+        az_proxy = {
+            "setup": actionzone_plan.get("signal"),
+            "confidence": actionzone_plan.get("confidence"),
+        }
+        process_plan(az_proxy)
+        add_conf(actionzone_plan.get("confidence"))
+    if isinstance(cdc_plan, dict):
+        cdc_signal = _normalize_trade_direction(cdc_plan.get("signal"))
+        if cdc_signal in ("BUY", "SELL"):
+            cdc_proxy = {
+                "setup": cdc_signal,
+                "confidence": cdc_plan.get("confidence"),
+            }
+            process_plan(cdc_proxy)
+            add_conf(cdc_plan.get("confidence"))
     if isinstance(crypto_plan, dict):
         process_plan(crypto_plan)
     if isinstance(sovereign_plan, dict):
@@ -3280,6 +3712,147 @@ def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_pla
         "short_term_signal": short_term_signal,
         "phase_status": phase_status,
     }
+
+
+def build_price_forecast(current_price, prediction, support=None, resistance=None, actionzone_plan=None, ema_plan=None, cdc_plan=None):
+    try:
+        price = float(current_price)
+    except Exception:
+        return None
+    if price <= 0:
+        return None
+    candidate = _pick_price_forecast_candidate(
+        ("ActionZone 15m", actionzone_plan),
+        ("EMA Cross 15m", ema_plan),
+        ("CDC+VixFix 15m", cdc_plan),
+    )
+    direction = candidate.get("direction") if isinstance(candidate, dict) else None
+    confidence = candidate.get("confidence") if isinstance(candidate, dict) else None
+    source = candidate.get("label") if isinstance(candidate, dict) else None
+    plan = candidate.get("plan") if isinstance(candidate, dict) else None
+    if direction not in ("BUY", "SELL") and isinstance(prediction, dict):
+        direction = _normalize_trade_direction(prediction.get("direction"))
+    if confidence is None and isinstance(prediction, dict):
+        confidence = _normalize_confidence(prediction.get("probability"))
+    if confidence is None:
+        confidence = 50.0
+    horizon_hours = None
+    if isinstance(plan, dict):
+        bars_15m = plan.get("expected_holding_bars_15m")
+        if isinstance(bars_15m, (int, float)) and bars_15m > 0:
+            horizon_hours = float(bars_15m) * 0.25
+    if horizon_hours is None and isinstance(prediction, dict):
+        ph = prediction.get("expected_holding_hours")
+        if isinstance(ph, (int, float)) and ph > 0:
+            horizon_hours = float(ph)
+    if horizon_hours is None:
+        horizon_hours = getattr(config, "PRICE_FORECAST_DEFAULT_HOURS", 6.0)
+    try:
+        horizon_hours = float(horizon_hours)
+    except Exception:
+        horizon_hours = 6.0
+    if horizon_hours <= 0:
+        horizon_hours = 6.0
+    atr_val = None
+    if isinstance(plan, dict):
+        atr_val = plan.get("atr")
+    try:
+        atr_val = float(atr_val)
+    except Exception:
+        atr_val = None
+    if atr_val is None or atr_val <= 0:
+        atr_val = abs(price) * 0.01
+    base_atr_mult = getattr(config, "PRICE_FORECAST_BASE_ATR_MULT", 1.2)
+    stretch_atr_mult = getattr(config, "PRICE_FORECAST_STRETCH_ATR_MULT", 2.4)
+    try:
+        base_atr_mult = float(base_atr_mult)
+    except Exception:
+        base_atr_mult = 1.2
+    try:
+        stretch_atr_mult = float(stretch_atr_mult)
+    except Exception:
+        stretch_atr_mult = 2.4
+    if base_atr_mult <= 0:
+        base_atr_mult = 1.2
+    if stretch_atr_mult < base_atr_mult:
+        stretch_atr_mult = base_atr_mult * 1.5
+    confidence_factor = max(0.8, min(1.25, 0.8 + (float(confidence) / 100.0) * 0.45))
+    expected_move_pct = None
+    if isinstance(plan, dict) and isinstance(plan.get("expected_move_pct"), (int, float)):
+        expected_move_pct = abs(float(plan.get("expected_move_pct")))
+    elif isinstance(prediction, dict) and isinstance(prediction.get("expected_move_pct"), (int, float)):
+        expected_move_pct = abs(float(prediction.get("expected_move_pct")))
+    support_val = None
+    resistance_val = None
+    try:
+        support_val = float(support)
+    except Exception:
+        support_val = None
+    try:
+        resistance_val = float(resistance)
+    except Exception:
+        resistance_val = None
+    stop_loss = plan.get("stop_loss") if isinstance(plan, dict) else None
+    take_profit = plan.get("take_profit") if isinstance(plan, dict) else None
+    try:
+        stop_loss = float(stop_loss)
+    except Exception:
+        stop_loss = None
+    try:
+        take_profit = float(take_profit)
+    except Exception:
+        take_profit = None
+    move_from_atr = atr_val * base_atr_mult * confidence_factor
+    stretch_from_atr = atr_val * stretch_atr_mult * confidence_factor
+    if isinstance(expected_move_pct, (int, float)) and expected_move_pct > 0:
+        pct_move = price * (float(expected_move_pct) / 100.0)
+        move_from_atr = max(move_from_atr, pct_move * 0.55)
+        stretch_from_atr = max(stretch_from_atr, pct_move)
+    direction = direction or "NEUTRAL"
+    if direction == "BUY":
+        base_price = price + move_from_atr
+        stretch_price = price + stretch_from_atr
+        if isinstance(take_profit, float) and take_profit > price:
+            base_price = (base_price + take_profit) / 2.0
+            stretch_price = max(stretch_price, take_profit)
+        if isinstance(resistance_val, float) and resistance_val > price:
+            base_price = min(base_price, resistance_val)
+        range_low = stop_loss if isinstance(stop_loss, float) and stop_loss < price else price - (atr_val * 0.6)
+        range_high = stretch_price
+        invalidation_price = stop_loss if isinstance(stop_loss, float) else range_low
+        decision_bias = "ให้น้ำหนักฝั่งขึ้นเมื่อราคาไม่หลุดจุดยกเลิกมุมมอง"
+    elif direction == "SELL":
+        base_price = price - move_from_atr
+        stretch_price = price - stretch_from_atr
+        if isinstance(take_profit, float) and take_profit < price:
+            base_price = (base_price + take_profit) / 2.0
+            stretch_price = min(stretch_price, take_profit)
+        if isinstance(support_val, float) and support_val < price:
+            base_price = max(base_price, support_val)
+        range_low = stretch_price
+        range_high = stop_loss if isinstance(stop_loss, float) and stop_loss > price else price + (atr_val * 0.6)
+        invalidation_price = stop_loss if isinstance(stop_loss, float) else range_high
+        decision_bias = "ให้น้ำหนักฝั่งลงเมื่อราคาไม่ทะลุจุดยกเลิกมุมมอง"
+    else:
+        base_price = price
+        range_low = support_val if isinstance(support_val, float) and support_val < price else price - move_from_atr
+        range_high = resistance_val if isinstance(resistance_val, float) and resistance_val > price else price + move_from_atr
+        invalidation_price = None
+        decision_bias = "ตลาดยังไม่ชี้ทางชัด รอ breakout หรือ breakdown"
+    forecast = {
+        "direction": direction,
+        "source": source or "Prediction Engine",
+        "confidence": float(confidence),
+        "current_price": float(price),
+        "base_price": float(base_price),
+        "range_low": float(min(range_low, range_high)),
+        "range_high": float(max(range_low, range_high)),
+        "invalidation_price": float(invalidation_price) if isinstance(invalidation_price, (int, float)) else None,
+        "expected_move_pct": float(expected_move_pct) if isinstance(expected_move_pct, (int, float)) else None,
+        "horizon_hours": float(horizon_hours),
+        "decision_bias": decision_bias,
+    }
+    return forecast
 
 # --- Main Analysis Logic ---
 
@@ -3369,7 +3942,27 @@ def analyze_single_symbol(symbol, period):
             context=exit_context,
         )
         order_blocks_15m = _order_block_levels_15m(symbol)
-        prediction = build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_cross_plan, sovereign_4h_plan, resonance_score, phase_status, crypto_reversal_plan)
+        prediction = build_prediction_summary(
+            short_term_plan,
+            sniper_plan,
+            quantum_plan,
+            ema_cross_plan,
+            actionzone_plan,
+            sovereign_4h_plan,
+            resonance_score,
+            phase_status,
+            crypto_reversal_plan,
+            cdc_vixfix_plan,
+        )
+        price_forecast = build_price_forecast(
+            float(latest["Close"]) if pd.notna(latest["Close"]) else None,
+            prediction,
+            support=float(support) if pd.notna(support) else None,
+            resistance=float(resistance) if pd.notna(resistance) else None,
+            actionzone_plan=actionzone_plan,
+            ema_plan=ema_cross_plan,
+            cdc_plan=cdc_vixfix_plan,
+        )
         return {
             "symbol": symbol,
             "name": info["name"],
@@ -3395,6 +3988,7 @@ def analyze_single_symbol(symbol, period):
             "rsi": float(latest["RSI"]) if pd.notna(latest["RSI"]) else None,
             "macd": float(latest["MACD"]) if pd.notna(latest["MACD"]) else None,
             "prediction": prediction,
+            "price_forecast": price_forecast,
         }
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
@@ -3418,58 +4012,40 @@ def analyze():
     data = request.get_json(silent=True) or {}
     if not isinstance(data, dict):
         return jsonify({'error': 'Invalid request body'}), 400
-    raw_symbols = str(data.get('symbols', '')).upper().replace('\n', ',').replace(';', ',')
-    symbols_raw = [s.strip() for s in raw_symbols.split(',') if s.strip()]
-    symbols = []
-    seen = set()
-    for s in symbols_raw:
-        if s in seen:
-            continue
-        seen.add(s)
-        symbols.append(s)
+    raw_symbols = data.get('symbols', '')
+    symbols = _parse_symbols_input(raw_symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
     period = data.get('period', '1mo')
     if period not in VALID_PERIODS:
         return jsonify({'error': 'Invalid period'}), 400
     if not symbols:
         return jsonify({'error': 'No symbols provided'}), 400
-    if len(symbols) > 30:
-        return jsonify({'error': 'Too many symbols (max 30)'}), 400
+    if len(_parse_symbols_input(raw_symbols, max_symbols=10000)) > _MAX_SYMBOLS_PER_REQUEST:
+        return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
 
-    results = list(_ANALYZE_EXECUTOR.map(lambda s: analyze_single_symbol(s, period), symbols))
+    if len(symbols) == 1:
+        results = [analyze_single_symbol(symbols[0], period)]
+    else:
+        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period)))
     notify = bool(data.get("notify_telegram"))
     if notify:
         _notify_telegram_from_results(results)
 
-    def clean_value(v):
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        if isinstance(v, (list, tuple)):
-            return [clean_value(x) for x in v]
-        if isinstance(v, dict):
-            return {k: clean_value(x) for k, x in v.items()}
-        return v
-
-    cleaned = [clean_value(r) for r in results]
+    cleaned = [_clean_json_value(r) for r in results]
     return jsonify({'results': cleaned})
 
 def _run_once(symbols, period, notify_telegram):
-    raw_symbols = str(symbols or "").upper().replace("\n", ",").replace(";", ",")
-    symbols_raw = [s.strip() for s in raw_symbols.split(",") if s.strip()]
-    uniq = []
-    seen = set()
-    for s in symbols_raw:
-        if s in seen:
-            continue
-        seen.add(s)
-        uniq.append(s)
+    uniq = _parse_symbols_input(symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
     if not uniq:
         return 2
     if period not in VALID_PERIODS:
         return 2
-    results = [analyze_single_symbol(s, period) for s in uniq]
+    if len(uniq) == 1:
+        results = [analyze_single_symbol(uniq[0], period)]
+    else:
+        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, uniq, repeat(period)))
     if notify_telegram:
         _notify_telegram_from_results(results)
-    print(json.dumps({"results": results}, ensure_ascii=False))
+    print(json.dumps({"results": [_clean_json_value(r) for r in results]}, ensure_ascii=False))
     return 0
 
 if __name__ == '__main__':

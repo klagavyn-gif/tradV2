@@ -1466,6 +1466,36 @@ def normalize_symbol(symbol):
         s = s[1:].strip()
     return s
 
+
+def _get_preferred_15m_history(symbol):
+    sym = normalize_symbol(symbol)
+    if not sym:
+        return None
+    yf_period = getattr(
+        config,
+        "EMA_CROSS_15M_YF_PERIOD",
+        getattr(config, "SHORT_TERM_15M_YF_PERIOD", "30d"),
+    )
+    data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+    if data_15m is None or data_15m.empty:
+        data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+    return data_15m
+
+
+def _get_preferred_1h_history(symbol):
+    sym = normalize_symbol(symbol)
+    if not sym:
+        return None
+    trend_period = getattr(
+        config,
+        "SHORT_TERM_15M_TREND_1H_PERIOD",
+        getattr(config, "ACTIONZONE_15M_TREND_1H_PERIOD", "3mo"),
+    )
+    data_1h = get_yf_history(sym, period=str(trend_period), interval="1h", auto_adjust=True)
+    if data_1h is None or data_1h.empty:
+        data_1h = get_yf_history(sym, period="1mo", interval="1h", auto_adjust=True)
+    return data_1h
+
 # --- Particle A Logic Engine ---
 class ParticleAAnalyzer:
     """
@@ -1632,7 +1662,7 @@ class ShortTermStrategy:
         return levels, swing_high, swing_low
 
     @staticmethod
-    def analyze_15m_setup(symbol):
+    def analyze_15m_setup(symbol, data_15m=None, data_1h=None):
         """วิเคราะห์จุดเข้า-ออก Timeframe 15 นาที แบบความแม่นยำสูง"""
         try:
             def _to_float(x):
@@ -1678,15 +1708,17 @@ class ShortTermStrategy:
 
             sym = normalize_symbol(symbol)
 
-            yf_period = getattr(config, "SHORT_TERM_15M_YF_PERIOD", "30d")
-            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
-            if data_15m is None or data_15m.empty:
-                data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+            if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+                yf_period = getattr(config, "SHORT_TERM_15M_YF_PERIOD", "30d")
+                data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+                if data_15m is None or data_15m.empty:
+                    data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
 
-            trend_period = getattr(config, "SHORT_TERM_15M_TREND_1H_PERIOD", "3mo")
-            data_1h = get_yf_history(sym, period=str(trend_period), interval="1h", auto_adjust=True)
-            if data_1h is None or data_1h.empty:
-                data_1h = get_yf_history(sym, period="1mo", interval="1h", auto_adjust=True)
+            if not isinstance(data_1h, pd.DataFrame) or data_1h.empty:
+                trend_period = getattr(config, "SHORT_TERM_15M_TREND_1H_PERIOD", "3mo")
+                data_1h = get_yf_history(sym, period=str(trend_period), interval="1h", auto_adjust=True)
+                if data_1h is None or data_1h.empty:
+                    data_1h = get_yf_history(sym, period="1mo", interval="1h", auto_adjust=True)
 
             if data_15m is None or data_15m.empty or data_1h is None or data_1h.empty:
                 return None
@@ -2052,11 +2084,13 @@ class ShortTermStrategy:
             return None
 
     @staticmethod
-    def analyze_sniper_setup(symbol):
+    def analyze_sniper_setup(symbol, data_15m=None, data_1h=None):
         try:
             sym = normalize_symbol(symbol)
-            data_15m = get_yf_history(sym, period='5d', interval='15m', auto_adjust=True)
-            data_1h = get_yf_history(sym, period='1mo', interval='1h', auto_adjust=True)
+            if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+                data_15m = _get_preferred_15m_history(sym)
+            if not isinstance(data_1h, pd.DataFrame) or data_1h.empty:
+                data_1h = _get_preferred_1h_history(sym)
             if data_15m is None or data_1h is None or data_15m.empty or data_1h.empty:
                 return None
 
@@ -2241,10 +2275,13 @@ class QuantumHunterStrategy:
         return z
 
     @staticmethod
-    def analyze(symbol, period="5d"):
+    def analyze(symbol, period="5d", data_15m=None):
         try:
             sym = normalize_symbol(symbol)
-            df = get_yf_history(sym, period=period, interval="15m", auto_adjust=True)
+            if isinstance(data_15m, pd.DataFrame) and not data_15m.empty:
+                df = data_15m
+            else:
+                df = get_yf_history(sym, period=period, interval="15m", auto_adjust=True)
             if df is None or df.empty or len(df) < 60:
                 return None
             return QuantumHunterStrategy.process_data(df.copy())
@@ -2305,13 +2342,15 @@ class QuantumHunterStrategy:
 
 class CryptoReversal15m:
     @staticmethod
-    def analyze(symbol):
+    def analyze(symbol, data_15m=None, data_1h=None):
         if not is_crypto_symbol(symbol):
             return None
         try:
             sym = normalize_symbol(symbol)
-            data_15m = get_yf_history(sym, period='5d', interval='15m', auto_adjust=True)
-            data_1h = get_yf_history(sym, period='1mo', interval='1h', auto_adjust=True)
+            if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+                data_15m = _get_preferred_15m_history(sym)
+            if not isinstance(data_1h, pd.DataFrame) or data_1h.empty:
+                data_1h = _get_preferred_1h_history(sym)
             if data_15m is None or data_1h is None or data_15m.empty or len(data_15m) < 60 or data_1h.empty or len(data_1h) < 40:
                 return None
             df = data_15m.copy()
@@ -2610,7 +2649,7 @@ class CryptoReversal15m:
 
 class EMACross15m:
     @staticmethod
-    def analyze(symbol):
+    def analyze(symbol, data_15m=None):
         if not is_crypto_symbol(symbol):
             return None
         try:
@@ -2623,10 +2662,11 @@ class EMACross15m:
                 best_fast_len = cached.get("fast_len")
                 best_slow_len = cached.get("slow_len")
                 opt_meta = cached.get("opt_meta")
-            yf_period = getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d")
-            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
-            if data_15m is None or data_15m.empty:
-                data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+            if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+                yf_period = getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d")
+                data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+                if data_15m is None or data_15m.empty:
+                    data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
             if data_15m is None or data_15m.empty or len(data_15m) < 120:
                 return None
             df = _ema_cross_15m_prepare_df(data_15m)
@@ -2849,11 +2889,14 @@ class EMACross15m:
         except Exception:
             return None
 
-def _actionzone_trend_1h(symbol):
+def _actionzone_trend_1h(symbol, data_1h=None):
     try:
         sym = normalize_symbol(symbol)
-        period = getattr(config, "ACTIONZONE_15M_TREND_1H_PERIOD", getattr(config, "SHORT_TERM_15M_TREND_1H_PERIOD", "3mo"))
-        df = get_yf_history(sym, period=str(period), interval="1h", auto_adjust=True)
+        if isinstance(data_1h, pd.DataFrame) and not data_1h.empty:
+            df = data_1h
+        else:
+            period = getattr(config, "ACTIONZONE_15M_TREND_1H_PERIOD", getattr(config, "SHORT_TERM_15M_TREND_1H_PERIOD", "3mo"))
+            df = get_yf_history(sym, period=str(period), interval="1h", auto_adjust=True)
         if df is None or df.empty or len(df) < 80:
             return None
         close = df["Close"].astype(float)
@@ -2949,13 +2992,14 @@ def _actionzone_compute_confidence(signal, trend_dir, bars_since_signal, avg_ran
         base = 100.0
     return float(base)
 
-def _actionzone_15m_alert(symbol):
+def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
     try:
         sym = normalize_symbol(symbol)
-        yf_period = getattr(config, "ACTIONZONE_15M_YF_PERIOD", "30d")
-        data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
-        if data_15m is None or data_15m.empty:
-            data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+        if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+            yf_period = getattr(config, "ACTIONZONE_15M_YF_PERIOD", "30d")
+            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+            if data_15m is None or data_15m.empty:
+                data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
         if data_15m is None or data_15m.empty or len(data_15m) < 120:
             return None
         df = _ema_cross_15m_prepare_df(data_15m)
@@ -3069,7 +3113,7 @@ def _actionzone_15m_alert(symbol):
             if bars_since_signal is not None and bars_since_signal <= alert_bars:
                 signal = last_signal_type
                 
-        trend_1h = _actionzone_trend_1h(sym)
+        trend_1h = _actionzone_trend_1h(sym, data_1h=data_1h)
         trend_dir = trend_1h.get("trend") if isinstance(trend_1h, dict) else None
         trend_strength = trend_1h.get("strength") if isinstance(trend_1h, dict) else None
         entry_idx = len(close) - 1
@@ -3161,13 +3205,14 @@ def _actionzone_15m_alert(symbol):
         return None
 
 
-def _cdc_vixfix_15m_plan(symbol):
+def _cdc_vixfix_15m_plan(symbol, data_15m=None):
     try:
         sym = normalize_symbol(symbol)
-        yf_period = getattr(config, "CDC_VIXFIX_15M_YF_PERIOD", "30d")
-        data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
-        if data_15m is None or data_15m.empty:
-            data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+        if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+            yf_period = getattr(config, "CDC_VIXFIX_15M_YF_PERIOD", "30d")
+            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+            if data_15m is None or data_15m.empty:
+                data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
         if data_15m is None or data_15m.empty or len(data_15m) < 80:
             return None
         df = data_15m[["Open", "High", "Low", "Close", "Volume"]].copy()
@@ -3356,13 +3401,14 @@ def _cdc_vixfix_15m_plan(symbol):
     except Exception:
         return None
 
-def _order_block_levels_15m(symbol):
+def _order_block_levels_15m(symbol, data_15m=None):
     try:
         sym = normalize_symbol(symbol)
-        yf_period = getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d")
-        data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
-        if data_15m is None or data_15m.empty:
-            data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
+        if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+            yf_period = getattr(config, "EMA_CROSS_15M_YF_PERIOD", "30d")
+            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+            if data_15m is None or data_15m.empty:
+                data_15m = get_yf_history(sym, period="5d", interval="15m", auto_adjust=True)
         if data_15m is None or data_15m.empty:
             return None
         df = data_15m[["Open", "High", "Low", "Close", "Volume"]].copy()
@@ -3455,10 +3501,13 @@ def _order_block_levels_15m(symbol):
 
 class QuantumSovereign4H:
     @staticmethod
-    def get_data_4h(symbol):
+    def get_data_4h(symbol, data_1h=None):
         try:
             sym = normalize_symbol(symbol)
-            df = get_yf_history(sym, period='60d', interval='1h', auto_adjust=True)
+            if isinstance(data_1h, pd.DataFrame) and not data_1h.empty:
+                df = data_1h
+            else:
+                df = get_yf_history(sym, period='60d', interval='1h', auto_adjust=True)
             if df is None or df.empty:
                 return None
             agg_dict = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
@@ -3492,8 +3541,8 @@ class QuantumSovereign4H:
         return df
 
     @staticmethod
-    def analyze(symbol, balance=10000, baseline_ema_length=None):
-        df = QuantumSovereign4H.get_data_4h(symbol)
+    def analyze(symbol, balance=10000, baseline_ema_length=None, data_1h=None):
+        df = QuantumSovereign4H.get_data_4h(symbol, data_1h=data_1h)
         if df is None or len(df) < 100:
             return {'error': 'ข้อมูลไม่เพียงพอ'}
         df = QuantumSovereign4H.calculate_indicators(df)
@@ -3856,8 +3905,11 @@ def build_price_forecast(current_price, prediction, support=None, resistance=Non
 
 # --- Main Analysis Logic ---
 
-def analyze_single_symbol(symbol, period):
+def analyze_single_symbol(symbol, period, include_chart_data=True):
     try:
+        sym = normalize_symbol(symbol)
+        shared_15m = _get_preferred_15m_history(sym)
+        shared_1h = _get_preferred_1h_history(sym)
         data = get_stock_data(symbol, period)
         if data is None:
             return {"symbol": symbol, "error": "No Data"}
@@ -3871,21 +3923,23 @@ def analyze_single_symbol(symbol, period):
         vol_status = "High" if latest["Volume"] > vol_avg * 1.2 else "Low" if latest["Volume"] < vol_avg * 0.8 else "Normal"
         info = get_basic_info(symbol)
         signal, ai_reason = generate_gemini_particle_a_analysis(info, data, resonance_score, phase_status, support, resistance, vol_status)
-        chart_data = {
-            "dates": [dt.strftime("%Y-%m-%d %H:%M") if period in ["1h", "15m"] else dt.strftime("%Y-%m-%d") for dt in data.index],
-            "close": data["Close"].fillna(0).tolist(),
-            "sma20": data["SMA20"].fillna(0).tolist(),
-            "bb_upper": data["BB_Upper"].fillna(0).tolist(),
-            "bb_lower": data["BB_Lower"].fillna(0).tolist(),
-        }
-        short_term_plan = ShortTermStrategy.analyze_15m_setup(symbol)
-        sniper_plan = ShortTermStrategy.analyze_sniper_setup(symbol)
-        quantum_plan = QuantumHunterStrategy.analyze(symbol)
-        sovereign_4h_plan = QuantumSovereign4H.analyze(symbol)
-        crypto_reversal_plan = CryptoReversal15m.analyze(symbol)
-        ema_cross_plan = EMACross15m.analyze(symbol)
-        actionzone_plan = _actionzone_15m_alert(symbol)
-        cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol)
+        chart_data = None
+        if include_chart_data:
+            chart_data = {
+                "dates": [dt.strftime("%Y-%m-%d %H:%M") if period in ["1h", "15m"] else dt.strftime("%Y-%m-%d") for dt in data.index],
+                "close": data["Close"].fillna(0).tolist(),
+                "sma20": data["SMA20"].fillna(0).tolist(),
+                "bb_upper": data["BB_Upper"].fillna(0).tolist(),
+                "bb_lower": data["BB_Lower"].fillna(0).tolist(),
+            }
+        short_term_plan = ShortTermStrategy.analyze_15m_setup(symbol, data_15m=shared_15m, data_1h=shared_1h)
+        sniper_plan = ShortTermStrategy.analyze_sniper_setup(symbol, data_15m=shared_15m, data_1h=shared_1h)
+        quantum_plan = QuantumHunterStrategy.analyze(symbol, data_15m=shared_15m)
+        sovereign_4h_plan = QuantumSovereign4H.analyze(symbol, data_1h=shared_1h)
+        crypto_reversal_plan = CryptoReversal15m.analyze(symbol, data_15m=shared_15m, data_1h=shared_1h)
+        ema_cross_plan = EMACross15m.analyze(symbol, data_15m=shared_15m)
+        actionzone_plan = _actionzone_15m_alert(symbol, data_15m=shared_15m, data_1h=shared_1h)
+        cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol, data_15m=shared_15m)
         exit_context = {
             "support": float(support) if pd.notna(support) else None,
             "resistance": float(resistance) if pd.notna(resistance) else None,
@@ -3941,7 +3995,7 @@ def analyze_single_symbol(symbol, period):
             tp_keys=["take_profit", "smc_take_profit"],
             context=exit_context,
         )
-        order_blocks_15m = _order_block_levels_15m(symbol)
+        order_blocks_15m = _order_block_levels_15m(symbol, data_15m=shared_15m)
         prediction = build_prediction_summary(
             short_term_plan,
             sniper_plan,
@@ -4013,19 +4067,21 @@ def analyze():
     if not isinstance(data, dict):
         return jsonify({'error': 'Invalid request body'}), 400
     raw_symbols = data.get('symbols', '')
-    symbols = _parse_symbols_input(raw_symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
+    all_symbols = _parse_symbols_input(raw_symbols, max_symbols=10000)
+    symbols = all_symbols[:_MAX_SYMBOLS_PER_REQUEST]
     period = data.get('period', '1mo')
+    include_chart_data = bool(data.get("include_chart_data", True))
     if period not in VALID_PERIODS:
         return jsonify({'error': 'Invalid period'}), 400
-    if not symbols:
+    if not all_symbols:
         return jsonify({'error': 'No symbols provided'}), 400
-    if len(_parse_symbols_input(raw_symbols, max_symbols=10000)) > _MAX_SYMBOLS_PER_REQUEST:
+    if len(all_symbols) > _MAX_SYMBOLS_PER_REQUEST:
         return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
 
     if len(symbols) == 1:
-        results = [analyze_single_symbol(symbols[0], period)]
+        results = [analyze_single_symbol(symbols[0], period, include_chart_data=include_chart_data)]
     else:
-        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period)))
+        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period), repeat(include_chart_data)))
     notify = bool(data.get("notify_telegram"))
     if notify:
         _notify_telegram_from_results(results)
@@ -4040,9 +4096,9 @@ def _run_once(symbols, period, notify_telegram):
     if period not in VALID_PERIODS:
         return 2
     if len(uniq) == 1:
-        results = [analyze_single_symbol(uniq[0], period)]
+        results = [analyze_single_symbol(uniq[0], period, include_chart_data=False)]
     else:
-        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, uniq, repeat(period)))
+        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, uniq, repeat(period), repeat(False)))
     if notify_telegram:
         _notify_telegram_from_results(results)
     print(json.dumps({"results": [_clean_json_value(r) for r in results]}, ensure_ascii=False))

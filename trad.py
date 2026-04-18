@@ -806,7 +806,84 @@ def _format_price_forecast_lines(forecast):
     return lines
 
 
+def _telegram_kill_switch_state(results):
+    enabled = bool(getattr(config, "TELEGRAM_KILL_SWITCH_ENABLED", True))
+    if not enabled:
+        return False, "disabled"
+    if not isinstance(results, list) or not results:
+        return False, "no-results"
+    min_symbols = getattr(config, "TELEGRAM_KILL_SWITCH_MIN_SYMBOLS", 4)
+    exit_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_EXIT_RATIO", 0.50)
+    trend_mismatch_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_TREND_MISMATCH_RATIO", 0.60)
+    high_vol_pct = getattr(config, "TELEGRAM_KILL_SWITCH_HIGH_VOL_PCT", 4.0)
+    high_vol_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO", 0.50)
+    try:
+        min_symbols = int(min_symbols)
+    except Exception:
+        min_symbols = 4
+    try:
+        exit_ratio_limit = float(exit_ratio_limit)
+    except Exception:
+        exit_ratio_limit = 0.50
+    try:
+        trend_mismatch_ratio_limit = float(trend_mismatch_ratio_limit)
+    except Exception:
+        trend_mismatch_ratio_limit = 0.60
+    try:
+        high_vol_pct = float(high_vol_pct)
+    except Exception:
+        high_vol_pct = 4.0
+    try:
+        high_vol_ratio_limit = float(high_vol_ratio_limit)
+    except Exception:
+        high_vol_ratio_limit = 0.50
+    if min_symbols < 1:
+        min_symbols = 1
+    exit_count = 0
+    valid_count = 0
+    az_count = 0
+    trend_mismatch_count = 0
+    vol_count = 0
+    high_vol_count = 0
+    for item in results:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        valid_count += 1
+        cdc_plan = item.get("cdc_vixfix_15m")
+        if isinstance(cdc_plan, dict):
+            cdc_signal = str(cdc_plan.get("signal") or "").upper()
+            is_top = bool(cdc_plan.get("is_market_top"))
+            if cdc_signal == "EXIT" or is_top:
+                exit_count += 1
+        az_plan = item.get("actionzone_15m")
+        if isinstance(az_plan, dict):
+            az_count += 1
+            if not bool(az_plan.get("trend_alignment", True)):
+                trend_mismatch_count += 1
+            avg_range_pct = az_plan.get("avg_range_pct")
+            if isinstance(avg_range_pct, (int, float)):
+                vol_count += 1
+                if float(avg_range_pct) >= high_vol_pct:
+                    high_vol_count += 1
+    if valid_count < min_symbols:
+        return False, "insufficient-sample"
+    exit_ratio = float(exit_count) / float(valid_count) if valid_count > 0 else 0.0
+    trend_mismatch_ratio = float(trend_mismatch_count) / float(az_count) if az_count > 0 else 0.0
+    high_vol_ratio = float(high_vol_count) / float(vol_count) if vol_count > 0 else 0.0
+    if exit_ratio >= exit_ratio_limit:
+        return True, f"exit_ratio={exit_ratio:.2f}"
+    if az_count >= min_symbols and trend_mismatch_ratio >= trend_mismatch_ratio_limit:
+        return True, f"trend_mismatch_ratio={trend_mismatch_ratio:.2f}"
+    if vol_count >= min_symbols and high_vol_ratio >= high_vol_ratio_limit:
+        return True, f"high_vol_ratio={high_vol_ratio:.2f}"
+    return False, "ok"
+
+
 def _notify_telegram_from_results(results):
+    kill, reason = _telegram_kill_switch_state(results)
+    if kill:
+        logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
+        return 0
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
     exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
@@ -1104,6 +1181,34 @@ def _ema_cross_15m_prepare_df(raw_df):
     return df
 
 
+def _trade_cost_rr(entry_price, risk_dist):
+    try:
+        entry = float(entry_price)
+        risk = float(risk_dist)
+    except Exception:
+        return 0.0
+    if entry <= 0 or risk <= 0:
+        return 0.0
+    fee_bps = getattr(config, "BACKTEST_FEE_BPS", 10.0)
+    slippage_bps = getattr(config, "BACKTEST_SLIPPAGE_BPS", 5.0)
+    try:
+        fee_bps = float(fee_bps)
+    except Exception:
+        fee_bps = 10.0
+    try:
+        slippage_bps = float(slippage_bps)
+    except Exception:
+        slippage_bps = 5.0
+    if fee_bps < 0:
+        fee_bps = 0.0
+    if slippage_bps < 0:
+        slippage_bps = 0.0
+    # Round-trip cost: entry+exit fee plus entry+exit slippage.
+    total_cost_pct = ((fee_bps * 2.0) + (slippage_bps * 2.0)) / 10000.0
+    cost_price = entry * total_cost_pct
+    return max(0.0, float(cost_price / risk))
+
+
 def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64, return_rr_list=False):
     if df is None or df.empty:
         return None
@@ -1161,6 +1266,7 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         
         # Risk based on ATR and multiplier
         risk_i = float(atr_i * stop_mult)
+        cost_rr = _trade_cost_rr(entry_i, risk_i)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
         
@@ -1185,14 +1291,14 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
                     break
         if outcome == "win":
             wins += 1
-            total_rr += tp_mult
+            total_rr += max(0.0, float(tp_mult) - cost_rr)
             if rr_list is not None:
-                rr_list.append(float(tp_mult))
+                rr_list.append(max(0.0, float(tp_mult) - cost_rr))
         elif outcome == "loss":
             losses += 1
-            total_rr -= 1.0
+            total_rr -= (1.0 + cost_rr)
             if rr_list is not None:
-                rr_list.append(-1.0)
+                rr_list.append(-(1.0 + cost_rr))
     total_trades = wins + losses
     if total_trades <= 0:
         payload = {
@@ -1292,6 +1398,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         if pd.isna(entry_i) or entry_i <= 0:
             continue
         risk_i = float(atr_i * stop_mult)
+        cost_rr = _trade_cost_rr(entry_i, risk_i)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
         outcome = None
@@ -1315,14 +1422,14 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
                     break
         if outcome == "win":
             wins += 1
-            total_rr += tp_mult
+            total_rr += max(0.0, float(tp_mult) - cost_rr)
             if rr_list is not None:
-                rr_list.append(float(tp_mult))
+                rr_list.append(max(0.0, float(tp_mult) - cost_rr))
         elif outcome == "loss":
             losses += 1
-            total_rr -= 1.0
+            total_rr -= (1.0 + cost_rr)
             if rr_list is not None:
-                rr_list.append(-1.0)
+                rr_list.append(-(1.0 + cost_rr))
     total_trades = wins + losses
     if total_trades <= 0:
         payload = {

@@ -879,6 +879,192 @@ def _telegram_kill_switch_state(results):
     return False, "ok"
 
 
+def _safe_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _telegram_dynamic_conf_threshold(base_min_conf, results):
+    dynamic_enable = bool(getattr(config, "TELEGRAM_ALERT_DYNAMIC_CONF_ENABLE", True))
+    if not dynamic_enable:
+        return float(base_min_conf)
+    vol_ref = _safe_float(getattr(config, "TELEGRAM_ALERT_DYNAMIC_CONF_VOL_REF_PCT", 1.80), 1.80)
+    vol_mult = _safe_float(getattr(config, "TELEGRAM_ALERT_DYNAMIC_CONF_VOL_MULT", 2.50), 2.50)
+    if vol_ref <= 0:
+        vol_ref = 1.80
+    vol_samples = []
+    for item in results or []:
+        if not isinstance(item, dict):
+            continue
+        az_plan = item.get("actionzone_15m")
+        if not isinstance(az_plan, dict):
+            continue
+        avg_range_pct = _safe_float(az_plan.get("avg_range_pct"), None)
+        if isinstance(avg_range_pct, float) and math.isfinite(avg_range_pct) and avg_range_pct > 0:
+            vol_samples.append(avg_range_pct)
+    if not vol_samples:
+        return float(base_min_conf)
+    vol_samples.sort()
+    median_vol = vol_samples[len(vol_samples) // 2]
+    adjusted = float(base_min_conf) + ((float(median_vol) - float(vol_ref)) * float(vol_mult))
+    return max(55.0, min(95.0, adjusted))
+
+
+def _actionzone_precision60_profile():
+    enabled = bool(getattr(config, "ACTIONZONE_15M_PRECISION60_ENABLED", False))
+    if not enabled:
+        return None
+    min_conf = getattr(config, "ACTIONZONE_15M_PRECISION60_MIN_ALERT_CONFIDENCE", 90.0)
+    min_rvol = getattr(config, "ACTIONZONE_15M_PRECISION60_MIN_RVOL", 1.30)
+    min_ema_gap = getattr(config, "ACTIONZONE_15M_PRECISION60_MIN_EMA_GAP_PCT", 0.12)
+    min_adx = getattr(config, "ACTIONZONE_15M_PRECISION60_MIN_ADX", 30.0)
+    max_bars_since = getattr(config, "ACTIONZONE_15M_PRECISION60_MAX_BARS_SINCE_SIGNAL", 0)
+    require_ema200 = bool(getattr(config, "ACTIONZONE_15M_PRECISION60_REQUIRE_EMA200_ALIGNMENT", True))
+    require_strong = bool(getattr(config, "ACTIONZONE_15M_PRECISION60_REQUIRE_STRONG_TREND", True))
+    require_trend_alignment = bool(getattr(config, "ACTIONZONE_15M_PRECISION60_REQUIRE_TREND_ALIGNMENT", True))
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 90.0
+    try:
+        min_rvol = float(min_rvol)
+    except Exception:
+        min_rvol = 1.30
+    try:
+        min_ema_gap = float(min_ema_gap)
+    except Exception:
+        min_ema_gap = 0.12
+    try:
+        min_adx = float(min_adx)
+    except Exception:
+        min_adx = 30.0
+    try:
+        max_bars_since = int(max_bars_since)
+    except Exception:
+        max_bars_since = 0
+    if max_bars_since < 0:
+        max_bars_since = 0
+    return {
+        "enabled": True,
+        "min_conf": float(min_conf),
+        "min_rvol": float(min_rvol),
+        "min_ema_gap_pct": float(min_ema_gap),
+        "min_adx": float(min_adx),
+        "max_bars_since_signal": int(max_bars_since),
+        "require_ema200_alignment": bool(require_ema200),
+        "require_strong_trend": bool(require_strong),
+        "require_trend_alignment": bool(require_trend_alignment),
+    }
+
+
+def _build_telegram_candidates(results, min_conf, exit_min_conf):
+    candidates = []
+    precision60 = _actionzone_precision60_profile()
+    for item in results:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        if not symbol:
+            continue
+
+        cdc_plan = item.get("cdc_vixfix_15m")
+        if isinstance(cdc_plan, dict):
+            cdc_signal = str(cdc_plan.get("signal") or "").upper()
+            cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
+            required_conf = float(exit_min_conf) if cdc_signal == "EXIT" else float(min_conf)
+            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
+                cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
+                if cdc_message:
+                    freshness = 6.0
+                    last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
+                    if not last_signal_time:
+                        freshness = 2.0
+                    trigger = str(cdc_plan.get("exit_trigger") or "").upper().strip()
+                    score = float(cdc_conf) + freshness + (10.0 if cdc_signal == "EXIT" else 4.0)
+                    if trigger == "VIXFIX_TOP":
+                        score += 5.0
+                    context_key = last_signal_time or trigger or (_format_price_value(cdc_plan.get("entry_price")) or "na")
+                    candidates.append({
+                        "symbol": symbol,
+                        "strategy": "CDCVIX15",
+                        "signal": cdc_signal,
+                        "score": float(score),
+                        "confidence": float(cdc_conf),
+                        "message": cdc_message,
+                        "cache_key": f"CDCVIX15|{symbol}|{cdc_signal}|{context_key}",
+                    })
+
+        az_plan = item.get("actionzone_15m")
+        if isinstance(az_plan, dict):
+            az_signal = str(az_plan.get("signal") or "").upper()
+            if az_signal in ("BUY", "SELL") and az_plan.get("alert"):
+                az_min_conf = getattr(config, "ACTIONZONE_15M_MIN_ALERT_CONFIDENCE", min_conf)
+                try:
+                    az_min_conf = float(az_min_conf)
+                except Exception:
+                    az_min_conf = float(min_conf)
+                required_az_conf = max(float(min_conf), float(az_min_conf))
+                if isinstance(precision60, dict):
+                    required_az_conf = max(required_az_conf, float(precision60.get("min_conf", required_az_conf)))
+                az_conf = _normalize_confidence(az_plan.get("confidence"))
+                if az_conf is not None and az_conf >= required_az_conf:
+                    az_message = _build_actionzone_message(item, az_plan)
+                    if az_message:
+                        trend_alignment = bool(az_plan.get("trend_alignment", True))
+                        bars_since = _safe_float(az_plan.get("bars_since_signal"), None)
+                        if isinstance(precision60, dict):
+                            if bool(precision60.get("require_trend_alignment", True)) and not trend_alignment:
+                                continue
+                            if isinstance(bars_since, float) and bars_since > float(precision60.get("max_bars_since_signal", 0)):
+                                continue
+                        freshness = 0.0
+                        if isinstance(bars_since, float):
+                            if bars_since <= 0:
+                                freshness = 8.0
+                            elif bars_since <= 1:
+                                freshness = 5.0
+                            elif bars_since <= 2:
+                                freshness = 2.0
+                            else:
+                                freshness = -4.0
+                        score = float(az_conf) + freshness + (6.0 if trend_alignment else -8.0)
+                        last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
+                        zone = str(az_plan.get("zone") or "").upper().strip()
+                        entry_bucket = _format_price_value(az_plan.get("entry_price")) or "na"
+                        context_key = last_signal_time or f"{zone}|{entry_bucket}"
+                        candidates.append({
+                            "symbol": symbol,
+                            "strategy": "AZ15",
+                            "signal": az_signal,
+                            "score": float(score),
+                            "confidence": float(az_conf),
+                            "message": az_message,
+                            "cache_key": f"AZ15|{symbol}|{az_signal}|{context_key}",
+                        })
+
+        signal = str(item.get("signal") or "").upper()
+        if signal in ("BUY", "SELL"):
+            best_conf = _get_best_confidence(item)
+            if best_conf is not None and best_conf >= min_conf:
+                sources = _collect_alert_sources(item, min_conf)
+                message = _build_telegram_message(item, signal, best_conf, sources)
+                if message:
+                    source_bonus = min(8.0, float(len(sources)) * 1.5)
+                    score = float(best_conf) + source_bonus
+                    candidates.append({
+                        "symbol": symbol,
+                        "strategy": "PRIMARY",
+                        "signal": signal,
+                        "score": float(score),
+                        "confidence": float(best_conf),
+                        "message": message,
+                        "cache_key": f"PRIMARY|{symbol}|{signal}",
+                    })
+    return candidates
+
+
 def _notify_telegram_from_results(results):
     kill, reason = _telegram_kill_switch_state(results)
     if kill:
@@ -887,6 +1073,8 @@ def _notify_telegram_from_results(results):
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
     exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
+    max_per_symbol = getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1)
+    cooldown_minutes = getattr(config, "TELEGRAM_ALERT_COOLDOWN_MINUTES", 30)
     try:
         min_conf = float(min_conf)
     except Exception:
@@ -899,67 +1087,65 @@ def _notify_telegram_from_results(results):
         max_per_run = int(max_per_run)
     except Exception:
         max_per_run = 5
+    try:
+        max_per_symbol = int(max_per_symbol)
+    except Exception:
+        max_per_symbol = 1
+    try:
+        cooldown_minutes = int(cooldown_minutes)
+    except Exception:
+        cooldown_minutes = 30
+    if max_per_run < 1:
+        max_per_run = 1
+    if max_per_symbol < 1:
+        max_per_symbol = 1
+    if cooldown_minutes < 1:
+        cooldown_minutes = 1
+    dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
+    candidates = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    if not candidates:
+        logger.info("Telegram alerts: no candidates (min_conf=%.1f, dynamic_min_conf=%.1f)", min_conf, dynamic_min_conf)
+        return 0
+    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
     sent = 0
-    for item in results:
-        if not isinstance(item, dict):
+    dropped_by_cache = 0
+    dropped_by_symbol_cap = 0
+    dropped_by_run_cap = 0
+    per_symbol_sent = {}
+    cooldown_ttl = max(60, int(cooldown_minutes * 60))
+    for candidate in candidates:
+        if sent >= max_per_run:
+            dropped_by_run_cap += 1
             continue
-        if item.get("error"):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
+        symbol = str(candidate.get("symbol") or "")
         if not symbol:
             continue
-        if sent >= max_per_run:
-            break
-        cdc_plan = item.get("cdc_vixfix_15m")
-        if isinstance(cdc_plan, dict):
-            cdc_signal = str(cdc_plan.get("signal") or "").upper()
-            cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
-            required_conf = exit_min_conf if cdc_signal == "EXIT" else min_conf
-            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
-                cdc_key = f"CDCVIX15|{symbol}|{cdc_signal}"
-                if not _TELEGRAM_ALERT_CACHE.get(cdc_key):
-                    cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
-                    if cdc_message and send_telegram_alert(cdc_message):
-                        _TELEGRAM_ALERT_CACHE.set(cdc_key, True)
-                        sent += 1
-                        if sent >= max_per_run:
-                            break
-        if sent >= max_per_run:
-            break
-        az_plan = item.get("actionzone_15m")
-        if isinstance(az_plan, dict):
-            az_signal = str(az_plan.get("signal") or "").upper()
-            if az_signal in ("BUY", "SELL") and az_plan.get("alert"):
-                az_conf = _normalize_confidence(az_plan.get("confidence"))
-                if az_conf is not None and az_conf >= min_conf:
-                    last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
-                    entry_price = _format_price_value(az_plan.get("entry_price")) or ""
-                    az_key = f"AZ15|{symbol}|{az_signal}|{last_signal_time or entry_price}"
-                    if not _TELEGRAM_ALERT_CACHE.get(az_key):
-                        az_message = _build_actionzone_message(item, az_plan)
-                        if send_telegram_alert(az_message):
-                            _TELEGRAM_ALERT_CACHE.set(az_key, True)
-                            sent += 1
-                            if sent >= max_per_run:
-                                break
-        if sent >= max_per_run:
-            break
-        signal = str(item.get("signal") or "").upper()
-        if signal not in ("BUY", "SELL"):
+        if int(per_symbol_sent.get(symbol, 0)) >= max_per_symbol:
+            dropped_by_symbol_cap += 1
             continue
-        best_conf = _get_best_confidence(item)
-        if best_conf is None or best_conf < min_conf:
+        cache_key = str(candidate.get("cache_key") or "").strip()
+        if not cache_key:
             continue
-        cache_key = f"{symbol}|{signal}"
         if _TELEGRAM_ALERT_CACHE.get(cache_key):
+            dropped_by_cache += 1
             continue
-        sources = _collect_alert_sources(item, min_conf)
-        message = _build_telegram_message(item, signal, best_conf, sources)
+        message = candidate.get("message")
+        if not isinstance(message, str) or not message.strip():
+            continue
         if send_telegram_alert(message):
-            _TELEGRAM_ALERT_CACHE.set(cache_key, True)
+            _TELEGRAM_ALERT_CACHE.set(cache_key, True, ttl_seconds=cooldown_ttl)
+            per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
-            if sent >= max_per_run:
-                break
+    logger.info(
+        "Telegram alerts: sent=%s candidates=%s dropped(cache=%s symbol_cap=%s run_cap=%s) min_conf=%.1f dynamic_min_conf=%.1f",
+        sent,
+        len(candidates),
+        dropped_by_cache,
+        dropped_by_symbol_cap,
+        dropped_by_run_cap,
+        min_conf,
+        dynamic_min_conf,
+    )
     return sent
 
 
@@ -1178,6 +1364,15 @@ def _ema_cross_15m_prepare_df(raw_df):
     df["TR"] = df[["H-L", "H-PC", "L-PC"]].max(axis=1)
     df["ATR"] = df["TR"].rolling(window=14).mean()
     df["Vol_Avg"] = df["Volume"].rolling(window=20).mean()
+    up_move = df["High"].diff()
+    down_move = -df["Low"].diff()
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    tr_sum = df["TR"].rolling(window=14).sum()
+    plus_di = 100.0 * pd.Series(plus_dm, index=df.index).rolling(window=14).sum() / tr_sum.replace(0, np.nan)
+    minus_di = 100.0 * pd.Series(minus_dm, index=df.index).rolling(window=14).sum() / tr_sum.replace(0, np.nan)
+    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100.0
+    df["ADX"] = dx.rolling(window=14).mean()
     return df
 
 
@@ -1209,6 +1404,138 @@ def _trade_cost_rr(entry_price, risk_dist):
     return max(0.0, float(cost_price / risk))
 
 
+def _actionzone_simulate_trade_rr(
+    df,
+    entry_i,
+    direction,
+    sl_i,
+    tp2_i,
+    risk_i,
+    stop_mult,
+    max_forward=64,
+    tp1_r=None,
+    tp1_fraction=0.5,
+    move_sl_to_be=True,
+    trailing_atr_mult=None,
+    time_stop_bars=None,
+):
+    if df is None or df.empty:
+        return None
+    if direction not in ("BUY", "SELL"):
+        return None
+    try:
+        entry_i = int(entry_i)
+        max_forward = int(max_forward)
+    except Exception:
+        return None
+    if max_forward < 1:
+        return None
+    try:
+        entry_price = float(df["Close"].iloc[entry_i])
+        sl_i = float(sl_i)
+        tp2_i = float(tp2_i)
+        risk_i = float(risk_i)
+        stop_mult = float(stop_mult)
+    except Exception:
+        return None
+    if not math.isfinite(entry_price) or entry_price <= 0 or not math.isfinite(risk_i) or risk_i <= 0:
+        return None
+    cost_rr = _trade_cost_rr(entry_price, risk_i)
+    if time_stop_bars is not None:
+        try:
+            time_stop_bars = int(time_stop_bars)
+        except Exception:
+            time_stop_bars = None
+        if isinstance(time_stop_bars, int) and time_stop_bars < 1:
+            time_stop_bars = 1
+    tp1_r_val = None
+    if isinstance(tp1_r, (int, float)) and float(tp1_r) > 0:
+        tp1_r_val = float(tp1_r)
+    try:
+        tp1_fraction = float(tp1_fraction)
+    except Exception:
+        tp1_fraction = 0.5
+    if tp1_fraction <= 0:
+        tp1_fraction = 0.0
+    if tp1_fraction >= 1:
+        tp1_fraction = 1.0
+    trail_mult = None
+    if isinstance(trailing_atr_mult, (int, float)) and float(trailing_atr_mult) > 0:
+        trail_mult = float(trailing_atr_mult)
+
+    partial_hit = False
+    rr_realized = 0.0
+    rem_frac = 1.0
+    active_sl = float(sl_i)
+    tp1_price = None
+    if tp1_r_val is not None:
+        if direction == "BUY":
+            tp1_price = float(entry_price + (risk_i * tp1_r_val))
+        else:
+            tp1_price = float(entry_price - (risk_i * tp1_r_val))
+
+    end_j = min(len(df), entry_i + 1 + max_forward)
+    if isinstance(time_stop_bars, int):
+        end_j = min(end_j, entry_i + 1 + time_stop_bars)
+    if end_j <= entry_i + 1:
+        return None
+
+    peak = entry_price
+    trough = entry_price
+    for j in range(entry_i + 1, end_j):
+        high_j = float(df["High"].iloc[j]) if pd.notna(df["High"].iloc[j]) else None
+        low_j = float(df["Low"].iloc[j]) if pd.notna(df["Low"].iloc[j]) else None
+        close_j = float(df["Close"].iloc[j]) if pd.notna(df["Close"].iloc[j]) else None
+        atr_j = float(df["ATR"].iloc[j]) if "ATR" in df.columns and pd.notna(df["ATR"].iloc[j]) else None
+        if high_j is None or low_j is None:
+            continue
+
+        if direction == "BUY":
+            peak = max(peak, high_j)
+            if trail_mult is not None and atr_j is not None and atr_j > 0:
+                trail_sl = peak - (atr_j * trail_mult * max(1.0, stop_mult / 1.5))
+                if math.isfinite(trail_sl):
+                    active_sl = max(active_sl, float(trail_sl))
+            # SL first (worst-case sequencing)
+            if low_j <= active_sl:
+                rr_realized += rem_frac * (-(1.0 + cost_rr))
+                return float(rr_realized)
+            if not partial_hit and tp1_price is not None and high_j >= tp1_price and tp1_fraction > 0:
+                rr_realized += tp1_fraction * max(0.0, float(tp1_r_val) - cost_rr)
+                rem_frac = max(0.0, 1.0 - tp1_fraction)
+                partial_hit = True
+                if move_sl_to_be:
+                    active_sl = max(active_sl, float(entry_price))
+            if high_j >= tp2_i:
+                rr_realized += rem_frac * max(0.0, float(abs(tp2_i - entry_price) / risk_i) - cost_rr)
+                return float(rr_realized)
+        else:
+            trough = min(trough, low_j)
+            if trail_mult is not None and atr_j is not None and atr_j > 0:
+                trail_sl = trough + (atr_j * trail_mult * max(1.0, stop_mult / 1.5))
+                if math.isfinite(trail_sl):
+                    active_sl = min(active_sl, float(trail_sl))
+            if high_j >= active_sl:
+                rr_realized += rem_frac * (-(1.0 + cost_rr))
+                return float(rr_realized)
+            if not partial_hit and tp1_price is not None and low_j <= tp1_price and tp1_fraction > 0:
+                rr_realized += tp1_fraction * max(0.0, float(tp1_r_val) - cost_rr)
+                rem_frac = max(0.0, 1.0 - tp1_fraction)
+                partial_hit = True
+                if move_sl_to_be:
+                    active_sl = min(active_sl, float(entry_price))
+            if low_j <= tp2_i:
+                rr_realized += rem_frac * max(0.0, float(abs(entry_price - tp2_i) / risk_i) - cost_rr)
+                return float(rr_realized)
+
+        # Time stop at last bar close (if configured, we already limited end_j)
+        if j == end_j - 1 and close_j is not None and math.isfinite(close_j):
+            rr_move = (float(close_j - entry_price) / float(risk_i)) if direction == "BUY" else (float(entry_price - close_j) / float(risk_i))
+            rr_realized += rem_frac * (float(rr_move) - cost_rr)
+            return float(rr_realized)
+    return None
+
+
 def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64, return_rr_list=False):
     if df is None or df.empty:
         return None
@@ -1230,9 +1557,41 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         stop_mult = 1.5
     if stop_mult <= 0:
         stop_mult = 1.0
+    min_rvol = getattr(config, "ACTIONZONE_15M_MIN_RVOL", 1.15)
+    min_ema_gap_pct = getattr(config, "ACTIONZONE_15M_MIN_EMA_GAP_PCT", 0.05)
+    min_atr_pct = getattr(config, "ACTIONZONE_15M_MIN_ATR_PCT", 0.15)
+    max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
+    min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
+    require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
+    time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
+    tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
+    tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
+    move_sl_to_be = bool(getattr(config, "ACTIONZONE_15M_MOVE_SL_TO_BE", True))
+    trailing_atr_mult = getattr(config, "ACTIONZONE_15M_TRAILING_ATR_MULT", None)
+    try:
+        min_rvol = float(min_rvol)
+    except Exception:
+        min_rvol = 1.15
+    try:
+        min_ema_gap_pct = float(min_ema_gap_pct)
+    except Exception:
+        min_ema_gap_pct = 0.05
+    try:
+        min_atr_pct = float(min_atr_pct)
+    except Exception:
+        min_atr_pct = 0.15
+    try:
+        max_atr_pct = float(max_atr_pct)
+    except Exception:
+        max_atr_pct = 6.00
+    try:
+        min_adx = float(min_adx)
+    except Exception:
+        min_adx = 24.0
     close = df["Close"].astype(float)
     ema_fast = close.ewm(span=fast_len, adjust=False).mean()
     ema_slow = close.ewm(span=slow_len, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
     
     bull = ema_fast > ema_slow
     bear = ema_fast < ema_slow
@@ -1263,42 +1622,58 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         entry_i = close.iloc[i]
         if pd.isna(entry_i) or entry_i <= 0:
             continue
+        rvol_i = float(df["Volume"].iloc[i] / vol_avg_i) if pd.notna(df["Volume"].iloc[i]) and float(vol_avg_i) > 0 else None
+        ema_gap_pct_i = abs(float(ema_fast.iloc[i]) - float(ema_slow.iloc[i])) / float(entry_i) * 100.0 if entry_i > 0 else None
+        atr_pct_i = float(atr_i) / float(entry_i) * 100.0 if entry_i > 0 else None
+        if isinstance(rvol_i, (int, float)) and float(rvol_i) < min_rvol:
+            continue
+        if isinstance(ema_gap_pct_i, (int, float)) and float(ema_gap_pct_i) < min_ema_gap_pct:
+            continue
+        if isinstance(atr_pct_i, (int, float)):
+            if float(atr_pct_i) < min_atr_pct:
+                continue
+            if float(atr_pct_i) > max_atr_pct:
+                continue
+        adx_i = df["ADX"].iloc[i] if "ADX" in df.columns else None
+        if isinstance(adx_i, (int, float)) and float(adx_i) < min_adx:
+            continue
+        if require_ema200_alignment:
+            ema200_i = ema200.iloc[i]
+            if pd.notna(ema200_i):
+                if direction_i == "BUY" and float(entry_i) < float(ema200_i):
+                    continue
+                if direction_i == "SELL" and float(entry_i) > float(ema200_i):
+                    continue
         
         # Risk based on ATR and multiplier
         risk_i = float(atr_i * stop_mult)
-        cost_rr = _trade_cost_rr(entry_i, risk_i)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
-        
-        outcome = None
-        end_j = min(len(df), i + 1 + max_forward)
-        for j in range(i + 1, end_j):
-            high_j = df["High"].iloc[j]
-            low_j = df["Low"].iloc[j]
-            if direction_i == "BUY":
-                if low_j <= sl_i:
-                    outcome = "loss"
-                    break
-                if high_j >= tp_i:
-                    outcome = "win"
-                    break
-            else:
-                if high_j >= sl_i:
-                    outcome = "loss"
-                    break
-                if low_j <= tp_i:
-                    outcome = "win"
-                    break
-        if outcome == "win":
+        rr = _actionzone_simulate_trade_rr(
+            df,
+            entry_i=i,
+            direction=direction_i,
+            sl_i=sl_i,
+            tp2_i=tp_i,
+            risk_i=risk_i,
+            stop_mult=stop_mult,
+            max_forward=max_forward,
+            tp1_r=tp1_r,
+            tp1_fraction=tp1_fraction,
+            move_sl_to_be=move_sl_to_be,
+            trailing_atr_mult=trailing_atr_mult,
+            time_stop_bars=time_stop_bars,
+        )
+        if not isinstance(rr, (int, float)):
+            continue
+        rr = float(rr)
+        if rr >= 0:
             wins += 1
-            total_rr += max(0.0, float(tp_mult) - cost_rr)
-            if rr_list is not None:
-                rr_list.append(max(0.0, float(tp_mult) - cost_rr))
-        elif outcome == "loss":
+        else:
             losses += 1
-            total_rr -= (1.0 + cost_rr)
-            if rr_list is not None:
-                rr_list.append(-(1.0 + cost_rr))
+        total_rr += rr
+        if rr_list is not None:
+            rr_list.append(rr)
     total_trades = wins + losses
     if total_trades <= 0:
         payload = {
@@ -1325,6 +1700,47 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     if rr_list is not None:
         payload["rr_list"] = rr_list
     return payload
+
+
+def _actionzone_eval_candidate(train_res, valid_res, min_trades=8, min_valid_trades=4):
+    if not isinstance(train_res, dict) or not isinstance(valid_res, dict):
+        return None
+    train_trades = train_res.get("trades")
+    valid_trades = valid_res.get("trades")
+    train_exp = train_res.get("expectancy_rr")
+    valid_exp = valid_res.get("expectancy_rr")
+    train_win = train_res.get("win_rate_pct")
+    valid_win = valid_res.get("win_rate_pct")
+    if not isinstance(train_trades, int) or train_trades < int(min_trades):
+        return None
+    if not isinstance(valid_trades, int) or valid_trades < int(min_valid_trades):
+        return None
+    if not isinstance(train_exp, (int, float)) or not isinstance(valid_exp, (int, float)):
+        return None
+    target_trades = max(int(min_trades) * 2, 14)
+    robust_train = min(1.0, float(train_trades) / float(target_trades))
+    robust_valid = min(1.0, float(valid_trades) / float(max(int(min_valid_trades) * 2, 8)))
+    robustness = 0.65 * robust_train + 0.35 * robust_valid
+    consistency_penalty = abs(float(train_exp) - float(valid_exp))
+    win_edge = ((float(valid_win) - 50.0) / 100.0) if isinstance(valid_win, (int, float)) else 0.0
+    # Practical objective: prefer high validation expectancy, enough trade count,
+    # and stable train/validation behavior (low overfitting gap).
+    opt_score = (
+        (float(valid_exp) * 0.58)
+        + (float(train_exp) * 0.24)
+        + (win_edge * 0.18)
+    ) * (0.60 + 0.40 * robustness) - (consistency_penalty * 0.35)
+    return {
+        "train_trades": int(train_trades),
+        "valid_trades": int(valid_trades),
+        "train_expectancy_rr": float(train_exp),
+        "valid_expectancy_rr": float(valid_exp),
+        "train_win_rate_pct": float(train_win) if isinstance(train_win, (int, float)) else None,
+        "valid_win_rate_pct": float(valid_win) if isinstance(valid_win, (int, float)) else None,
+        "consistency_penalty": float(consistency_penalty),
+        "robustness_score": float(robustness * 100.0),
+        "opt_score": float(opt_score),
+    }
 
 
 def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=None, return_rr_list=False):
@@ -1367,11 +1783,43 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         stop_mult = 1.5
     if stop_mult <= 0:
         stop_mult = 1.0
+    min_rvol = getattr(config, "ACTIONZONE_15M_MIN_RVOL", 1.15)
+    min_ema_gap_pct = getattr(config, "ACTIONZONE_15M_MIN_EMA_GAP_PCT", 0.05)
+    min_atr_pct = getattr(config, "ACTIONZONE_15M_MIN_ATR_PCT", 0.15)
+    max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
+    min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
+    require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
+    time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
+    tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
+    tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
+    move_sl_to_be = bool(getattr(config, "ACTIONZONE_15M_MOVE_SL_TO_BE", True))
+    trailing_atr_mult = getattr(config, "ACTIONZONE_15M_TRAILING_ATR_MULT", None)
+    try:
+        min_rvol = float(min_rvol)
+    except Exception:
+        min_rvol = 1.15
+    try:
+        min_ema_gap_pct = float(min_ema_gap_pct)
+    except Exception:
+        min_ema_gap_pct = 0.05
+    try:
+        min_atr_pct = float(min_atr_pct)
+    except Exception:
+        min_atr_pct = 0.15
+    try:
+        max_atr_pct = float(max_atr_pct)
+    except Exception:
+        max_atr_pct = 6.00
+    try:
+        min_adx = float(min_adx)
+    except Exception:
+        min_adx = 24.0
     if tp_mult <= 0 or max_forward < 1:
         return None
     close = df["Close"].astype(float)
     ema_fast = close.ewm(span=fast_len, adjust=False).mean()
     ema_slow = close.ewm(span=slow_len, adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
     bull = ema_fast > ema_slow
     bear = ema_fast < ema_slow
     x_confirm = close
@@ -1397,39 +1845,56 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         entry_i = close.iloc[i]
         if pd.isna(entry_i) or entry_i <= 0:
             continue
+        rvol_i = float(df["Volume"].iloc[i] / vol_avg_i) if pd.notna(df["Volume"].iloc[i]) and float(vol_avg_i) > 0 else None
+        ema_gap_pct_i = abs(float(ema_fast.iloc[i]) - float(ema_slow.iloc[i])) / float(entry_i) * 100.0 if entry_i > 0 else None
+        atr_pct_i = float(atr_i) / float(entry_i) * 100.0 if entry_i > 0 else None
+        if isinstance(rvol_i, (int, float)) and float(rvol_i) < min_rvol:
+            continue
+        if isinstance(ema_gap_pct_i, (int, float)) and float(ema_gap_pct_i) < min_ema_gap_pct:
+            continue
+        if isinstance(atr_pct_i, (int, float)):
+            if float(atr_pct_i) < min_atr_pct:
+                continue
+            if float(atr_pct_i) > max_atr_pct:
+                continue
+        adx_i = df["ADX"].iloc[i] if "ADX" in df.columns else None
+        if isinstance(adx_i, (int, float)) and float(adx_i) < min_adx:
+            continue
+        if require_ema200_alignment:
+            ema200_i = ema200.iloc[i]
+            if pd.notna(ema200_i):
+                if direction_i == "BUY" and float(entry_i) < float(ema200_i):
+                    continue
+                if direction_i == "SELL" and float(entry_i) > float(ema200_i):
+                    continue
         risk_i = float(atr_i * stop_mult)
-        cost_rr = _trade_cost_rr(entry_i, risk_i)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
-        outcome = None
-        end_j = min(len(df), i + 1 + max_forward)
-        for j in range(i + 1, end_j):
-            high_j = df["High"].iloc[j]
-            low_j = df["Low"].iloc[j]
-            if direction_i == "BUY":
-                if low_j <= sl_i:
-                    outcome = "loss"
-                    break
-                if high_j >= tp_i:
-                    outcome = "win"
-                    break
-            else:
-                if high_j >= sl_i:
-                    outcome = "loss"
-                    break
-                if low_j <= tp_i:
-                    outcome = "win"
-                    break
-        if outcome == "win":
+        rr = _actionzone_simulate_trade_rr(
+            df,
+            entry_i=i,
+            direction=direction_i,
+            sl_i=sl_i,
+            tp2_i=tp_i,
+            risk_i=risk_i,
+            stop_mult=stop_mult,
+            max_forward=max_forward,
+            tp1_r=tp1_r,
+            tp1_fraction=tp1_fraction,
+            move_sl_to_be=move_sl_to_be,
+            trailing_atr_mult=trailing_atr_mult,
+            time_stop_bars=time_stop_bars,
+        )
+        if not isinstance(rr, (int, float)):
+            continue
+        rr = float(rr)
+        if rr >= 0:
             wins += 1
-            total_rr += max(0.0, float(tp_mult) - cost_rr)
-            if rr_list is not None:
-                rr_list.append(max(0.0, float(tp_mult) - cost_rr))
-        elif outcome == "loss":
+        else:
             losses += 1
-            total_rr -= (1.0 + cost_rr)
-            if rr_list is not None:
-                rr_list.append(-(1.0 + cost_rr))
+        total_rr += rr
+        if rr_list is not None:
+            rr_list.append(rr)
     total_trades = wins + losses
     if total_trades <= 0:
         payload = {
@@ -1475,6 +1940,8 @@ def optimize_best_ema_cross_15m(symbol, df):
     min_trades = getattr(config, "ACTIONZONE_15M_MIN_TRADES", getattr(config, "EMA_CROSS_15M_MIN_TRADES", 8))
     tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
     max_forward = getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
+    min_valid_trades = getattr(config, "ACTIONZONE_15M_MIN_VALID_TRADES", 4)
+    train_ratio = getattr(config, "ACTIONZONE_15M_OPT_TRAIN_RATIO", 0.70)
     try:
         fast_min = int(fast_min)
         fast_max = int(fast_max)
@@ -1485,6 +1952,8 @@ def optimize_best_ema_cross_15m(symbol, df):
         min_trades = int(min_trades)
         tp_mult = float(tp_mult)
         max_forward = int(max_forward)
+        min_valid_trades = int(min_valid_trades)
+        train_ratio = float(train_ratio)
     except Exception:
         return None
     if fast_step < 1 or slow_step < 1:
@@ -1499,35 +1968,47 @@ def optimize_best_ema_cross_15m(symbol, df):
         slow_max = slow_min
     if min_trades < 1:
         min_trades = 1
+    if min_valid_trades < 1:
+        min_valid_trades = 1
     if tp_mult <= 0:
         tp_mult = 5.0
     if max_forward < 1:
         max_forward = 64
+    if train_ratio <= 0.50 or train_ratio >= 0.90:
+        train_ratio = 0.70
+    if len(df) < 180:
+        train_ratio = 0.65
+    split_idx = int(len(df) * train_ratio)
+    split_idx = max(80, min(len(df) - 60, split_idx))
+    df_train = df.iloc[:split_idx].copy()
+    df_valid = df.iloc[split_idx:].copy()
+    if len(df_train) < 80 or len(df_valid) < 60:
+        return None
     best = None
     evaluated = 0
     for fast_len in range(fast_min, fast_max + 1, fast_step):
         for slow_len in range(slow_min, slow_max + 1, slow_step):
             if fast_len >= slow_len:
                 continue
-            r = _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
+            r_train = _backtest_ema_cross_15m(df_train, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
+            r_valid = _backtest_ema_cross_15m(df_valid, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
+            r_full = _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
             evaluated += 1
-            if not r:
+            if not r_train or not r_valid or not r_full:
                 continue
-            trades = r.get("trades")
-            exp_rr = r.get("expectancy_rr")
-            win_rate = r.get("win_rate_pct")
-            if not isinstance(trades, int) or trades < min_trades:
+            eval_info = _actionzone_eval_candidate(r_train, r_valid, min_trades=min_trades, min_valid_trades=min_valid_trades)
+            if not isinstance(eval_info, dict):
                 continue
+            trades = r_full.get("trades")
+            exp_rr = r_full.get("expectancy_rr")
+            win_rate = r_full.get("win_rate_pct")
             if not isinstance(exp_rr, (int, float)):
                 continue
-            target_trades = max(min_trades * 2, 12)
-            robustness = min(1.0, float(trades) / float(target_trades))
-            opt_score = float(exp_rr) * (0.65 + 0.35 * robustness)
-            candidate = r.copy()
-            candidate["robustness_score"] = float(robustness * 100.0)
-            candidate["opt_score"] = float(opt_score)
+            candidate = r_full.copy()
+            candidate.update(eval_info)
             key = (
-                float(opt_score),
+                float(eval_info.get("opt_score")),
+                float(eval_info.get("valid_expectancy_rr")),
                 float(exp_rr),
                 float(win_rate) if isinstance(win_rate, (int, float)) else -1e9,
                 float(trades),
@@ -3039,21 +3520,38 @@ def _actionzone_trend_1h(symbol, data_1h=None):
     except Exception:
         return None
 
-def _actionzone_compute_confidence(signal, trend_dir, bars_since_signal, avg_range_pct, rvol, opt_meta):
+def _actionzone_compute_confidence(
+    signal,
+    trend_dir,
+    bars_since_signal,
+    avg_range_pct,
+    rvol,
+    opt_meta,
+    ema_gap_pct=None,
+    atr_pct=None,
+    trend_strength=None,
+    adx_now=None,
+):
     base = 55.0
     best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
     trades = best.get("trades") if isinstance(best, dict) else None
     win_rate = best.get("win_rate_pct") if isinstance(best, dict) else None
     expectancy = best.get("expectancy_rr") if isinstance(best, dict) else None
     robustness = best.get("robustness_score") if isinstance(best, dict) else None
+    valid_expectancy = best.get("valid_expectancy_rr") if isinstance(best, dict) else None
+    consistency_penalty = best.get("consistency_penalty") if isinstance(best, dict) else None
     if isinstance(win_rate, (int, float)):
         base += max(-10.0, min(12.0, (float(win_rate) - 50.0) * 0.45))
     if isinstance(expectancy, (int, float)):
         base += max(-12.0, min(14.0, float(expectancy) * 18.0))
+    if isinstance(valid_expectancy, (int, float)):
+        base += max(-10.0, min(12.0, float(valid_expectancy) * 20.0))
     if isinstance(trades, (int, float)):
         base += max(-6.0, min(10.0, (float(trades) - 8.0) * 0.5))
     if isinstance(robustness, (int, float)):
         base += max(-8.0, min(8.0, (float(robustness) - 50.0) * 0.12))
+    if isinstance(consistency_penalty, (int, float)):
+        base -= max(0.0, min(8.0, float(consistency_penalty) * 8.0))
     if signal in ("BUY", "SELL"):
         base += 6.0
     trend_aligned = (
@@ -3093,6 +3591,25 @@ def _actionzone_compute_confidence(signal, trend_dir, bars_since_signal, avg_ran
             base += 4.0
         elif float(rvol) <= 0.80:
             base -= 5.0
+    if isinstance(ema_gap_pct, (int, float)):
+        if float(ema_gap_pct) >= 0.35:
+            base += 4.0
+        elif float(ema_gap_pct) <= 0.08:
+            base -= 4.0
+    if isinstance(atr_pct, (int, float)):
+        if float(atr_pct) <= 0.15:
+            base -= 5.0
+        elif float(atr_pct) >= 5.50:
+            base -= 4.0
+    if isinstance(trend_strength, str) and trend_strength.upper() == "STRONG":
+        base += 2.0
+    if isinstance(adx_now, (int, float)):
+        if float(adx_now) >= 25.0:
+            base += 4.0
+        elif float(adx_now) >= 18.0:
+            base += 2.0
+        elif float(adx_now) < 12.0:
+            base -= 4.0
     if base < 0:
         base = 0.0
     if base > 100:
@@ -3157,6 +3674,7 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
         x_confirm = close.ewm(span=smooth, adjust=False).mean() if smooth > 1 else close
         fast = x_confirm.ewm(span=best_fast_len, adjust=False).mean()
         slow = x_confirm.ewm(span=best_slow_len, adjust=False).mean()
+        ema200 = x_confirm.ewm(span=200, adjust=False).mean()
         
         bull = fast > slow
         bear = fast < slow
@@ -3232,6 +3750,7 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
         entry_price = float(close.iloc[entry_idx]) if pd.notna(close.iloc[entry_idx]) else None
         current_price = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
         atr_now = float(df["ATR"].iloc[-1]) if pd.notna(df["ATR"].iloc[-1]) else None
+        adx_now = float(df["ADX"].iloc[-1]) if "ADX" in df.columns and pd.notna(df["ADX"].iloc[-1]) else None
         rvol = None
         vol_avg_now = df["Vol_Avg"].iloc[-1]
         if pd.notna(vol_avg_now) and float(vol_avg_now) > 0 and pd.notna(df["Volume"].iloc[-1]):
@@ -3241,7 +3760,80 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             trend_ok = False
         if signal == "SELL" and trend_dir not in (None, "DOWN"):
             trend_ok = False
+        ema_gap_pct = None
+        if current_price is not None and current_price > 0 and pd.notna(fast.iloc[-1]) and pd.notna(slow.iloc[-1]):
+            ema_gap_pct = abs(float(fast.iloc[-1]) - float(slow.iloc[-1])) / float(current_price) * 100.0
+        atr_pct = None
+        if atr_now is not None and current_price is not None and current_price > 0:
+            atr_pct = float(atr_now) / float(current_price) * 100.0
+        filter_reasons = []
+        precision60 = _actionzone_precision60_profile()
+        min_rvol = getattr(config, "ACTIONZONE_15M_MIN_RVOL", 1.15)
+        min_ema_gap_pct = getattr(config, "ACTIONZONE_15M_MIN_EMA_GAP_PCT", 0.05)
+        min_atr_pct = getattr(config, "ACTIONZONE_15M_MIN_ATR_PCT", 0.15)
+        max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
+        max_bars_since = getattr(config, "ACTIONZONE_15M_MAX_BARS_SINCE_SIGNAL", 1)
+        require_strong_trend = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_STRONG_TREND", True))
+        min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
+        require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
+        try:
+            min_rvol = float(min_rvol)
+        except Exception:
+            min_rvol = 1.15
+        try:
+            min_ema_gap_pct = float(min_ema_gap_pct)
+        except Exception:
+            min_ema_gap_pct = 0.05
+        try:
+            min_atr_pct = float(min_atr_pct)
+        except Exception:
+            min_atr_pct = 0.15
+        try:
+            max_atr_pct = float(max_atr_pct)
+        except Exception:
+            max_atr_pct = 6.00
+        try:
+            max_bars_since = int(max_bars_since)
+        except Exception:
+            max_bars_since = 1
+        try:
+            min_adx = float(min_adx)
+        except Exception:
+            min_adx = 24.0
+        if isinstance(precision60, dict):
+            min_rvol = max(float(min_rvol), float(precision60.get("min_rvol", min_rvol)))
+            min_ema_gap_pct = max(float(min_ema_gap_pct), float(precision60.get("min_ema_gap_pct", min_ema_gap_pct)))
+            min_adx = max(float(min_adx), float(precision60.get("min_adx", min_adx)))
+            max_bars_since = min(int(max_bars_since), int(precision60.get("max_bars_since_signal", max_bars_since)))
+            require_strong_trend = bool(require_strong_trend) or bool(precision60.get("require_strong_trend", False))
+            require_ema200_alignment = bool(require_ema200_alignment) or bool(precision60.get("require_ema200_alignment", False))
+        if max_bars_since < 0:
+            max_bars_since = 0
         filtered_signal = signal if trend_ok else "WAIT"
+        if filtered_signal in ("BUY", "SELL"):
+            if isinstance(rvol, (int, float)) and float(rvol) < min_rvol:
+                filter_reasons.append("low_rvol")
+            if isinstance(ema_gap_pct, (int, float)) and float(ema_gap_pct) < min_ema_gap_pct:
+                filter_reasons.append("tight_ema_gap")
+            if isinstance(atr_pct, (int, float)):
+                if float(atr_pct) < min_atr_pct:
+                    filter_reasons.append("low_atr")
+                elif float(atr_pct) > max_atr_pct:
+                    filter_reasons.append("high_atr")
+            if isinstance(bars_since_signal, (int, float)) and int(bars_since_signal) > max_bars_since:
+                filter_reasons.append("stale_signal")
+            if require_strong_trend and trend_strength != "STRONG":
+                filter_reasons.append("weak_trend")
+            if isinstance(adx_now, (int, float)) and float(adx_now) < min_adx:
+                filter_reasons.append("low_adx")
+            if require_ema200_alignment and pd.notna(ema200.iloc[-1]):
+                ema200_now = float(ema200.iloc[-1])
+                if filtered_signal == "BUY" and current_price is not None and float(current_price) < ema200_now:
+                    filter_reasons.append("below_ema200")
+                if filtered_signal == "SELL" and current_price is not None and float(current_price) > ema200_now:
+                    filter_reasons.append("above_ema200")
+            if filter_reasons:
+                filtered_signal = "WAIT"
         stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
         min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 1.0)
         tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", 5.0)
@@ -3281,6 +3873,10 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             avg_range_pct,
             rvol,
             opt_meta,
+            ema_gap_pct=ema_gap_pct,
+            atr_pct=atr_pct,
+            trend_strength=trend_strength,
+            adx_now=adx_now,
         )
         last_signal_time_str = last_signal_time.strftime("%Y-%m-%d %H:%M") if last_signal_time is not None else None
         return {
@@ -3299,11 +3895,15 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             "trend_1h": trend_dir,
             "trend_strength": trend_strength,
             "trend_alignment": trend_ok,
+            "filter_reasons": filter_reasons,
             "alert": filtered_signal in ("BUY", "SELL"),
             "confidence": confidence,
             "avg_range_pct": avg_range_pct,
             "avg_vol": avg_vol,
             "atr": atr_now,
+            "atr_pct": atr_pct,
+            "adx": adx_now,
+            "ema_gap_pct": ema_gap_pct,
             "rvol": rvol,
             "optimizer": opt_meta,
         }

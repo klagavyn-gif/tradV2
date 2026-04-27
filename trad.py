@@ -12,7 +12,7 @@ import time
 import threading
 import tempfile
 import pytz
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from datetime import datetime, timedelta
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
@@ -173,24 +173,51 @@ def _clean_json_value(v):
 def send_telegram_alert(message):
     bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+    thread_id = os.environ.get("TELEGRAM_THREAD_ID")
     if not bot_token or not chat_id or not message:
         return False
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
-    try:
-        if http_requests is not None:
-            resp = http_requests.post(url, json=payload, timeout=10)
-            return bool(getattr(resp, "ok", False))
-        session = _create_curl_session()
-        resp = session.post(url, json=payload, timeout=10)
-        status_code = int(getattr(resp, "status_code", 0))
-        ok = getattr(resp, "ok", None)
-        if ok is not None:
-            return bool(ok)
-        return 200 <= status_code < 300
-    except Exception as e:
-        logger.warning("Telegram alert failed: %s", e, exc_info=True)
-        return False
+    payload = {
+        "chat_id": chat_id, 
+        "text": message, 
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    }
+    if thread_id:
+        payload["message_thread_id"] = thread_id
+        
+    # Retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            if http_requests is not None:
+                resp = http_requests.post(url, json=payload, timeout=10)
+                if bool(getattr(resp, "ok", False)):
+                    return True
+                status_code = int(getattr(resp, "status_code", 0))
+            else:
+                session = _create_curl_session()
+                resp = session.post(url, json=payload, timeout=10)
+                status_code = int(getattr(resp, "status_code", 0))
+                ok = getattr(resp, "ok", None)
+                if ok is not None and bool(ok):
+                    return True
+                if 200 <= status_code < 300:
+                    return True
+                    
+            # Handle rate limits (429)
+            if status_code == 429:
+                import time
+                retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
+                time.sleep(retry_after)
+                continue
+                
+            logger.warning("Telegram alert attempt %d failed (status: %d): %s", attempt + 1, status_code, resp.text if hasattr(resp, 'text') else '')
+            
+        except Exception as e:
+            logger.warning("Telegram alert attempt %d failed with exception: %s", attempt + 1, e)
+            
+    return False
 
 
 def _normalize_confidence(value):
@@ -218,6 +245,12 @@ def _format_price_value(value):
     if abs_val >= 1:
         return f"{val:,.2f}"
     return f"{val:,.6f}"
+
+
+def _html_escape(text):
+    if not isinstance(text, str):
+        text = str(text)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def _generate_exit_levels(entry_price, stop_loss, signal="BUY", take_profit=None):
@@ -509,6 +542,105 @@ def _collect_alert_sources(item, min_conf):
     return [f"{text} ({conf:.0f}%)" for conf, text in sources[:3]]
 
 
+def _extract_plan_edge_metrics(plan):
+    if not isinstance(plan, dict):
+        return {}
+
+    def pick_numeric(obj, keys):
+        if not isinstance(obj, dict):
+            return None
+        for key in keys:
+            value = obj.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    candidate_payloads = [plan]
+    optimizer = plan.get("optimizer")
+    if isinstance(optimizer, dict):
+        best = optimizer.get("best")
+        if isinstance(best, dict):
+            candidate_payloads.append(best)
+
+    best_metrics = {}
+    best_score = -1.0
+    for payload in candidate_payloads:
+        win_rate = pick_numeric(
+            payload,
+            ("historical_win_rate", "win_rate_pct", "historical_win_rate_tp1", "historical_win_rate_tp2"),
+        )
+        trades = pick_numeric(
+            payload,
+            ("historical_trades", "trades", "historical_trades_tp1", "historical_trades_tp2"),
+        )
+        expectancy = pick_numeric(
+            payload,
+            ("expectancy_rr", "valid_expectancy_rr", "avg_rr", "historical_avg_rr", "expectancy_tp1_rr", "expectancy_tp2_rr"),
+        )
+        score = 0.0
+        if win_rate is not None:
+            score += 1.0
+        if trades is not None:
+            score += 1.0
+        if expectancy is not None:
+            score += 1.0
+        if trades is not None:
+            score += min(2.0, float(trades) / 10.0)
+        if score > best_score:
+            best_score = score
+            best_metrics = {
+                "win_rate_pct": win_rate,
+                "trades": trades,
+                "expectancy_rr": expectancy,
+            }
+    return best_metrics
+
+
+def _evaluate_entry_quality_gate(plan, signal):
+    if str(signal or "").upper() not in ("BUY", "SELL"):
+        return True, "not_entry_signal", {}
+    enabled = bool(getattr(config, "TELEGRAM_ALERT_ENTRY_QUALITY_ENABLE", True))
+    if not enabled:
+        return True, "quality_gate_disabled", {}
+    min_wr = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE", 56.0)
+    min_trades = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_TRADES", 8)
+    min_exp = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_EXPECTANCY_RR", 0.05)
+    require_edge = bool(getattr(config, "TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS", True))
+    try:
+        min_wr = float(min_wr)
+    except Exception:
+        min_wr = 56.0
+    try:
+        min_trades = int(min_trades)
+    except Exception:
+        min_trades = 8
+    try:
+        min_exp = float(min_exp)
+    except Exception:
+        min_exp = 0.05
+    if not isinstance(plan, dict):
+        return False, "missing_plan", {}
+    metrics = _extract_plan_edge_metrics(plan)
+    wr = metrics.get("win_rate_pct")
+    trades = metrics.get("trades")
+    exp = metrics.get("expectancy_rr")
+    has_edge_metrics = any(isinstance(v, (int, float)) for v in (wr, trades, exp))
+    if require_edge and not has_edge_metrics:
+        return False, "missing_edge_metrics", metrics
+    if isinstance(trades, (int, float)) and int(trades) < int(min_trades):
+        return False, "trades_below_min", metrics
+    if isinstance(wr, (int, float)) and float(wr) < float(min_wr):
+        return False, "win_rate_below_min", metrics
+    if isinstance(exp, (int, float)) and float(exp) < float(min_exp):
+        return False, "expectancy_below_min", metrics
+    return True, "pass", metrics
+
+
+def _passes_entry_quality_gate(plan, signal):
+    ok, _, _ = _evaluate_entry_quality_gate(plan, signal)
+    return ok
+
+
 def _get_best_confidence(item):
     best = None
     for plan, setup_key, conf_key in (
@@ -566,81 +698,107 @@ def _pick_primary_trade_plan(item):
 
 
 def _build_telegram_message(item, signal, best_conf, sources):
-    emoji = "🟢" if signal == "BUY" else "🔴"
+    emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
-    name = str(item.get("name") or "").strip()
-    lines = [f"{emoji} สัญญาณหลัก {signal}"]
-    line_symbol = f"สินทรัพย์: {symbol}"
+    name = _html_escape(str(item.get("name") or "").strip())
+    
+    tv_symbol = symbol.replace("-", "")
+    
+    lines = [f"<b>{emoji} สัญญาณหลัก {signal} | {_html_escape(symbol)}</b>"]
     if name:
-        line_symbol += f" • {name}"
-    lines.append(line_symbol)
+        lines.append(f"<i>{name}</i>")
+    lines.append("────────────────")
+    
     price = item.get("price")
     change = item.get("change")
     price_text = _format_price_value(price)
     if price_text:
         if isinstance(change, (int, float)):
-            lines.append(f"ราคา: {price_text} ({change:+.2f}%)")
+            lines.append(f"<b>ราคา:</b> {price_text} ({change:+.2f}%)")
         else:
-            lines.append(f"ราคา: {price_text}")
+            lines.append(f"<b>ราคา:</b> {price_text}")
+            
     if best_conf is not None:
-        lines.append(f"ความมั่นใจ: {best_conf:.0f}%")
+        lines.append(f"<b>ความมั่นใจ:</b> {best_conf:.0f}%")
+        
     if sources:
-        lines.append("แหล่งสัญญาณ: " + ", ".join(sources))
+        lines.append(f"<b>แหล่งสัญญาณ:</b> " + ", ".join([_html_escape(s) for s in sources]))
+        
     primary_plan = _pick_primary_trade_plan(item)
     if isinstance(primary_plan, dict):
-        lines.extend(_format_exit_levels_lines(primary_plan))
-    lines.extend(_format_price_forecast_lines(item.get("price_forecast")))
-    lines.append("เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+        pattern = primary_plan.get("detected_pattern")
+        if pattern and pattern != "None":
+            lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+            
+        exit_lines = _format_exit_levels_lines(primary_plan)
+        if exit_lines:
+            lines.append("────────────────")
+            lines.extend([_html_escape(line) for line in exit_lines])
+            
+    forecast_lines = _format_price_forecast_lines(item.get("price_forecast"))
+    if forecast_lines:
+        lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in forecast_lines])
+        
+    lines.append("────────────────")
+    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    
     return "\n".join(lines)
 
 
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
-    emoji = "🟢" if signal == "BUY" else "🔴"
+    emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
-    name = str(item.get("name") or "").strip()
-    lines = [f"{emoji} ActionZone 15m {signal}"]
-    line_symbol = f"สินทรัพย์: {symbol}"
+    name = _html_escape(str(item.get("name") or "").strip())
+    
+    tv_symbol = symbol.replace("-", "")
+    
+    lines = [f"<b>{emoji} ActionZone 15m {signal} | {_html_escape(symbol)}</b>"]
     if name:
-        line_symbol += f" • {name}"
-    lines.append(line_symbol)
+        lines.append(f"<i>{name}</i>")
+    lines.append("────────────────")
+    
     entry_price = az_plan.get("entry_price")
     curr_price = az_plan.get("current_price", item.get("price"))
     change = item.get("change")
     entry_text = _format_price_value(entry_price)
     curr_text = _format_price_value(curr_price)
-    if entry_text or curr_text:
-        parts = []
-        if entry_text:
-            parts.append(f"จุดเข้า: {entry_text}")
-        if curr_text:
-            if isinstance(change, (int, float)):
-                parts.append(f"ราคาปัจจุบัน: {curr_text} ({change:+.2f}%)")
-            else:
-                parts.append(f"ราคาปัจจุบัน: {curr_text}")
-        lines.append("📍 " + " | ".join(parts))
+    
+    if entry_text:
+        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
+    if curr_text:
+        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
+        lines.append(f"<b>📍 ราคาปัจจุบัน:</b> {curr_text}{change_str}")
+        
     zone = az_plan.get("zone")
     trend = az_plan.get("trend_1h")
-    conf = az_plan.get("confidence")
     if zone or trend:
         parts = []
         if zone:
             parts.append(f"โซน: {zone}")
         if trend:
             parts.append(f"เทรนด์ 1H: {trend}")
-        lines.append("🧭 " + " • ".join(parts))
+        lines.append("<b>🧭 สภาวะตลาด:</b> " + " • ".join([_html_escape(p) for p in parts]))
+        
+    conf = az_plan.get("confidence")
     if isinstance(conf, (int, float)):
-        lines.append(f"📊 โอกาสจุดตัดสำเร็จ: {float(conf):.0f}%")
+        lines.append(f"<b>📊 โอกาสสำเร็จ:</b> {float(conf):.0f}%")
     
-    # Add EMA lengths and market behavior
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
     if fast_len and slow_len:
-        lines.append(f"⚙️ ค่าเฉลี่ยที่ดีที่สุด (EMA): {fast_len}/{slow_len}")
+        lines.append(f"<b>⚙️ ค่าเฉลี่ย EMA:</b> {fast_len}/{slow_len}")
+    
+    pattern = az_plan.get("detected_pattern")
+    if pattern and pattern != "None":
+        lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
     
     avg_range = az_plan.get("avg_range_pct")
     if isinstance(avg_range, (int, float)):
-        lines.append(f"📈 ความผันผวนเฉลี่ย (20 แท่ง): {avg_range:.2f}%")
+        lines.append(f"<b>📈 ความผันผวน (20 แท่ง):</b> {avg_range:.2f}%")
+        
     optimizer = az_plan.get("optimizer")
     best = optimizer.get("best") if isinstance(optimizer, dict) else None
     if isinstance(best, dict):
@@ -655,20 +813,32 @@ def _build_actionzone_message(item, az_plan):
         if isinstance(exp_rr, (int, float)):
             stats.append(f"ExpRR {float(exp_rr):.2f}")
         if stats:
-            lines.append("🧪 " + " | ".join(stats))
+            lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
+            
     sl = az_plan.get("stop_loss")
     sl_text = _format_price_value(sl)
     if sl_text:
-        lines.append(f"🛡️ จุดตัดขาดทุน (SL): {sl_text}")
-    lines.extend(_format_exit_levels_lines(az_plan))
-    lines.extend(_format_price_forecast_lines(item.get("price_forecast")))
-    bars = az_plan.get("bars_since_signal")
-    if isinstance(bars, (int, float)):
-        lines.append(f"แท่งนับจากสัญญาณ: {int(bars)}")
+        lines.append("────────────────")
+        lines.append(f"<b>🛡️ จุดตัดขาดทุน (SL):</b> {sl_text}")
+        
+    exit_lines = _format_exit_levels_lines(az_plan)
+    if exit_lines:
+        if not sl_text:
+            lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in exit_lines])
+        
+    forecast_lines = _format_price_forecast_lines(item.get("price_forecast"))
+    if forecast_lines:
+        lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in forecast_lines])
+        
+    lines.append("────────────────")
     last_signal_time = az_plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append("🕒 เวลาสัญญาณล่าสุด: " + last_signal_time)
-    lines.append("⏱️ เวลา: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {_html_escape(last_signal_time)}")
+    lines.append("⏱️ <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    
     return "\n".join(lines)
 
 
@@ -676,36 +846,46 @@ def _build_cdc_vixfix_message(item, plan):
     signal = str(plan.get("signal") or "").upper()
     if signal not in ("BUY", "EXIT", "SELL"):
         return None
-    emoji = "🟢" if signal == "BUY" else "🟠"
+    emoji = "🟢" if signal == "BUY" else "🟠" if signal == "EXIT" else "🔴"
     symbol = normalize_symbol(item.get("symbol") or "")
-    name = str(item.get("name") or "").strip()
-    lines = [f"{emoji} CDC+VixFix 15m {signal}"]
-    line_symbol = f"สินทรัพย์: {symbol}"
+    name = _html_escape(str(item.get("name") or "").strip())
+    tv_symbol = symbol.replace("-", "")
+    
+    lines = [f"<b>{emoji} CDC+VixFix 15m {signal} | {_html_escape(symbol)}</b>"]
     if name:
-        line_symbol += f" • {name}"
-    lines.append(line_symbol)
+        lines.append(f"<i>{name}</i>")
+    lines.append("────────────────")
+    
     entry_text = _format_price_value(plan.get("entry_price"))
     exit_text = _format_price_value(plan.get("exit_price"))
     stop_text = _format_price_value(plan.get("stop_loss"))
     tp_text = _format_price_value(plan.get("take_profit"))
+    
     move_parts = []
     if entry_text:
         move_parts.append(f"จุดเข้า: {entry_text}")
     if exit_text:
         move_parts.append(f"จุดออก: {exit_text}")
     elif tp_text:
-        move_parts.append(f"จุดออกเป้าหมาย: {tp_text}")
+        move_parts.append(f"เป้าหมาย: {tp_text}")
     if stop_text:
         move_parts.append(f"SL: {stop_text}")
+        
     if move_parts:
-        lines.append("📍 " + " | ".join(move_parts))
-    lines.extend(_format_exit_levels_lines(plan))
+        lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+        
+    exit_lines = _format_exit_levels_lines(plan)
+    if exit_lines:
+        lines.extend([_html_escape(line) for line in exit_lines])
+        
     profit_pct = plan.get("expected_profit_pct")
     if isinstance(profit_pct, (int, float)):
-        lines.append(f"💹 กำไรคาดการณ์: {profit_pct:+.2f}%")
+        lines.append(f"<b>💹 กำไรคาดการณ์:</b> {profit_pct:+.2f}%")
+        
     running_pct = plan.get("running_profit_pct")
     if isinstance(running_pct, (int, float)):
-        lines.append(f"📈 กำไรปัจจุบันจากจุดเข้า: {running_pct:+.2f}%")
+        lines.append(f"<b>📈 กำไรปัจจุบัน (จากจุดเข้า):</b> {running_pct:+.2f}%")
+        
     exit_trigger = str(plan.get("exit_trigger") or "").strip().upper()
     if exit_trigger:
         trigger_text = exit_trigger
@@ -713,17 +893,24 @@ def _build_cdc_vixfix_message(item, plan):
             trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
         elif exit_trigger == "CDC_RED_REVERSAL":
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
-        lines.append("🚨 ทริกเกอร์จุดออก: " + trigger_text)
+        lines.append("<b>🚨 ทริกเกอร์จุดออก:</b> " + _html_escape(trigger_text))
+        
     reason = plan.get("reason")
     if isinstance(reason, str) and reason.strip():
-        lines.append("🧠 เหตุผล: " + reason.strip())
+        lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
+        
     conf = _normalize_confidence(plan.get("confidence"))
     if conf is not None:
-        lines.append(f"📊 ความมั่นใจ: {conf:.0f}%")
+        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
+        
+    lines.append("────────────────")
     last_signal_time = plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append("🕒 เวลาสัญญาณล่าสุด: " + last_signal_time)
-    lines.append("⏱️ เวลาแจ้งเตือน: " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {_html_escape(last_signal_time)}")
+        
+    lines.append("⏱️ <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    
     return "\n".join(lines)
 
 
@@ -961,6 +1148,7 @@ def _actionzone_precision60_profile():
 
 def _build_telegram_candidates(results, min_conf, exit_min_conf):
     candidates = []
+    quality_drop_counts = Counter()
     precision60 = _actionzone_precision60_profile()
     for item in results:
         if not isinstance(item, dict) or item.get("error"):
@@ -1010,6 +1198,10 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                     required_az_conf = max(required_az_conf, float(precision60.get("min_conf", required_az_conf)))
                 az_conf = _normalize_confidence(az_plan.get("confidence"))
                 if az_conf is not None and az_conf >= required_az_conf:
+                    gate_ok, gate_reason, _ = _evaluate_entry_quality_gate(az_plan, az_signal)
+                    if not gate_ok:
+                        quality_drop_counts[gate_reason] += 1
+                        continue
                     az_message = _build_actionzone_message(item, az_plan)
                     if az_message:
                         trend_alignment = bool(az_plan.get("trend_alignment", True))
@@ -1030,6 +1222,16 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                             else:
                                 freshness = -4.0
                         score = float(az_conf) + freshness + (6.0 if trend_alignment else -8.0)
+                        edge = _extract_plan_edge_metrics(az_plan)
+                        wr = edge.get("win_rate_pct")
+                        exp = edge.get("expectancy_rr")
+                        trades = edge.get("trades")
+                        if isinstance(wr, (int, float)):
+                            score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
+                        if isinstance(exp, (int, float)):
+                            score += max(-4.0, min(8.0, float(exp) * 8.0))
+                        if isinstance(trades, (int, float)):
+                            score += max(0.0, min(4.0, float(trades) / 8.0))
                         last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
                         zone = str(az_plan.get("zone") or "").upper().strip()
                         entry_bucket = _format_price_value(az_plan.get("entry_price")) or "na"
@@ -1049,10 +1251,38 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
             best_conf = _get_best_confidence(item)
             if best_conf is not None and best_conf >= min_conf:
                 sources = _collect_alert_sources(item, min_conf)
+                primary_plan = _pick_primary_trade_plan(item)
+                gate_ok, gate_reason, _ = _evaluate_entry_quality_gate(primary_plan, signal)
+                if not gate_ok:
+                    quality_drop_counts[gate_reason] += 1
+                    continue
+                min_sources = getattr(config, "TELEGRAM_ALERT_PRIMARY_MIN_SOURCES", 2)
+                single_source_min_conf = getattr(config, "TELEGRAM_ALERT_PRIMARY_SINGLE_SOURCE_MIN_CONF", 90.0)
+                try:
+                    min_sources = int(min_sources)
+                except Exception:
+                    min_sources = 2
+                try:
+                    single_source_min_conf = float(single_source_min_conf)
+                except Exception:
+                    single_source_min_conf = 90.0
+                source_count = len(sources)
+                if source_count < max(1, min_sources) and float(best_conf) < float(single_source_min_conf):
+                    continue
                 message = _build_telegram_message(item, signal, best_conf, sources)
                 if message:
                     source_bonus = min(8.0, float(len(sources)) * 1.5)
                     score = float(best_conf) + source_bonus
+                    edge = _extract_plan_edge_metrics(primary_plan)
+                    wr = edge.get("win_rate_pct")
+                    exp = edge.get("expectancy_rr")
+                    trades = edge.get("trades")
+                    if isinstance(wr, (int, float)):
+                        score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
+                    if isinstance(exp, (int, float)):
+                        score += max(-4.0, min(8.0, float(exp) * 8.0))
+                    if isinstance(trades, (int, float)):
+                        score += max(0.0, min(4.0, float(trades) / 8.0))
                     candidates.append({
                         "symbol": symbol,
                         "strategy": "PRIMARY",
@@ -1062,7 +1292,10 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                         "message": message,
                         "cache_key": f"PRIMARY|{symbol}|{signal}",
                     })
-    return candidates
+    stats = {
+        "quality_drop_counts": dict(quality_drop_counts),
+    }
+    return candidates, stats
 
 
 def _notify_telegram_from_results(results):
@@ -1102,9 +1335,17 @@ def _notify_telegram_from_results(results):
     if cooldown_minutes < 1:
         cooldown_minutes = 1
     dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    quality_drop_counts = {}
+    if isinstance(build_stats, dict):
+        quality_drop_counts = build_stats.get("quality_drop_counts") or {}
     if not candidates:
-        logger.info("Telegram alerts: no candidates (min_conf=%.1f, dynamic_min_conf=%.1f)", min_conf, dynamic_min_conf)
+        logger.info(
+            "Telegram alerts: no candidates (min_conf=%.1f, dynamic_min_conf=%.1f, quality_drops=%s)",
+            min_conf,
+            dynamic_min_conf,
+            json.dumps(quality_drop_counts, ensure_ascii=False),
+        )
         return 0
     candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
     sent = 0
@@ -1137,12 +1378,13 @@ def _notify_telegram_from_results(results):
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s dropped(cache=%s symbol_cap=%s run_cap=%s) min_conf=%.1f dynamic_min_conf=%.1f",
+        "Telegram alerts: sent=%s candidates=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
         sent,
         len(candidates),
         dropped_by_cache,
         dropped_by_symbol_cap,
         dropped_by_run_cap,
+        json.dumps(quality_drop_counts, ensure_ascii=False),
         min_conf,
         dynamic_min_conf,
     )
@@ -1347,6 +1589,44 @@ def _ema_cross_15m_set_cached(symbol, payload):
     EMA_CROSS_15M_OPT_CACHE[sym] = payload
 
 
+def _add_price_patterns(df):
+    """
+    Adds basic price pattern flags to the DataFrame.
+    """
+    op = df["Open"]
+    hi = df["High"]
+    lo = df["Low"]
+    cl = df["Close"]
+    
+    body = (cl - op).abs()
+    upper_shadow = hi - cl.where(cl > op, op)
+    lower_shadow = cl.where(cl < op, op) - lo
+    hl_range = hi - lo
+    
+    prev_op = op.shift(1)
+    prev_cl = cl.shift(1)
+    is_prev_red = prev_cl < prev_op
+    is_curr_green = cl > op
+    df["Bullish_Engulfing"] = is_prev_red & is_curr_green & (cl > prev_op) & (op < prev_cl)
+    
+    is_prev_green = prev_cl > prev_op
+    is_curr_red = cl < op
+    df["Bearish_Engulfing"] = is_prev_green & is_curr_red & (cl < prev_op) & (op > prev_cl)
+    
+    df["Bullish_Pinbar"] = (lower_shadow > 2 * body) & (upper_shadow < 0.2 * hl_range) & (hl_range > 0)
+    df["Bearish_Pinbar"] = (upper_shadow > 2 * body) & (lower_shadow < 0.2 * hl_range) & (hl_range > 0)
+    
+    df["Bullish_Pattern"] = df["Bullish_Engulfing"] | df["Bullish_Pinbar"]
+    df["Bearish_Pattern"] = df["Bearish_Engulfing"] | df["Bearish_Pinbar"]
+    
+    df["Pattern_Name"] = np.where(df["Bullish_Engulfing"], "Bullish Engulfing",
+                         np.where(df["Bearish_Engulfing"], "Bearish Engulfing",
+                         np.where(df["Bullish_Pinbar"], "Bullish Pinbar",
+                         np.where(df["Bearish_Pinbar"], "Bearish Pinbar", "None"))))
+    
+    return df
+
+
 def _ema_cross_15m_prepare_df(raw_df):
     if raw_df is None or getattr(raw_df, "empty", True):
         return None
@@ -1358,6 +1638,7 @@ def _ema_cross_15m_prepare_df(raw_df):
             df.index = df.index.tz_localize(None)
         except Exception:
             pass
+    df = _add_price_patterns(df)
     df["H-L"] = df["High"] - df["Low"]
     df["H-PC"] = (df["High"] - df["Close"].shift(1)).abs()
     df["L-PC"] = (df["Low"] - df["Close"].shift(1)).abs()
@@ -1563,6 +1844,7 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
     min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
     require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
+    require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", False))
     time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
     tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
     tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
@@ -1600,8 +1882,8 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     green = bull & (close > ema_fast)
     red = bear & (close < ema_fast)
     
-    buy_signal = green & (~green.shift(1).fillna(False))
-    sell_signal = red & (~red.shift(1).fillna(False))
+    buy_signal = green & (~green.shift(1, fill_value=False))
+    sell_signal = red & (~red.shift(1, fill_value=False))
     
     wins = 0
     losses = 0
@@ -1789,6 +2071,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
     min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
     require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
+    require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", False))
     time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
     tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
     tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
@@ -1825,8 +2108,8 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     x_confirm = close
     green = bull & (x_confirm > ema_fast)
     red = bear & (x_confirm < ema_fast)
-    buy_signal = green & (~green.shift(1).fillna(False))
-    sell_signal = red & (~red.shift(1).fillna(False))
+    buy_signal = green & (~green.shift(1, fill_value=False))
+    sell_signal = red & (~red.shift(1, fill_value=False))
     wins = 0
     losses = 0
     total_rr = 0.0
@@ -1867,6 +2150,11 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
                     continue
                 if direction_i == "SELL" and float(entry_i) > float(ema200_i):
                     continue
+        if require_pattern:
+            if direction_i == "BUY" and not bool(df["Bullish_Pattern"].iloc[max(0, i-3):i+1].any()):
+                continue
+            if direction_i == "SELL" and not bool(df["Bearish_Pattern"].iloc[max(0, i-3):i+1].any()):
+                continue
         risk_i = float(atr_i * stop_mult)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
@@ -3695,8 +3983,8 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
         
         zone_now = zone[-1]
         
-        buy_signal = green & (~green.shift(1).fillna(False))
-        sell_signal = red & (~red.shift(1).fillna(False))
+        buy_signal = green & (~green.shift(1, fill_value=False))
+        sell_signal = red & (~red.shift(1, fill_value=False))
         
         raw_signal = "WAIT"
         if bool(buy_signal.iloc[-1]):
@@ -3832,8 +4120,31 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
                     filter_reasons.append("below_ema200")
                 if filtered_signal == "SELL" and current_price is not None and float(current_price) > ema200_now:
                     filter_reasons.append("above_ema200")
+            
+            require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", True))
+            if require_pattern:
+                if filtered_signal == "BUY" and not bool(df["Bullish_Pattern"].tail(4).any()):
+                    filter_reasons.append("no_bullish_pattern")
+                elif filtered_signal == "SELL" and not bool(df["Bearish_Pattern"].tail(4).any()):
+                    filter_reasons.append("no_bearish_pattern")
+            
             if filter_reasons:
                 filtered_signal = "WAIT"
+        
+        detected_pattern = "None"
+        if filtered_signal == "BUY":
+            recent_patterns = df["Pattern_Name"].tail(4).values
+            for p in reversed(recent_patterns):
+                if p in ("Bullish Engulfing", "Bullish Pinbar"):
+                    detected_pattern = p
+                    break
+        elif filtered_signal == "SELL":
+            recent_patterns = df["Pattern_Name"].tail(4).values
+            for p in reversed(recent_patterns):
+                if p in ("Bearish Engulfing", "Bearish Pinbar"):
+                    detected_pattern = p
+                    break
+
         stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
         min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 1.0)
         tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", 5.0)
@@ -3906,6 +4217,7 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             "ema_gap_pct": ema_gap_pct,
             "rvol": rvol,
             "optimizer": opt_meta,
+            "detected_pattern": detected_pattern,
         }
     except Exception as e:
         print(f"Error in _actionzone_15m_alert for {symbol}: {e}")

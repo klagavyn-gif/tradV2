@@ -1,0 +1,15 @@
+{
+  "mode": "relaxed_require_edge_metrics_false",
+  "symbols": 24,
+  "valid_results": 23,
+  "dynamic_min_conf": 78.38373469406147,
+  "candidate_count": 18,
+  "strategy_counts": {
+    "CDCVIX15": 18
+  },
+  "signal_counts": {
+    "EXIT": 14,
+    "BUY": 4
+  },
+  "quality_drops": {}
+}

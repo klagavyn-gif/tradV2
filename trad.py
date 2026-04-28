@@ -899,6 +899,10 @@ def _build_cdc_vixfix_message(item, plan):
     if isinstance(reason, str) and reason.strip():
         lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
         
+    pattern = plan.get("detected_pattern")
+    if pattern and pattern != "None":
+        lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+        
     conf = _normalize_confidence(plan.get("confidence"))
     if conf is not None:
         lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")

@@ -4,65 +4,67 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ระบบวิเคราะห์หุ้น</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-icons/1.10.0/font/bootstrap-icons.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
-    <div class="container">
-        <div class="topbar">
-            <div class="header">
-                <h1><i class="bi bi-graph-up"></i> แดชบอร์ดวิเคราะห์สินทรัพย์</h1>
-                <p>โฟกัสสัญญาณเทรดที่จำเป็นสำหรับตัดสินใจ</p>
-            </div>
-        </div>
-
-        <div class="layout">
-            <div class="sidebar" id="watchlistSection">
-                <div class="search-card mt-0">
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <h5 class="mb-0"><i class="bi bi-star"></i> รายการหุ้นที่ติดตาม</h5>
-                        <button type="button" class="btn btn-outline-primary btn-sm" id="analyzeWatchlistBtn" onclick="analyzeWatchlist()">
-                            วิเคราะห์รายการติดตาม
-                        </button>
+    <div class="page-shell">
+        <div class="container">
+            <div class="topbar hero-card">
+                <div class="header">
+                    <div class="panel-kicker">Trading Workspace</div>
+                    <h1><i class="bi bi-graph-up-arrow"></i> แดชบอร์ดวิเคราะห์สินทรัพย์</h1>
+                    <p>จัดศูนย์กลางข้อมูลราคา สัญญาณเทรด รายการติดตาม และการแจ้งเตือนให้อ่านง่ายขึ้นในหน้าเดียว</p>
+                </div>
+                <div class="hero-meta">
+                    <div class="hero-stat">
+                        <span class="hero-stat-label">รองรับ</span>
+                        <strong>หุ้น, คริปโต, ดัชนี</strong>
                     </div>
-                    <div class="watchlist-add mb-2">
-                        <input type="text"
-                               class="form-control form-control-sm"
-                               id="watchlistAddInput"
-                               placeholder="เพิ่ม Symbol เช่น NVDA"
-                               onkeydown="if(event.key==='Enter'){event.preventDefault(); addFromWatchlistInput();}">
-                        <button type="button" class="btn btn-outline-primary btn-sm" onclick="addFromWatchlistInput()">
-                            <i class="bi bi-plus-lg"></i> เพิ่ม
-                        </button>
+                    <div class="hero-stat">
+                        <span class="hero-stat-label">มุมมองหลัก</span>
+                        <strong>Signals + Risk Plan</strong>
                     </div>
-                    <div class="mb-2">
-                        <input type="text"
-                               class="form-control form-control-sm"
-                               placeholder="ค้นหา Symbol ในรายการติดตาม"
-                               oninput="setWatchlistSearch(this.value)">
+                    <div class="hero-stat">
+                        <span class="hero-stat-label">Workflow</span>
+                        <strong>Analyze, Watchlist, Alerts</strong>
                     </div>
-                    <div class="d-flex justify-content-between align-items-center mb-2 gap-2">
-                        <small class="text-muted" id="watchlistCountText"></small>
-                        <div class="d-flex align-items-center gap-2">
-                            <label class="form-label mb-0 small">เรียงตาม</label>
-                            <select class="form-select form-select-sm" onchange="setWatchlistSort(this.value)">
-                                <option value="added" selected>ตามที่เพิ่ม</option>
-                                <option value="az">A → Z</option>
-                                <option value="za">Z → A</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div id="watchlistItems" class="watchlist-list"></div>
                 </div>
             </div>
 
+            <div class="workspace-overview panel-card">
+                <a class="overview-card" href="#analysisSection">
+                    <div class="overview-eyebrow">Core Flow</div>
+                    <strong>เริ่มจากส่วนวิเคราะห์</strong>
+                    <span>กรอกหลาย Symbol, เลือกช่วงเวลา, และส่งผลเข้าหน้าเดียวแบบอ่านง่าย</span>
+                </a>
+                <a class="overview-card" href="#watchlistSection">
+                    <div class="overview-eyebrow">Monitor</div>
+                    <strong>ใช้ Watchlist เป็นคิวติดตาม</strong>
+                    <span>เพิ่มหุ้นที่สนใจไว้ล่วงหน้า แล้วกดวิเคราะห์ซ้ำได้ทันทีโดยไม่ต้องพิมพ์ใหม่</span>
+                </a>
+                <a class="overview-card" href="#alertsSection">
+                    <div class="overview-eyebrow">Signal Feed</div>
+                    <strong>ดูสัญญาณเด่นแยกอีกฝั่ง</strong>
+                    <span>รวม alert ที่สำคัญจากรายการติดตาม เพื่อกดกลับไปวิเคราะห์เชิงลึกได้เร็วขึ้น</span>
+                </a>
+            </div>
+
+            <div class="layout">
             <div class="main-content" id="analysisSection">
-                <div class="search-card">
-                    <div class="d-flex justify-content-between align-items-center mb-3">
-                        <h5 class="mb-0"><i class="bi bi-search"></i> ค้นหาและวิเคราะห์หุ้น</h5>
-                        <span class="text-muted small">รองรับหลาย Symbol พร้อมกัน</span>
+                <div class="search-card panel-card search-panel">
+                    <div class="panel-heading d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <div class="panel-kicker">Analysis</div>
+                            <h5 class="mb-1"><i class="bi bi-search"></i> ค้นหาและวิเคราะห์สินทรัพย์</h5>
+                            <div class="panel-subtitle">กรอกหลาย Symbol ได้ในครั้งเดียว แล้วดูแผนเทรด, ความเสี่ยง และกราฟในบล็อกเดียวกัน</div>
+                        </div>
+                        <span class="section-chip">รองรับหลาย Symbol พร้อมกัน</span>
                     </div>
                     <form id="searchForm">
                         <div class="row g-3 align-items-end">
@@ -101,32 +103,146 @@
                                 <label class="form-check-label" for="notifyTelegramToggle">ส่งแจ้งเตือน Telegram (เฉพาะสัญญาณสำคัญ)</label>
                             </div>
                         </div>
+                        <div class="search-helper">
+                            <span><i class="bi bi-lightning-charge"></i> วิเคราะห์ได้สูงสุด 30 Symbol ต่อครั้ง</span>
+                            <span><i class="bi bi-bell"></i> เปิด Telegram เมื่ออยากส่งเฉพาะสัญญาณสำคัญทันที</span>
+                        </div>
                     </form>
                 </div>
 
-                <div id="loading" class="loading" style="display: none;">
-                    <div class="spinner-border text-primary" role="status">
-                        <span class="visually-hidden">Loading...</span>
+                <div class="workspace-meta-grid">
+                    <div class="panel-card workspace-meta-card">
+                        <div class="panel-heading mb-2">
+                            <div>
+                                <div class="panel-kicker">System</div>
+                                <h5 class="mb-1"><i class="bi bi-heart-pulse"></i> สถานะระบบ</h5>
+                                <div class="panel-subtitle">ดูความพร้อมของระบบ เวลาเซิร์ฟเวอร์ และคำเตือนการตั้งค่าก่อนใช้งาน</div>
+                            </div>
+                        </div>
+                        <div id="systemHealthPanel" class="workspace-meta-body">
+                            <div class="empty-state">
+                                กำลังตรวจสอบสถานะระบบ...
+                            </div>
+                        </div>
                     </div>
-                    <p class="mt-3">กำลังวิเคราะห์ข้อมูล...</p>
+
+                    <div class="panel-card workspace-meta-card">
+                        <div class="panel-heading mb-2">
+                            <div>
+                                <div class="panel-kicker">Summary</div>
+                                <h5 class="mb-1"><i class="bi bi-grid-1x2"></i> ภาพรวมการวิเคราะห์</h5>
+                                <div class="panel-subtitle">สรุปจำนวนตัวที่พร้อมเทรด, ตัวที่ควรรอ, และมุมมองรวมจากรอบวิเคราะห์ล่าสุด</div>
+                            </div>
+                        </div>
+                        <div id="analysisSummaryPanel" class="workspace-meta-body">
+                            <div class="empty-state">
+                                ยังไม่มีสรุปผลวิเคราะห์
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="panel-card workspace-meta-card">
+                        <div class="panel-heading mb-2">
+                            <div>
+                                <div class="panel-kicker">Action Queue</div>
+                                <h5 class="mb-1"><i class="bi bi-lightning-charge"></i> ตัวที่ควรดูต่อ</h5>
+                                <div class="panel-subtitle">ดึงเฉพาะตัวที่มีสัญญาณเด่นขึ้นมาให้กดวิเคราะห์เชิงลึกต่อได้เร็วขึ้น</div>
+                            </div>
+                        </div>
+                        <div id="actionQueuePanel" class="workspace-meta-body">
+                            <div class="empty-state">
+                                รอผลวิเคราะห์เพื่อจัดคิวสัญญาณ
+                            </div>
+                        </div>
+                    </div>
                 </div>
 
-                <div id="alertContainer"></div>
+                <div class="results-panel panel-card">
+                    <div class="results-panel-header">
+                        <div>
+                            <div class="panel-kicker">Results</div>
+                            <h5 class="mb-1"><i class="bi bi-bar-chart-line"></i> ผลการวิเคราะห์และแผนเทรด</h5>
+                            <div class="panel-subtitle">แสดงสัญญาณ, ระดับความเสี่ยง, คำแนะนำการตัดสินใจ และกราฟของแต่ละ Symbol แบบเรียงอ่านง่าย</div>
+                        </div>
+                        <span class="section-chip section-chip-soft">Signal + Risk + Chart</span>
+                    </div>
 
-                <div id="resultsContainer"></div>
+                    <div id="loading" class="loading" style="display: none;">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <p class="mt-3">กำลังวิเคราะห์ข้อมูล...</p>
+                    </div>
+
+                    <div id="alertContainer" class="alert-stack"></div>
+
+                    <div id="resultsContainer" class="results-stack">
+                        <div class="empty-state large-empty-state">
+                            <strong>ยังไม่มีผลวิเคราะห์</strong>
+                            <span>เริ่มจากกรอก Symbol ที่ต้องการ แล้วกด "เริ่มวิเคราะห์" เพื่อให้ระบบสร้างแผนเทรดและกราฟให้ทันที</span>
+                        </div>
+                    </div>
+                </div>
             </div>
 
-            <div class="alert-sidebar" id="alertsSection">
-                <div class="alert-panel">
-                    <div class="alert-panel-header">
-                        <div>
-                            <h5 class="mb-0"><i class="bi bi-bell"></i> สัญญาณน่าสนใจล่าสุด</h5>
-                            <small class="text-muted">จาก Quantum Hunter, Sniper, Sovereign สำหรับหุ้นที่ติดตาม</small>
+            <div class="side-rail">
+                <div class="sidebar" id="watchlistSection">
+                    <div class="search-card mt-0 panel-card">
+                        <div class="panel-heading d-flex justify-content-between align-items-center mb-2">
+                            <div>
+                                <div class="panel-kicker">Watchlist</div>
+                                <h5 class="mb-1"><i class="bi bi-star"></i> รายการหุ้นที่ติดตาม</h5>
+                                <div class="panel-subtitle">รวม Symbol ที่อยากติดตามและส่งไปวิเคราะห์ซ้ำได้ทันที</div>
+                            </div>
+                            <button type="button" class="btn btn-outline-primary btn-sm" id="analyzeWatchlistBtn" onclick="analyzeWatchlist()">
+                                วิเคราะห์รายการติดตาม
+                            </button>
                         </div>
-                        <span class="badge bg-warning text-dark" id="alertCountBadge" style="display:none;"></span>
+                        <div class="watchlist-add mb-2">
+                            <input type="text"
+                                   class="form-control form-control-sm"
+                                   id="watchlistAddInput"
+                                   placeholder="เพิ่ม Symbol เช่น NVDA"
+                                   onkeydown="if(event.key==='Enter'){event.preventDefault(); addFromWatchlistInput();}">
+                            <button type="button" class="btn btn-outline-primary btn-sm" onclick="addFromWatchlistInput()">
+                                <i class="bi bi-plus-lg"></i> เพิ่ม
+                            </button>
+                        </div>
+                        <div class="mb-2">
+                            <input type="text"
+                                   class="form-control form-control-sm"
+                                   placeholder="ค้นหา Symbol ในรายการติดตาม"
+                                   oninput="setWatchlistSearch(this.value)">
+                        </div>
+                        <div class="d-flex justify-content-between align-items-center mb-2 gap-2">
+                            <small class="text-muted" id="watchlistCountText"></small>
+                            <div class="d-flex align-items-center gap-2">
+                                <label class="form-label mb-0 small">เรียงตาม</label>
+                                <select class="form-select form-select-sm" onchange="setWatchlistSort(this.value)">
+                                    <option value="added" selected>ตามที่เพิ่ม</option>
+                                    <option value="az">A → Z</option>
+                                    <option value="za">Z → A</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="watchlistItems" class="watchlist-list"></div>
                     </div>
-                    <div id="watchlistAlerts" class="alert-list"></div>
                 </div>
+
+                <div class="alert-sidebar" id="alertsSection">
+                    <div class="alert-panel panel-card">
+                        <div class="alert-panel-header">
+                            <div>
+                                <div class="panel-kicker">Alerts</div>
+                                <h5 class="mb-1"><i class="bi bi-bell"></i> สัญญาณน่าสนใจล่าสุด</h5>
+                                <div class="panel-subtitle">สรุปสัญญาณสำคัญจากหุ้นที่ติดตามเพื่อกดเข้าไปวิเคราะห์ต่อได้ทันที</div>
+                            </div>
+                            <span class="badge bg-warning text-dark" id="alertCountBadge" style="display:none;"></span>
+                        </div>
+                        <div id="watchlistAlerts" class="alert-list"></div>
+                    </div>
+                </div>
+            </div>
             </div>
         </div>
     </div>
@@ -143,11 +259,239 @@
         let watchlistSortMode = 'added';
         let latestResultsMap = {};
         let buyPriceStore = {};
+        let currentHealthSnapshot = null;
+        let lastAnalysisMeta = null;
         const MAX_SYMBOLS_PER_REQUEST = 30;
+
+        function getResultsEmptyStateHtml() {
+            return `
+                <div class="empty-state large-empty-state">
+                    <strong>ยังไม่มีผลวิเคราะห์</strong>
+                    <span>เริ่มจากกรอก Symbol ที่ต้องการ แล้วกด "เริ่มวิเคราะห์" เพื่อให้ระบบสร้างแผนเทรดและกราฟให้ทันที</span>
+                </div>
+            `;
+        }
 
         function formatNumber(value, maxDecimals) {
             if (typeof value !== 'number' || isNaN(value)) return 'N/A';
             return parseFloat(value.toFixed(maxDecimals)).toString();
+        }
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function normalizeTradeSignal(value) {
+            const text = String(value || '').trim().toUpperCase();
+            if (!text) return 'WAIT';
+            if (text.includes('BUY') || text.includes('LONG') || text === 'UP') return 'BUY';
+            if (text.includes('SELL') || text.includes('SHORT') || text === 'DOWN') return 'SELL';
+            return 'WAIT';
+        }
+
+        function getSignalToneClass(signal) {
+            const normalized = normalizeTradeSignal(signal);
+            if (normalized === 'BUY') return 'signal-pill-buy';
+            if (normalized === 'SELL') return 'signal-pill-sell';
+            return 'signal-pill-wait';
+        }
+
+        function formatPercent(value, maxDecimals = 1) {
+            if (typeof value !== 'number' || isNaN(value)) return 'N/A';
+            return formatNumber(value, maxDecimals) + '%';
+        }
+
+        function getUiSummary(result) {
+            if (!result || typeof result !== 'object') {
+                return {
+                    signal: 'WAIT',
+                    source: 'ยังไม่มีข้อมูล',
+                    confidence: null,
+                    pattern: null,
+                    is_actionable: false,
+                };
+            }
+            if (result.ui_summary && typeof result.ui_summary === 'object') {
+                return result.ui_summary;
+            }
+            const candidates = [
+                { plan: result.cdc_vixfix_15m, source: 'CDC+VixFix 15m' },
+                { plan: result.actionzone_15m, source: 'ActionZone 15m' },
+                { plan: result.ema_cross_15m, source: 'EMA Cross 15m' },
+                { plan: result.crypto_reversal_15m, source: 'Crypto Reversal 15m' },
+            ];
+            for (const candidate of candidates) {
+                const plan = candidate.plan;
+                if (!plan || typeof plan !== 'object') continue;
+                const signal = normalizeTradeSignal(plan.signal || plan.raw_signal || plan.setup || plan.recommendation);
+                if (signal === 'WAIT') continue;
+                const confidence = typeof plan.confidence === 'number'
+                    ? plan.confidence
+                    : (typeof plan.predicted_win_prob === 'number'
+                        ? plan.predicted_win_prob
+                        : (typeof plan.win_prob === 'number' ? plan.win_prob : null));
+                return {
+                    signal: signal,
+                    source: candidate.source,
+                    confidence: confidence,
+                    pattern: plan.detected_pattern || null,
+                    is_actionable: true,
+                };
+            }
+            const rootSignal = normalizeTradeSignal(result.signal);
+            return {
+                signal: rootSignal,
+                source: 'AI Summary',
+                confidence: null,
+                pattern: null,
+                is_actionable: rootSignal !== 'WAIT',
+            };
+        }
+
+        function renderSystemHealth(snapshot) {
+            const container = document.getElementById('systemHealthPanel');
+            if (!container) return;
+            const status = snapshot && snapshot.status ? String(snapshot.status).toUpperCase() : 'UNKNOWN';
+            const warnings = snapshot && Array.isArray(snapshot.warnings) ? snapshot.warnings : [];
+            const serverTime = snapshot && snapshot.server_time ? snapshot.server_time : 'ไม่ทราบเวลา';
+            let toneClass = 'status-good';
+            let label = 'พร้อมใช้งาน';
+            let description = 'ระบบพร้อมสำหรับการวิเคราะห์และยังไม่พบคำเตือนการตั้งค่าที่กระทบการใช้งาน';
+            if (status !== 'OK') {
+                toneClass = 'status-bad';
+                label = 'ต้องตรวจสอบ';
+                description = 'ระบบตอบกลับไม่สมบูรณ์ ควรตรวจสอบการเชื่อมต่อหรือการตั้งค่าเพิ่มเติม';
+            } else if (warnings.length) {
+                toneClass = 'status-warn';
+                label = 'มีคำเตือน';
+                description = 'ระบบยังทำงานได้ แต่ควรตรวจสอบค่าตั้งต้นหรือบริการที่เกี่ยวข้องเพื่อให้ใช้งานได้เต็มประสิทธิภาพ';
+            }
+            container.innerHTML = `
+                <div class="status-block ${toneClass}">
+                    <span class="status-pill">${label}</span>
+                    <strong>${description}</strong>
+                    <span>เวลาเซิร์ฟเวอร์: ${escapeHtml(serverTime)}</span>
+                    ${warnings.length
+                        ? `<ul class="status-list">${warnings.map(item => `<li>${escapeHtml(item)}</li>`).join('')}</ul>`
+                        : `<span>ยังไม่พบ warning จากระบบตั้งค่า</span>`}
+                </div>
+            `;
+        }
+
+        function renderAnalysisSummary(meta) {
+            const container = document.getElementById('analysisSummaryPanel');
+            if (!container) return;
+            const summary = meta && meta.summary ? meta.summary : null;
+            if (!summary) {
+                container.innerHTML = '<div class="empty-state">ยังไม่มีสรุปผลวิเคราะห์ในรอบนี้</div>';
+                return;
+            }
+            const topSignal = summary.top_signal || null;
+            const dominantSignal = String(summary.dominant_signal || 'WAIT').toUpperCase();
+            let dominantText = 'รอสัญญาณเพิ่ม';
+            if (dominantSignal === 'BUY') dominantText = 'ฝั่ง Long เด่นกว่า';
+            if (dominantSignal === 'SELL') dominantText = 'ฝั่ง Short เด่นกว่า';
+            if (dominantSignal === 'MIXED') dominantText = 'สัญญาณคละกัน';
+            container.innerHTML = `
+                <div class="summary-metrics">
+                    <div class="summary-metric">
+                        <span>วิเคราะห์สำเร็จ</span>
+                        <strong>${summary.success_count}/${summary.requested_count}</strong>
+                    </div>
+                    <div class="summary-metric">
+                        <span>พร้อมเทรด</span>
+                        <strong>${summary.actionable_count}</strong>
+                    </div>
+                    <div class="summary-metric">
+                        <span>BUY / SELL / WAIT</span>
+                        <strong>${summary.buy_count} / ${summary.sell_count} / ${summary.wait_count}</strong>
+                    </div>
+                    <div class="summary-metric">
+                        <span>อัตราสำเร็จของคำขอ</span>
+                        <strong>${summary.success_rate_pct !== null ? formatPercent(summary.success_rate_pct, 1) : 'N/A'}</strong>
+                    </div>
+                </div>
+                <div class="summary-highlight">
+                    <div class="summary-highlight-top">
+                        <span class="signal-pill ${getSignalToneClass(dominantSignal)}">${escapeHtml(dominantText)}</span>
+                        <span class="summary-period">${escapeHtml(summary.period || '-')}</span>
+                    </div>
+                    ${topSignal
+                        ? `<strong>${escapeHtml(topSignal.symbol)} เด่นสุดจาก ${escapeHtml(topSignal.source || 'AI Summary')}</strong>
+                           <span>สัญญาณ ${escapeHtml(topSignal.signal)}${typeof topSignal.confidence === 'number' ? ' | ความเชื่อมั่น ' + formatPercent(topSignal.confidence, 1) : ''}${topSignal.pattern ? ' | Pattern ' + escapeHtml(topSignal.pattern) : ''}</span>`
+                        : `<strong>ยังไม่มีตัวที่เข้าเกณฑ์สัญญาณหลัก</strong>
+                           <span>รอบนี้ระบบมองว่าส่วนใหญ่ควรรอหรือยังไม่มีสัญญาณที่เด่นพอ</span>`}
+                </div>
+            `;
+        }
+
+        function renderActionQueue(meta) {
+            const container = document.getElementById('actionQueuePanel');
+            if (!container) return;
+            const summary = meta && meta.summary ? meta.summary : null;
+            const queue = summary && Array.isArray(summary.action_queue) ? summary.action_queue : [];
+            const errors = summary && Array.isArray(summary.errors) ? summary.errors : [];
+            if (!queue.length) {
+                const errorHtml = errors.length
+                    ? `<div class="queue-errors">${errors.map(item => `<div>${escapeHtml(item.symbol)}: ${escapeHtml(item.error)}</div>`).join('')}</div>`
+                    : '';
+                container.innerHTML = `
+                    <div class="empty-state">
+                        ยังไม่มีตัวที่ควรเร่งดูต่อจากรอบล่าสุด
+                        ${errorHtml}
+                    </div>
+                `;
+                return;
+            }
+            container.innerHTML = `
+                <div class="action-queue">
+                    ${queue.map(item => `
+                        <button type="button" class="queue-item" onclick="viewWatchlistSymbol('${escapeHtml(item.symbol)}')">
+                            <div class="queue-item-head">
+                                <strong>${escapeHtml(item.symbol)}</strong>
+                                <span class="signal-pill ${getSignalToneClass(item.signal)}">${escapeHtml(item.signal)}</span>
+                            </div>
+                            <div class="queue-item-meta">
+                                <span>${escapeHtml(item.source || 'AI Summary')}</span>
+                                <span>${typeof item.confidence === 'number' ? formatPercent(item.confidence, 1) : 'N/A'}</span>
+                            </div>
+                            <div class="queue-item-note">
+                                ${item.pattern ? 'Pattern: ' + escapeHtml(item.pattern) : 'กดเพื่อวิเคราะห์เชิงลึกทันที'}
+                            </div>
+                        </button>
+                    `).join('')}
+                </div>
+            `;
+        }
+
+        function applyWorkspaceMeta(meta) {
+            lastAnalysisMeta = meta || null;
+            const healthSnapshot = meta && meta.health ? meta.health : currentHealthSnapshot;
+            renderSystemHealth(healthSnapshot);
+            renderAnalysisSummary(lastAnalysisMeta);
+            renderActionQueue(lastAnalysisMeta);
+        }
+
+        async function refreshSystemHealth() {
+            try {
+                const response = await fetch('/health');
+                if (!response.ok) {
+                    throw new Error('HTTP ' + response.status);
+                }
+                currentHealthSnapshot = await response.json();
+            } catch (error) {
+                currentHealthSnapshot = {
+                    status: 'error',
+                    server_time: '-',
+                    warnings: ['ไม่สามารถเชื่อมต่อ health endpoint ได้: ' + (error && error.message ? error.message : error)],
+                };
+            }
+            renderSystemHealth(currentHealthSnapshot);
         }
 
         function getSymbolKey(symbol) {
@@ -249,7 +593,7 @@
                 countEl.textContent = visible + '/' + max + ' รายการ';
             };
             if (!watchlist.length) {
-                container.innerHTML = '<span class="text-muted">ยังไม่มีหุ้นที่ติดตาม</span>';
+                container.innerHTML = '<div class="empty-state">ยังไม่มีหุ้นที่ติดตาม</div>';
                 setCount(0, 0);
                 return;
             }
@@ -259,7 +603,7 @@
                 items = items.filter(sym => sym.toUpperCase().includes(term));
             }
             if (!items.length) {
-                container.innerHTML = '<span class="text-muted">ไม่พบหุ้นที่ตรงกับการค้นหา</span>';
+                container.innerHTML = '<div class="empty-state">ไม่พบหุ้นที่ตรงกับการค้นหา</div>';
                 setCount(0, total);
                 return;
             }
@@ -271,10 +615,25 @@
             setCount(items.length, total);
             container.innerHTML = items.map(sym => `
                 <div class="watchlist-item" onclick="viewWatchlistSymbol('${sym}')">
-                    <span class="watchlist-symbol">${sym}</span>
-                    <button type="button" class="watchlist-remove-btn" onclick="event.stopPropagation(); removeFromWatchlist('${sym}')">
-                        <i class="bi bi-x-circle"></i>
-                    </button>
+                    <div class="watchlist-item-main">
+                        <span class="watchlist-symbol">${sym}</span>
+                        ${(() => {
+                            const summary = getUiSummary(latestResultsMap[getSymbolKey(sym)]);
+                            const confidenceText = typeof summary.confidence === 'number' ? ' | ' + formatPercent(summary.confidence, 1) : '';
+                            const sourceText = summary.source ? summary.source : 'ยังไม่มีผลล่าสุด';
+                            return `
+                                <div class="watchlist-meta">
+                                    <span class="signal-pill ${getSignalToneClass(summary.signal)}">${escapeHtml(summary.signal)}</span>
+                                    <span class="watchlist-meta-text">${escapeHtml(sourceText)}${confidenceText}</span>
+                                </div>
+                            `;
+                        })()}
+                    </div>
+                    <div class="watchlist-actions">
+                        <button type="button" class="watchlist-remove-btn" onclick="event.stopPropagation(); removeFromWatchlist('${sym}')">
+                            <i class="bi bi-x-circle"></i>
+                        </button>
+                    </div>
                 </div>
             `).join('');
         }
@@ -371,7 +730,11 @@
                             latestResultsMap[key] = r;
                         }
                     });
+                    renderWatchlist();
                     checkWatchlistAlerts(data.results);
+                    if (showMessage && data.meta) {
+                        applyWorkspaceMeta(data.meta);
+                    }
                     if (showMessage) {
                         showAlert('อัปเดตข้อมูลแจ้งเตือนจากรายการติดตามเรียบร้อยแล้ว', 'success');
                     }
@@ -409,7 +772,7 @@
 
             showLoading(true);
             setAnalyzeControlsDisabled(true);
-            clearResults();
+            clearResults(false);
 
             try {
                 if (currentAnalyzeController) {
@@ -436,6 +799,9 @@
                 }
 
                 displayResults(data.results);
+                applyWorkspaceMeta(data.meta || null);
+                checkWatchlistAlerts(data.results);
+                renderWatchlist();
 
             } catch (error) {
                 if (error && error.name === 'AbortError') {
@@ -454,6 +820,7 @@
             resultsContainer.innerHTML = ''; // Clear previous results
 
             if (results.length === 0) {
+                resultsContainer.innerHTML = getResultsEmptyStateHtml();
                 showAlert('ไม่พบข้อมูลสำหรับ Symbol ที่ระบุ', 'info');
                 return;
             }
@@ -484,52 +851,9 @@
                 const resonanceScore = (typeof result.resonance_score === 'number') ? formatNumber(result.resonance_score, 3) : 'N/A';
                 const price = (typeof result.price === 'number') ? formatNumber(result.price, 5) : 'N/A';
                 const change = (typeof result.change === 'number') ? formatNumber(result.change, 3) : 'N/A';
-                const prediction = result.prediction || null;
-                let predictionHtml = '';
-                if (prediction) {
-                    const dir = prediction.direction || 'NEUTRAL';
-                    const prob = (typeof prediction.probability === 'number') ? formatNumber(prediction.probability, 1) + '%' : 'N/A';
-                    const move = (typeof prediction.expected_move_pct === 'number') ? formatNumber(prediction.expected_move_pct, 1) + '%' : 'N/A';
-                    let holdingText = 'N/A';
-                    if (typeof prediction.expected_holding_hours === 'number') {
-                        holdingText = formatNumber(prediction.expected_holding_hours, 1) + ' ชม.';
-                    }
-                    const shortSignal = prediction.short_term_signal || '';
-                    let dirText = 'กลาง/Sideway';
-                    let dirBadgeClass = 'bg-secondary';
-                    if (dir === 'UP') {
-                        dirText = 'ขาขึ้น';
-                        dirBadgeClass = 'bg-success';
-                    } else if (dir === 'DOWN') {
-                        dirText = 'ขาลง';
-                        dirBadgeClass = 'bg-danger';
-                    }
-                    predictionHtml = `
-                        <div class="mt-3">
-                            <h5>สรุปการคาดการณ์จากทุกกลยุทธ์</h5>
-                            <div class="mb-2">
-                                <span class="badge ${dirBadgeClass}">แนวโน้มหลัก: ${dirText}</span>
-                                <span class="badge bg-info text-dark ms-2">ความน่าจะเป็น: ${prob}</span>
-                                ${shortSignal ? `<span class="badge bg-warning text-dark ms-2">สัญญาณ EMA: ${shortSignal}</span>` : ''}
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">คาดว่าราคาเคลื่อนที่ได้ประมาณ</div>
-                                    <div class="result-value">${move}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">กรอบเวลาถือคร่าว ๆ</div>
-                                    <div class="result-value">${holdingText}</div>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                }
                 const actionZone = result.actionzone_15m || null;
                 const cdcVixFix = result.cdc_vixfix_15m || null;
                 const emaCross = result.ema_cross_15m || null;
-                const shortTerm = result.short_term_15m || null;
-                const sovereign = result.sovereign_4h || null;
                 let tradeSource = 'ทั่วไป';
                 let tradeSignal = result.signal || 'Hold';
                 let tradeConfidence = null;
@@ -580,39 +904,6 @@
                     if (typeof emaCross.take_profit === 'number') {
                         tradeTarget = emaCross.take_profit;
                     }
-                }
-                if (tradeSource === 'ทั่วไป' && shortTerm && shortTerm.setup && shortTerm.setup.indexOf('WAIT') === -1) {
-                    tradeSource = 'Short Term 15m';
-                    tradeSignal = shortTerm.setup;
-                    tradePlan = shortTerm;
-                    if (typeof shortTerm.predicted_win_prob === 'number') {
-                        tradeConfidence = shortTerm.predicted_win_prob;
-                    } else if (typeof shortTerm.confidence === 'number') {
-                        tradeConfidence = shortTerm.confidence;
-                    }
-                    if (typeof shortTerm.stop_loss === 'number') {
-                        tradeStop = shortTerm.stop_loss;
-                    }
-                    if (typeof shortTerm.take_profit === 'number') {
-                        tradeTarget = shortTerm.take_profit;
-                    }
-                }
-                if (tradeSource === 'ทั่วไป' && sovereign && sovereign.recommendation) {
-                    tradeSource = 'Sovereign 4H';
-                    tradeSignal = sovereign.recommendation;
-                    tradePlan = sovereign;
-                    if (typeof sovereign.entry_stop_loss === 'number') {
-                        tradeStop = sovereign.entry_stop_loss;
-                    }
-                    if (typeof sovereign.trailing_stop === 'number') {
-                        tradeTarget = sovereign.trailing_stop;
-                    }
-                }
-                if (tradeTarget === null && shortTerm && typeof shortTerm.take_profit === 'number') {
-                    tradeTarget = shortTerm.take_profit;
-                }
-                if (tradeStop === null && shortTerm && typeof shortTerm.stop_loss === 'number') {
-                    tradeStop = shortTerm.stop_loss;
                 }
                 let essentialExitLevels = [];
                 if (tradePlan && Array.isArray(tradePlan.exit_levels) && tradePlan.exit_levels.length) {
@@ -670,107 +961,6 @@
                         ${essentialExitHtml}
                     </div>
                 `;
-
-                let shortTermHtml = '';
-                if (result.short_term_15m) {
-                    const st = result.short_term_15m;
-                    const stPrice = (typeof st.current_price === 'number') ? formatNumber(st.current_price, 5) : 'N/A';
-                    const stDir = st.direction_15m || '-';
-                    const stEntryType = st.entry_type || '-';
-                    const stEma = (typeof st.ema50 === 'number') ? formatNumber(st.ema50, 5) : 'N/A';
-                    const stEma20 = (typeof st.ema20 === 'number') ? formatNumber(st.ema20, 5) : 'N/A';
-                    const stEma200 = (typeof st.ema200 === 'number') ? formatNumber(st.ema200, 5) : 'N/A';
-                    const stRsi = (typeof st.rsi === 'number') ? formatNumber(st.rsi, 3) : 'N/A';
-                    const stAdx = (typeof st.adx === 'number') ? formatNumber(st.adx, 2) : 'N/A';
-                    const stAtr = (typeof st.atr === 'number') ? formatNumber(st.atr, 5) : 'N/A';
-                    const stSl = (typeof st.stop_loss === 'number') ? formatNumber(st.stop_loss, 5) : 'N/A';
-                    const stTp = (typeof st.take_profit === 'number') ? formatNumber(st.take_profit, 5) : 'N/A';
-                    const stTp2 = (typeof st.take_profit_2 === 'number') ? formatNumber(st.take_profit_2, 5) : 'N/A';
-                    const stWinProb = (typeof st.predicted_win_prob === 'number') ? formatNumber(st.predicted_win_prob, 1) + '%' : 'N/A';
-                    const stConf = typeof st.confidence === 'number' ? st.confidence + '%' : (st.confidence || 'N/A');
-                    const stRR = st.risk_reward || 'N/A';
-                    const stTrend = st.trend_1h || 'N/A';
-                    const stTrendStrength = st.trend_strength_1h || '';
-                    const stRvol = (typeof st.rvol === 'number' && !isNaN(st.rvol)) ? formatNumber(st.rvol, 3) + 'x' : (st.rvol || 'N/A');
-                    let stZone = 'N/A';
-                    if (typeof st.entry_zone_low === 'number' && typeof st.entry_zone_high === 'number') {
-                        stZone = formatNumber(st.entry_zone_low, 5) + ' ~ ' + formatNumber(st.entry_zone_high, 5);
-                    }
-                    const stDataUsed = Array.isArray(st.required_data) ? st.required_data.join(' • ') : '';
-
-                    let fiboHtml = '';
-                    if (st.fibo_levels) {
-                        const entries = Object.entries(st.fibo_levels);
-                        fiboHtml = entries.map(([level, value]) => {
-                            const v = (typeof value === 'number') ? formatNumber(value, 5) : value;
-                            return `<div>${level}: ${v}</div>`;
-                        }).join('');
-                    }
-
-                    shortTermHtml = `
-                        <div class="mt-3">
-                            <h5>แผนเทรดระยะสั้น 15 นาที (${st.setup || 'WAIT'})</h5>
-                            <div class="mb-2">
-                                <span class="badge bg-info text-dark">ความมั่นใจ: ${stConf}</span>
-                                <span class="badge bg-secondary ms-2">Risk/Reward: ${stRR}</span>
-                                <span class="badge bg-info text-dark ms-2">Win Prob (จากข้อมูล): ${stWinProb}</span>
-                                <span class="badge ${stDir === 'UP' ? 'bg-success' : (stDir === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">ทิศทาง 15m: ${stDir}</span>
-                                <span class="badge bg-dark ms-2">Trend 1H: ${stTrend}${stTrendStrength ? ' (' + stTrendStrength + ')' : ''}</span>
-                                <span class="badge bg-warning text-dark ms-2">RVOL: ${stRvol}</span>
-                                <span class="badge bg-secondary ms-2">Entry Type: ${stEntryType}</span>
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
-                                    <div class="result-value">${stPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA20 (15m)</div>
-                                    <div class="result-value">${stEma20}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA50 (15m)</div>
-                                    <div class="result-value">${stEma}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA200 (15m)</div>
-                                    <div class="result-value">${stEma200}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">RSI (15m)</div>
-                                    <div class="result-value">${stRsi}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">ADX (15m)</div>
-                                    <div class="result-value">${stAdx}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">ATR (15m)</div>
-                                    <div class="result-value">${stAtr}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss</div>
-                                    <div class="result-value">${stSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit (TP1)</div>
-                                    <div class="result-value">${stTp}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit (TP2)</div>
-                                    <div class="result-value">${stTp2}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">โซนเข้า (Entry Zone)</div>
-                                    <div class="result-value">${stZone}</div>
-                                </div>
-                            </div>
-                            <div class="mt-2"><strong>เหตุผลสัญญาณระยะสั้น:</strong> ${st.reason || '-'}</div>
-                            ${stDataUsed ? `<div class="mt-2 small text-muted">ข้อมูลที่ใช้: ${stDataUsed}</div>` : ''}
-                            ${fiboHtml ? `<div class="mt-2"><strong>Fibonacci 15m:</strong>${fiboHtml}</div>` : ''}
-                        </div>
-                    `;
-                }
 
                 let emaCrossHtml = '';
                 if (result.ema_cross_15m) {
@@ -947,80 +1137,6 @@
                     `;
                 }
 
-                let sniperHtml = '';
-                if (result.sniper_15m) {
-                    const sn = result.sniper_15m;
-                    const snPrice = (typeof sn.current_price === 'number') ? formatNumber(sn.current_price, 5) : 'N/A';
-                    const snSl = (typeof sn.stop_loss === 'number') ? formatNumber(sn.stop_loss, 5) : 'N/A';
-                    const snTp = (typeof sn.take_profit === 'number') ? formatNumber(sn.take_profit, 5) : 'N/A';
-                    const snConf = typeof sn.confidence === 'number' ? sn.confidence + '%' : (sn.confidence || 'N/A');
-                    const snRR = sn.risk_reward || 'N/A';
-                    const snReason = sn.reason || '-';
-
-                    sniperHtml = `
-                        <div class="mt-3">
-                            <h5>โหมด Sniper 15 นาที (${sn.setup || 'WAIT / DO NOTHING'})</h5>
-                            <div class="mb-2">
-                                <span class="badge bg-danger">ความมั่นใจ (Sniper): ${snConf}</span>
-                                <span class="badge bg-secondary ms-2">Risk/Reward: ${snRR}</span>
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคาเข้า (Sniper)</div>
-                                    <div class="result-value">${snPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss (Sniper)</div>
-                                    <div class="result-value">${snSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit (Sniper)</div>
-                                    <div class="result-value">${snTp}</div>
-                                </div>
-                            </div>
-                            <div class="mt-2"><strong>เหตุผลโหมด Sniper:</strong> ${snReason}</div>
-                        </div>
-                    `;
-                }
-
-                let quantumHtml = '';
-                if (result.quantum_15m) {
-                    const q = result.quantum_15m;
-                    const qPrice = (typeof q.current_price === 'number') ? formatNumber(q.current_price, 5) : 'N/A';
-                    const qSl = (typeof q.stop_loss === 'number') ? formatNumber(q.stop_loss, 5) : 'N/A';
-                    const qTp = (typeof q.take_profit === 'number') ? formatNumber(q.take_profit, 5) : 'N/A';
-                    const qConf = typeof q.confidence === 'number' ? q.confidence + '%' : (q.confidence || 'N/A');
-                    const qAdx = (typeof q.adx === 'number') ? formatNumber(q.adx, 3) : (q.adx || 'N/A');
-                    const qVolZ = (typeof q.vol_z_score === 'number') ? formatNumber(q.vol_z_score, 3) : (q.vol_z_score || 'N/A');
-                    const qReason = q.reason || '-';
-
-                    quantumHtml = `
-                        <div class="mt-3">
-                            <h5>Quantum Hunter 15 นาที (${q.setup || 'WAIT'})</h5>
-                            <div class="mb-2">
-                                <span class="badge bg-primary">ความมั่นใจ (Quantum): ${qConf}</span>
-                                <span class="badge bg-secondary ms-2">ADX: ${qAdx}</span>
-                                <span class="badge bg-warning text-dark ms-2">Vol Z-Score: ${qVolZ}</span>
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคาเข้า (Quantum)</div>
-                                    <div class="result-value">${qPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss (Quantum)</div>
-                                    <div class="result-value">${qSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit (Quantum)</div>
-                                    <div class="result-value">${qTp}</div>
-                                </div>
-                            </div>
-                            <div class="mt-2"><strong>เหตุผลโหมด Quantum:</strong> ${qReason}</div>
-                        </div>
-                    `;
-                }
-
                 let cryptoReversalHtml = '';
                 if (result.crypto_reversal_15m) {
                     const cr = result.crypto_reversal_15m;
@@ -1125,48 +1241,6 @@
                     `;
                 }
 
-                let sovereignHtml = '';
-                if (result.sovereign_4h) {
-                    const s = result.sovereign_4h;
-                    const sPrice = (typeof s.current_price === 'number') ? formatNumber(s.current_price, 5) : 'N/A';
-                    const sTrail = (typeof s.trailing_stop === 'number') ? formatNumber(s.trailing_stop, 5) : 'N/A';
-                    const sEntrySl = (typeof s.entry_stop_loss === 'number') ? formatNumber(s.entry_stop_loss, 5) : 'N/A';
-                    const sScore = s.score_confidence || 'N/A';
-                    const sPos = s.position_size_suggest || 'N/A';
-                    const sTrend = s.trend_status || 'N/A';
-                    const sReco = s.recommendation || 'N/A';
-                    const sAlert = s.critical_alert || '';
-                    const sReason = s.reason || '-';
-
-                    sovereignHtml = `
-                        <div class="mt-3">
-                            <h5>Quantum Sovereign 4H (${s.timeframe || '4H'})</h5>
-                            <div class="mb-2">
-                                <span class="badge bg-success">คำแนะนำ: ${sReco}</span>
-                                <span class="badge bg-secondary ms-2">Trend: ${sTrend}</span>
-                                <span class="badge bg-dark ms-2">Score: ${sScore}</span>
-                                <span class="badge bg-info text-dark ms-2">ขนาดไม้แนะนำ: ${sPos}</span>
-                            </div>
-                            ${sAlert ? `<div class="alert alert-warning mt-2">${sAlert}</div>` : ''}
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคา 4H ปัจจุบัน</div>
-                                    <div class="result-value">${sPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Trailing Stop</div>
-                                    <div class="result-value">${sTrail}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss สำหรับไม้ใหม่</div>
-                                    <div class="result-value">${sEntrySl}</div>
-                                </div>
-                            </div>
-                            <div class="mt-2"><strong>เหตุผลโหมด Sovereign 4H:</strong> ${sReason}</div>
-                        </div>
-                    `;
-                }
-
                 card.innerHTML = `
                     <div class="result-header d-flex justify-content-between align-items-center">
                         <div class="d-flex flex-column">
@@ -1217,7 +1291,6 @@
                             <div class="result-value">${result.volume_status}</div>
                         </div>
                     </div>
-                    ${predictionHtml}
                     ${essentialsHtml}
                     <div class="mt-3">
                         <label for="buyPrice-${symbolDomId}" class="form-label small">ราคาที่ซื้อ/ถืออยู่ (ต่อหุ้น)</label>
@@ -1238,12 +1311,8 @@
                         <div id="decision-${symbolDomId}" class="small mt-1"></div>
                     </div>
                     ${actionZoneHtml}
-                    ${shortTermHtml}
                     ${emaCrossHtml}
-                    ${sniperHtml}
-                    ${quantumHtml}
                     ${cryptoReversalHtml}
-                    ${sovereignHtml}
                     <div class="chart-container">
                         <canvas id="chart-${result.symbol}"></canvas>
                     </div>
@@ -1512,7 +1581,7 @@
             }
             advice.stance = 'WATCH';
             advice.summary = 'สภาวะไม่เข้าเกณฑ์ชัดเจน แนะนำรอดูสัญญาณรอบใหม่';
-            advice.notes.push('ใช้ข้อมูล Quantum Sovereign และสัญญาณระยะสั้นประกอบการตัดสินใจเพิ่มเติม');
+            advice.notes.push('รอสัญญาณรอบใหม่จาก ActionZone, EMA Cross หรือ Crypto Reversal เพื่อยืนยันอีกครั้ง');
             return advice;
         }
 
@@ -1648,8 +1717,8 @@
                                         </div>`;
         }
 
-        function clearResults() {
-            document.getElementById('resultsContainer').innerHTML = '';
+        function clearResults(showPlaceholder = true) {
+            document.getElementById('resultsContainer').innerHTML = showPlaceholder ? getResultsEmptyStateHtml() : '';
             document.getElementById('alertContainer').innerHTML = '';
             const charts = Object.values(chartInstances);
             charts.forEach(c => {
@@ -1658,6 +1727,9 @@
                 }
             });
             chartInstances = {};
+            renderAnalysisSummary(null);
+            renderActionQueue(null);
+            renderSystemHealth(currentHealthSnapshot);
         }
 
         function resetForm() {
@@ -1669,8 +1741,9 @@
         }
 
         function getSignalClass(signal) {
-            if (signal === 'Buy') return 'bg-success';
-            if (signal === 'Sell') return 'bg-danger';
+            const normalized = normalizeTradeSignal(signal);
+            if (normalized === 'BUY') return 'bg-success';
+            if (normalized === 'SELL') return 'bg-danger';
             return 'bg-secondary';
         }
 
@@ -1684,26 +1757,6 @@
                 const symbol = (result.symbol || '').toString().toUpperCase();
                 if (!watchlist.includes(symbol)) return;
                 const tags = [];
-                const q = result.quantum_15m;
-                if (q && q.setup && q.setup !== 'WAIT') {
-                    const conf = typeof q.confidence === 'number' ? q.confidence : 0;
-                    if (conf >= 80) {
-                        tags.push({
-                            label: 'Quantum Hunter 15m',
-                            detail: q.setup + ' (' + conf + '%)'
-                        });
-                    }
-                }
-                const sn = result.sniper_15m;
-                if (sn && sn.setup && sn.setup.indexOf('WAIT') === -1) {
-                    const confSn = typeof sn.confidence === 'number' ? sn.confidence : 0;
-                    if (confSn >= 80) {
-                        tags.push({
-                            label: 'Sniper 15m',
-                            detail: sn.setup + ' (' + confSn + '%)'
-                        });
-                    }
-                }
                 const az = result.actionzone_15m;
                 if (az && az.alert && az.signal && az.signal !== 'WAIT') {
                     const confAz = typeof az.confidence === 'number' ? az.confidence : 0;
@@ -1745,27 +1798,12 @@
                         });
                     }
                 }
-                const s = result.sovereign_4h;
-                if (s) {
-                    if (s.recommendation && s.recommendation.indexOf('NOW') !== -1) {
-                        tags.push({
-                            label: 'Sovereign 4H',
-                            detail: s.recommendation
-                        });
-                    }
-                    if (s.critical_alert) {
-                        tags.push({
-                            label: 'Sovereign 4H',
-                            detail: s.critical_alert
-                        });
-                    }
-                }
                 if (tags.length) {
                     important.push({ symbol: symbol, tags: tags });
                 }
             });
             if (!important.length) {
-                alertsContainer.innerHTML = '<span class="text-muted">ยังไม่มีสัญญาณสำคัญจากหุ้นที่ติดตาม</span>';
+                alertsContainer.innerHTML = '<div class="empty-state">ยังไม่มีสัญญาณสำคัญจากหุ้นที่ติดตาม</div>';
                 if (countBadge) {
                     countBadge.style.display = 'none';
                 }
@@ -1774,9 +1812,10 @@
             const scored = important.map(item => {
                 let score = 0;
                 item.tags.forEach(t => {
-                    if (t.label === 'Sovereign 4H') score += 300;
-                    if (t.label === 'Sniper 15m') score += 200;
-                    if (t.label === 'Quantum Hunter 15m') score += 150;
+                    if (t.label === 'ActionZone 15m') score += 220;
+                    if (t.label === 'EMA Cross 15m') score += 180;
+                    if (t.label === 'Crypto Reversal 15m') score += 160;
+                    if (t.label === 'Crypto SMC 15m') score += 140;
                     if (t.detail) {
                         const m = t.detail.match(/(\d+)%/);
                         if (m && m[1]) {
@@ -1808,6 +1847,9 @@
 
         loadWatchlist();
         loadBuyPriceStore();
+        renderAnalysisSummary(null);
+        renderActionQueue(null);
+        refreshSystemHealth();
     </script>
 </body>
 </html>

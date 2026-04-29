@@ -3,6 +3,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import pandas as pd
 import yfinance as yf
 import numpy as np
@@ -505,6 +506,85 @@ def _format_exit_levels_lines(plan):
     return lines
 
 
+def _get_plan_label(plan, item=None):
+    if not isinstance(plan, dict):
+        return "Trade Plan"
+    strategy = str(plan.get("strategy") or "").strip()
+    if strategy:
+        return strategy
+    if isinstance(item, dict):
+        return _get_primary_plan_source_label(item, plan)
+    return "Trade Plan"
+
+
+def _build_stop_context_lines(item, plan, signal=None, source_label=None):
+    if not isinstance(plan, dict):
+        return []
+    direction = _normalize_trade_direction(
+        signal
+        or plan.get("signal")
+        or plan.get("raw_signal")
+        or plan.get("setup")
+        or plan.get("recommendation")
+    )
+    if direction not in ("BUY", "SELL"):
+        return []
+    stop = _pick_plan_value(plan, ["stop_loss", "entry_stop_loss", "trailing_stop"])
+    entry = _pick_plan_value(plan, ["entry_price", "current_price", "price"])
+    target = _pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price", "trailing_stop"])
+    stop_text = _format_price_value(stop)
+    if not stop_text:
+        return []
+    entry_risk_pct = plan.get("entry_risk_pct")
+    if not isinstance(entry_risk_pct, (int, float)):
+        try:
+            if isinstance(entry, (int, float)) and isinstance(stop, (int, float)) and float(entry) != 0:
+                entry_risk_pct = (abs(float(entry) - float(stop)) / abs(float(entry))) * 100.0
+        except Exception:
+            entry_risk_pct = None
+    risk_text = None
+    if isinstance(entry_risk_pct, (int, float)) and math.isfinite(float(entry_risk_pct)):
+        risk_text = f"{float(entry_risk_pct):.2f}%"
+    target_text = _format_price_value(target)
+    order_blocks = item.get("order_blocks_15m") if isinstance(item, dict) else None
+    nearest_support = order_blocks.get("nearest_support") if isinstance(order_blocks, dict) else None
+    nearest_resistance = order_blocks.get("nearest_resistance") if isinstance(order_blocks, dict) else None
+    source = str(source_label or _get_plan_label(plan, item)).strip() or "Trade Plan"
+    if "ACTIONZONE" in source.upper():
+        if direction == "BUY" and isinstance(nearest_support, (int, float)):
+            stop_reason = f"วางใต้แนวรับ 15m ใกล้สุดบริเวณ {nearest_support:.5f} และเผื่อ buffer จากความผันผวน"
+        elif direction == "SELL" and isinstance(nearest_resistance, (int, float)):
+            stop_reason = f"วางเหนือแนวต้าน 15m ใกล้สุดบริเวณ {nearest_resistance:.5f} และเผื่อ buffer จากความผันผวน"
+        else:
+            stop_reason = "อิงโครงสร้าง EMA/ราคา 15m และ buffer ของความผันผวนล่าสุด"
+    elif "EMA CROSS" in source.upper():
+        stop_reason = "อิงระยะเสี่ยงจาก ATR และจะถือว่ามุมมองผิดเมื่อโครงสร้าง EMA เสีย"
+    elif "CDC" in source.upper() or "VIXFIX" in source.upper():
+        stop_reason = "อิงจุดที่สมมติฐานการยืดตัวหรือกลับตัวเสีย ไม่ใช่ตั้ง stop แบบตายตัว"
+    elif "CRYPTO REVERSAL" in source.upper():
+        stop_reason = "อิง volatility reversal setup และจุดที่รูปแบบกลับตัวถูกลบล้าง"
+    else:
+        stop_reason = "ใช้เป็นจุดยกเลิกมุมมอง เมื่อราคาทะลุจุดนี้ให้ถือว่า setup เดิมผิด"
+    invalidation_price = None
+    forecast = item.get("price_forecast") if isinstance(item, dict) else None
+    if isinstance(forecast, dict):
+        invalidation_price = forecast.get("invalidation_price")
+    invalidation_text = _format_price_value(invalidation_price) or stop_text
+    lines = [
+        f"<b>🛡️ จุดตัดขาดทุน (SL):</b> {stop_text}",
+        f"<b>🧠 หลักการวาง SL:</b> {_html_escape(stop_reason)}",
+    ]
+    if risk_text:
+        lines.append(f"<b>📏 ระยะห่างถึง SL:</b> {risk_text} จากจุดเข้า")
+    if target_text:
+        lines.append(f"<b>🎯 เป้าหลัก:</b> {target_text}")
+    if direction == "BUY":
+        lines.append(f"<b>❌ Invalidation:</b> มุมมอง BUY จะเสียเมื่อราคาหลุด {invalidation_text}")
+    else:
+        lines.append(f"<b>❌ Invalidation:</b> มุมมอง SELL จะเสียเมื่อราคาทะลุ {invalidation_text}")
+    return lines
+
+
 def _is_actionable_setup_value(value):
     if value is None:
         return False
@@ -697,6 +777,38 @@ def _pick_primary_trade_plan(item):
     return best_plan
 
 
+def _get_pattern_reference(pattern):
+    if not isinstance(pattern, str):
+        return None
+    normalized = pattern.strip().lower().replace("_", " ").replace("-", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    if not normalized or normalized == "none":
+        return None
+    if "engulf" in normalized:
+        return {
+            "label": "Engulfing Pattern",
+            "url": "https://chartswatcher.com/pages/blog/a-trader-s-guide-to-the-engulfing-pattern-candlestick",
+        }
+    if "pinbar" in normalized or "pin bar" in normalized:
+        return {
+            "label": "Pin Bar Pattern",
+            "url": "https://www.colibritrader.com/price-action-trading-patterns/",
+        }
+    return None
+
+
+def _append_pattern_context_lines(lines, pattern):
+    lines.append("<b>🧭 Timeframe Reference:</b> Trend reference: 1H | Entry pattern: 15m")
+    if pattern and pattern != "None":
+        lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+        reference = _get_pattern_reference(pattern)
+        if isinstance(reference, dict):
+            label = _html_escape(str(reference.get("label") or "Pattern"))
+            url = str(reference.get("url") or "").strip()
+            if url:
+                lines.append(f'<a href="{url}">📚 อธิบาย Pattern นี้คืออะไร ({label})</a>')
+
+
 def _build_telegram_message(item, signal, best_conf, sources):
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
@@ -725,14 +837,23 @@ def _build_telegram_message(item, signal, best_conf, sources):
         lines.append(f"<b>แหล่งสัญญาณ:</b> " + ", ".join([_html_escape(s) for s in sources]))
         
     primary_plan = _pick_primary_trade_plan(item)
+    pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
+    _append_pattern_context_lines(lines, pattern)
     if isinstance(primary_plan, dict):
-        pattern = primary_plan.get("detected_pattern")
-        if pattern and pattern != "None":
-            lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+        stop_lines = _build_stop_context_lines(
+            item,
+            primary_plan,
+            signal=signal,
+            source_label=_get_plan_label(primary_plan, item),
+        )
+        if stop_lines:
+            lines.append("────────────────")
+            lines.extend(stop_lines)
             
         exit_lines = _format_exit_levels_lines(primary_plan)
         if exit_lines:
-            lines.append("────────────────")
+            if not stop_lines:
+                lines.append("────────────────")
             lines.extend([_html_escape(line) for line in exit_lines])
             
     forecast_lines = _format_price_forecast_lines(item.get("price_forecast"))
@@ -792,8 +913,7 @@ def _build_actionzone_message(item, az_plan):
         lines.append(f"<b>⚙️ ค่าเฉลี่ย EMA:</b> {fast_len}/{slow_len}")
     
     pattern = az_plan.get("detected_pattern")
-    if pattern and pattern != "None":
-        lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+    _append_pattern_context_lines(lines, pattern)
     
     avg_range = az_plan.get("avg_range_pct")
     if isinstance(avg_range, (int, float)):
@@ -815,15 +935,14 @@ def _build_actionzone_message(item, az_plan):
         if stats:
             lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
             
-    sl = az_plan.get("stop_loss")
-    sl_text = _format_price_value(sl)
-    if sl_text:
+    stop_lines = _build_stop_context_lines(item, az_plan, signal=signal, source_label="ActionZone 15m")
+    if stop_lines:
         lines.append("────────────────")
-        lines.append(f"<b>🛡️ จุดตัดขาดทุน (SL):</b> {sl_text}")
+        lines.extend(stop_lines)
         
     exit_lines = _format_exit_levels_lines(az_plan)
     if exit_lines:
-        if not sl_text:
+        if not stop_lines:
             lines.append("────────────────")
         lines.extend([_html_escape(line) for line in exit_lines])
         
@@ -873,9 +992,15 @@ def _build_cdc_vixfix_message(item, plan):
         
     if move_parts:
         lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
+    if stop_lines:
+        lines.append("────────────────")
+        lines.extend(stop_lines)
         
     exit_lines = _format_exit_levels_lines(plan)
     if exit_lines:
+        if not stop_lines:
+            lines.append("────────────────")
         lines.extend([_html_escape(line) for line in exit_lines])
         
     profit_pct = plan.get("expected_profit_pct")
@@ -900,8 +1025,7 @@ def _build_cdc_vixfix_message(item, plan):
         lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
         
     pattern = plan.get("detected_pattern")
-    if pattern and pattern != "None":
-        lines.append(f"<b>🕯️ Price Pattern:</b> {_html_escape(pattern)}")
+    _append_pattern_context_lines(lines, pattern)
         
     conf = _normalize_confidence(plan.get("confidence"))
     if conf is not None:
@@ -1150,6 +1274,111 @@ def _actionzone_precision60_profile():
     }
 
 
+def _build_alert_backtest_summary(results, min_conf=None, exit_min_conf=None):
+    if not isinstance(results, list) or not results:
+        return {
+            "candidate_count": 0,
+            "measured_count": 0,
+            "estimated_win_rate_pct": None,
+            "average_expectancy_rr": None,
+            "average_confidence": None,
+            "total_historical_trades": 0,
+            "dynamic_min_confidence": None,
+            "alerts": [],
+            "by_strategy": {},
+        }
+    if min_conf is None:
+        min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
+    if exit_min_conf is None:
+        exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 75.0
+    try:
+        exit_min_conf = float(exit_min_conf)
+    except Exception:
+        exit_min_conf = 60.0
+    dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
+    candidates, _ = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    alerts = []
+    weighted_wr_sum = 0.0
+    weighted_exp_sum = 0.0
+    total_weight = 0.0
+    confidence_sum = 0.0
+    confidence_count = 0
+    by_strategy = {}
+    measured_count = 0
+    for candidate in candidates:
+        strategy = str(candidate.get("strategy") or "").strip() or "UNKNOWN"
+        confidence = candidate.get("confidence")
+        plan = candidate.get("plan")
+        edge = candidate.get("edge_metrics")
+        if not isinstance(edge, dict):
+            edge = _extract_plan_edge_metrics(plan)
+        wr = edge.get("win_rate_pct")
+        exp = edge.get("expectancy_rr")
+        trades = edge.get("trades")
+        alert_entry = {
+            "symbol": str(candidate.get("symbol") or ""),
+            "strategy": strategy,
+            "signal": str(candidate.get("signal") or ""),
+            "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+            "historical_trades": int(trades) if isinstance(trades, (int, float)) else None,
+            "historical_win_rate_pct": float(wr) if isinstance(wr, (int, float)) else None,
+            "expectancy_rr": float(exp) if isinstance(exp, (int, float)) else None,
+        }
+        alerts.append(alert_entry)
+        bucket = by_strategy.setdefault(
+            strategy,
+            {
+                "alerts": 0,
+                "measured": 0,
+                "weighted_wr_sum": 0.0,
+                "weighted_exp_sum": 0.0,
+                "weight": 0.0,
+            },
+        )
+        bucket["alerts"] += 1
+        if isinstance(confidence, (int, float)):
+            confidence_sum += float(confidence)
+            confidence_count += 1
+        if isinstance(trades, (int, float)) and float(trades) > 0 and (
+            isinstance(wr, (int, float)) or isinstance(exp, (int, float))
+        ):
+            weight = float(trades)
+            measured_count += 1
+            total_weight += weight
+            bucket["measured"] += 1
+            bucket["weight"] += weight
+            if isinstance(wr, (int, float)):
+                weighted_wr_sum += float(wr) * weight
+                bucket["weighted_wr_sum"] += float(wr) * weight
+            if isinstance(exp, (int, float)):
+                weighted_exp_sum += float(exp) * weight
+                bucket["weighted_exp_sum"] += float(exp) * weight
+    by_strategy_summary = {}
+    for strategy, bucket in by_strategy.items():
+        weight = float(bucket.get("weight") or 0.0)
+        by_strategy_summary[strategy] = {
+            "alerts": int(bucket.get("alerts") or 0),
+            "measured": int(bucket.get("measured") or 0),
+            "estimated_win_rate_pct": (bucket["weighted_wr_sum"] / weight) if weight > 0 else None,
+            "average_expectancy_rr": (bucket["weighted_exp_sum"] / weight) if weight > 0 else None,
+        }
+    return {
+        "candidate_count": len(candidates),
+        "measured_count": measured_count,
+        "estimated_win_rate_pct": (weighted_wr_sum / total_weight) if total_weight > 0 else None,
+        "average_expectancy_rr": (weighted_exp_sum / total_weight) if total_weight > 0 else None,
+        "average_confidence": (confidence_sum / confidence_count) if confidence_count > 0 else None,
+        "total_historical_trades": int(total_weight) if total_weight > 0 else 0,
+        "dynamic_min_confidence": float(dynamic_min_conf),
+        "alerts": alerts,
+        "by_strategy": by_strategy_summary,
+    }
+
+
 def _build_telegram_candidates(results, min_conf, exit_min_conf):
     candidates = []
     quality_drop_counts = Counter()
@@ -1169,6 +1398,7 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
             if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
                 cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
                 if cdc_message:
+                    edge = _extract_plan_edge_metrics(cdc_plan)
                     freshness = 6.0
                     last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
                     if not last_signal_time:
@@ -1184,6 +1414,8 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                         "signal": cdc_signal,
                         "score": float(score),
                         "confidence": float(cdc_conf),
+                        "plan": cdc_plan,
+                        "edge_metrics": edge,
                         "message": cdc_message,
                         "cache_key": f"CDCVIX15|{symbol}|{cdc_signal}|{context_key}",
                     })
@@ -1202,7 +1434,7 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                     required_az_conf = max(required_az_conf, float(precision60.get("min_conf", required_az_conf)))
                 az_conf = _normalize_confidence(az_plan.get("confidence"))
                 if az_conf is not None and az_conf >= required_az_conf:
-                    gate_ok, gate_reason, _ = _evaluate_entry_quality_gate(az_plan, az_signal)
+                    gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(az_plan, az_signal)
                     if not gate_ok:
                         quality_drop_counts[gate_reason] += 1
                         continue
@@ -1226,7 +1458,6 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                             else:
                                 freshness = -4.0
                         score = float(az_conf) + freshness + (6.0 if trend_alignment else -8.0)
-                        edge = _extract_plan_edge_metrics(az_plan)
                         wr = edge.get("win_rate_pct")
                         exp = edge.get("expectancy_rr")
                         trades = edge.get("trades")
@@ -1246,6 +1477,8 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                             "signal": az_signal,
                             "score": float(score),
                             "confidence": float(az_conf),
+                            "plan": az_plan,
+                            "edge_metrics": edge,
                             "message": az_message,
                             "cache_key": f"AZ15|{symbol}|{az_signal}|{context_key}",
                         })
@@ -1256,7 +1489,7 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
             if best_conf is not None and best_conf >= min_conf:
                 sources = _collect_alert_sources(item, min_conf)
                 primary_plan = _pick_primary_trade_plan(item)
-                gate_ok, gate_reason, _ = _evaluate_entry_quality_gate(primary_plan, signal)
+                gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(primary_plan, signal)
                 if not gate_ok:
                     quality_drop_counts[gate_reason] += 1
                     continue
@@ -1277,7 +1510,6 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                 if message:
                     source_bonus = min(8.0, float(len(sources)) * 1.5)
                     score = float(best_conf) + source_bonus
-                    edge = _extract_plan_edge_metrics(primary_plan)
                     wr = edge.get("win_rate_pct")
                     exp = edge.get("expectancy_rr")
                     trades = edge.get("trades")
@@ -1287,14 +1519,21 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                         score += max(-4.0, min(8.0, float(exp) * 8.0))
                     if isinstance(trades, (int, float)):
                         score += max(0.0, min(4.0, float(trades) / 8.0))
+                    last_signal_time = str(primary_plan.get("last_signal_time") or "").strip() if isinstance(primary_plan, dict) else ""
+                    entry_bucket = _format_price_value(_pick_plan_value(primary_plan, ["entry_price", "current_price", "price"])) if isinstance(primary_plan, dict) else None
+                    pattern_bucket = str(primary_plan.get("detected_pattern") or "").strip().upper() if isinstance(primary_plan, dict) else ""
+                    source_bucket = _get_primary_plan_source_label(item, primary_plan) if isinstance(primary_plan, dict) else "PRIMARY"
+                    context_key = last_signal_time or "|".join([source_bucket, entry_bucket or "na", pattern_bucket or "NOPATTERN"])
                     candidates.append({
                         "symbol": symbol,
                         "strategy": "PRIMARY",
                         "signal": signal,
                         "score": float(score),
                         "confidence": float(best_conf),
+                        "plan": primary_plan,
+                        "edge_metrics": edge,
                         "message": message,
-                        "cache_key": f"PRIMARY|{symbol}|{signal}",
+                        "cache_key": f"PRIMARY|{symbol}|{signal}|{context_key}",
                     })
     stats = {
         "quality_drop_counts": dict(quality_drop_counts),
@@ -5040,7 +5279,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             ema_plan=ema_cross_plan,
             cdc_plan=cdc_vixfix_plan,
         )
-        return {
+        result = {
             "symbol": symbol,
             "name": info["name"],
             "price": float(latest["Close"]) if pd.notna(latest["Close"]) else None,
@@ -5067,8 +5306,176 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             "prediction": prediction,
             "price_forecast": price_forecast,
         }
+        result["ui_summary"] = _build_ui_result_summary(result)
+        return result
     except Exception as e:
         return {"symbol": symbol, "error": str(e)}
+
+
+def _build_health_snapshot():
+    return {
+        "status": "ok",
+        "server_time": get_thai_now().strftime("%Y-%m-%d %H:%M:%S (Asia/Bangkok)"),
+        "warnings": _get_config_warnings(),
+    }
+
+
+def _get_primary_plan_source_label(item, plan):
+    if not isinstance(item, dict) or not isinstance(plan, dict):
+        return "AI Summary"
+    if plan is item.get("cdc_vixfix_15m"):
+        return "CDC+VixFix 15m"
+    if plan is item.get("actionzone_15m"):
+        return "ActionZone 15m"
+    if plan is item.get("ema_cross_15m"):
+        return "EMA Cross 15m"
+    if plan is item.get("crypto_reversal_15m"):
+        return "Crypto Reversal 15m"
+    if plan is item.get("short_term_15m"):
+        return "Short Term 15m"
+    if plan is item.get("sniper_15m"):
+        return "Sniper 15m"
+    if plan is item.get("quantum_15m"):
+        return "Quantum 15m"
+    return "AI Summary"
+
+
+def _build_ui_result_summary(item):
+    if not isinstance(item, dict) or item.get("error"):
+        return {
+            "signal": "WAIT",
+            "source": "N/A",
+            "confidence": None,
+            "pattern": None,
+            "is_actionable": False,
+            "entry_risk_pct": None,
+            "stop_loss": None,
+            "take_profit": None,
+        }
+    primary_plan = _pick_primary_trade_plan(item)
+    signal = None
+    source = "AI Summary"
+    pattern = None
+    entry_risk_pct = None
+    stop_loss = None
+    take_profit = None
+    if isinstance(primary_plan, dict):
+        signal = _normalize_trade_direction(
+            primary_plan.get("signal")
+            or primary_plan.get("raw_signal")
+            or primary_plan.get("setup")
+            or primary_plan.get("recommendation")
+        )
+        source = _get_primary_plan_source_label(item, primary_plan)
+        raw_pattern = str(primary_plan.get("detected_pattern") or "").strip()
+        if raw_pattern and raw_pattern.upper() != "NONE":
+            pattern = raw_pattern
+        risk_value = primary_plan.get("entry_risk_pct")
+        if isinstance(risk_value, (int, float)) and math.isfinite(risk_value):
+            entry_risk_pct = float(risk_value)
+        stop_value = _pick_plan_value(primary_plan, ["stop_loss", "entry_stop_loss"])
+        if isinstance(stop_value, (int, float)) and math.isfinite(stop_value):
+            stop_loss = float(stop_value)
+        target_value = _pick_plan_value(primary_plan, ["take_profit", "take_profit_2", "exit_price", "trailing_stop"])
+        if isinstance(target_value, (int, float)) and math.isfinite(target_value):
+            take_profit = float(target_value)
+    if signal not in ("BUY", "SELL"):
+        signal = _normalize_trade_direction(item.get("signal")) or "WAIT"
+    confidence = _get_best_confidence(item)
+    if not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
+        confidence = None
+    return {
+        "signal": signal,
+        "source": source,
+        "confidence": float(confidence) if confidence is not None else None,
+        "pattern": pattern,
+        "is_actionable": signal in ("BUY", "SELL"),
+        "entry_risk_pct": entry_risk_pct,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+    }
+
+
+def _build_analysis_summary(results, requested_symbols=None, period=None):
+    total_requested = int(requested_symbols or 0)
+    returned = results if isinstance(results, list) else []
+    success_count = 0
+    error_count = 0
+    buy_count = 0
+    sell_count = 0
+    wait_count = 0
+    actionable = []
+    errors = []
+    for item in returned:
+        if not isinstance(item, dict):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        if item.get("error"):
+            error_count += 1
+            errors.append({
+                "symbol": symbol,
+                "error": str(item.get("error") or "").strip(),
+            })
+            continue
+        success_count += 1
+        ui_summary = item.get("ui_summary")
+        if not isinstance(ui_summary, dict):
+            ui_summary = _build_ui_result_summary(item)
+        signal = str(ui_summary.get("signal") or "WAIT").upper()
+        if signal == "BUY":
+            buy_count += 1
+        elif signal == "SELL":
+            sell_count += 1
+        else:
+            wait_count += 1
+        if signal in ("BUY", "SELL"):
+            actionable.append(
+                {
+                    "symbol": symbol,
+                    "name": str(item.get("name") or "").strip(),
+                    "signal": signal,
+                    "source": str(ui_summary.get("source") or "AI Summary"),
+                    "confidence": float(ui_summary.get("confidence")) if isinstance(ui_summary.get("confidence"), (int, float)) else None,
+                    "pattern": ui_summary.get("pattern"),
+                    "price": float(item.get("price")) if isinstance(item.get("price"), (int, float)) else None,
+                    "change": float(item.get("change")) if isinstance(item.get("change"), (int, float)) else None,
+                }
+            )
+    actionable.sort(
+        key=lambda item: (
+            float(item.get("confidence") or 0.0),
+            abs(float(item.get("change") or 0.0)),
+            str(item.get("symbol") or ""),
+        ),
+        reverse=True,
+    )
+    dominant_signal = "WAIT"
+    if buy_count and buy_count > sell_count:
+        dominant_signal = "BUY"
+    elif sell_count and sell_count > buy_count:
+        dominant_signal = "SELL"
+    elif buy_count or sell_count:
+        dominant_signal = "MIXED"
+    total_tracked = success_count + error_count
+    success_rate_pct = None
+    if total_tracked > 0:
+        success_rate_pct = round((success_count / total_tracked) * 100.0, 1)
+    return {
+        "requested_count": total_requested or len(returned),
+        "returned_count": len(returned),
+        "success_count": success_count,
+        "error_count": error_count,
+        "success_rate_pct": success_rate_pct,
+        "actionable_count": len(actionable),
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+        "wait_count": wait_count,
+        "dominant_signal": dominant_signal,
+        "period": str(period or ""),
+        "top_signal": actionable[0] if actionable else None,
+        "action_queue": actionable[:5],
+        "errors": errors[:3],
+    }
 
 @app.route('/')
 def index():
@@ -5076,13 +5483,7 @@ def index():
 
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify(
-        {
-            "status": "ok",
-            "server_time": get_thai_now().strftime("%Y-%m-%d %H:%M:%S (Asia/Bangkok)"),
-            "warnings": _get_config_warnings(),
-        }
-    )
+    return jsonify(_build_health_snapshot())
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -5109,8 +5510,20 @@ def analyze():
     if notify:
         _notify_telegram_from_results(results)
 
+    alert_backtest = _build_alert_backtest_summary(results)
     cleaned = [_clean_json_value(r) for r in results]
-    return jsonify({'results': cleaned})
+    meta = {
+        "request": {
+            "symbols": symbols,
+            "period": period,
+            "include_chart_data": include_chart_data,
+            "notify_telegram": notify,
+        },
+        "summary": _build_analysis_summary(results, requested_symbols=len(symbols), period=period),
+        "telegram_alerts": alert_backtest,
+        "health": _build_health_snapshot(),
+    }
+    return jsonify({'results': cleaned, 'meta': _clean_json_value(meta)})
 
 def _run_once(symbols, period, notify_telegram):
     uniq = _parse_symbols_input(symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
@@ -5124,7 +5537,24 @@ def _run_once(symbols, period, notify_telegram):
         results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, uniq, repeat(period), repeat(False)))
     if notify_telegram:
         _notify_telegram_from_results(results)
-    print(json.dumps({"results": [_clean_json_value(r) for r in results]}, ensure_ascii=False))
+    alert_backtest = _build_alert_backtest_summary(results)
+    payload = {
+        "results": [_clean_json_value(r) for r in results],
+        "meta": _clean_json_value(
+            {
+                "request": {
+                    "symbols": uniq,
+                    "period": period,
+                    "include_chart_data": False,
+                    "notify_telegram": bool(notify_telegram),
+                },
+                "summary": _build_analysis_summary(results, requested_symbols=len(uniq), period=period),
+                "telegram_alerts": alert_backtest,
+                "health": _build_health_snapshot(),
+            }
+        ),
+    }
+    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 if __name__ == '__main__':

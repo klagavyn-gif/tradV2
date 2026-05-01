@@ -716,6 +716,99 @@ def _evaluate_entry_quality_gate(plan, signal):
     return True, "pass", metrics
 
 
+def _evaluate_super_signal(item, signal):
+    """
+    Evaluates if a signal qualifies as a 'Super Signal' (Highest Win Rate)
+    Requires:
+    1. At least 2 strategies with high win rate (>65%) or 3+ strategies in confluence.
+    2. Strong 1H Trend (ADX > 25).
+    3. Positive Expectancy (>0.15).
+    4. Candlestick Pattern confirmation.
+    """
+    if str(signal or "").upper() not in ("BUY", "SELL"):
+        return False, "not_entry", {}
+
+    # 1. Check Confluence & Backtest Stats
+    strategies = [
+        ("ActionZone", item.get("actionzone_15m")),
+        ("EMACross", item.get("ema_cross_15m")),
+        ("CDCVixFix", item.get("cdc_vixfix_15m")),
+        ("ShortTerm", item.get("short_term_15m")),
+        ("Sniper", item.get("sniper_15m")),
+        ("Quantum", item.get("quantum_15m")),
+    ]
+
+    confirmed_strategies = []
+    total_wr = 0.0
+    total_exp = 0.0
+    count = 0
+    
+    for name, plan in strategies:
+        if not isinstance(plan, dict):
+            continue
+        
+        plan_sig = _normalize_trade_direction(
+            plan.get("signal") or plan.get("raw_signal") or plan.get("setup") or plan.get("recommendation")
+        )
+        if plan_sig != signal:
+            continue
+            
+        metrics = _extract_plan_edge_metrics(plan)
+        wr = metrics.get("win_rate_pct")
+        exp = metrics.get("expectancy_rr")
+        trades = metrics.get("trades")
+        
+        # Must have minimum history to be trusted
+        if not isinstance(trades, (int, float)) or trades < 8:
+            continue
+            
+        if isinstance(wr, (int, float)) and wr >= 60.0:
+            confirmed_strategies.append(name)
+            total_wr += wr
+            if isinstance(exp, (int, float)):
+                total_exp += exp
+            count += 1
+
+    # Quality Gate 1: Confluence
+    if count < 2:
+        return False, "insufficient_confluence", {}
+
+    avg_wr = total_wr / count if count > 0 else 0
+    avg_exp = total_exp / count if count > 0 else 0
+
+    # Quality Gate 2: Strict Stats
+    if avg_wr < 65.0:
+        return False, "win_rate_too_low", {"avg_wr": avg_wr}
+    if avg_exp < 0.15:
+        return False, "expectancy_too_low", {"avg_exp": avg_exp}
+
+    # Quality Gate 3: Trend & Market Context
+    # Check 1H ADX and Trend Alignment from ActionZone (if available) or shared context
+    az_plan = item.get("actionzone_15m")
+    if isinstance(az_plan, dict):
+        adx = az_plan.get("adx")
+        trend_strength = str(az_plan.get("trend_strength") or "").upper()
+        trend_ok = bool(az_plan.get("trend_alignment", True))
+        
+        if not trend_ok:
+            return False, "trend_misalignment", {}
+        if isinstance(adx, (int, float)) and adx < 25.0:
+            return False, "weak_adx", {"adx": adx}
+    
+    # Quality Gate 4: Candlestick Confirmation
+    primary_plan = _pick_primary_trade_plan(item)
+    pattern = str(primary_plan.get("detected_pattern") or "").upper() if isinstance(primary_plan, dict) else "NONE"
+    if pattern == "NONE" or not pattern:
+        return False, "no_candlestick_confirmation", {}
+
+    return True, "pass", {
+        "avg_wr": avg_wr,
+        "avg_exp": avg_exp,
+        "confluence": confirmed_strategies,
+        "count": count
+    }
+
+
 def _passes_entry_quality_gate(plan, signal):
     ok, _, _ = _evaluate_entry_quality_gate(plan, signal)
     return ok
@@ -807,6 +900,62 @@ def _append_pattern_context_lines(lines, pattern):
             url = str(reference.get("url") or "").strip()
             if url:
                 lines.append(f'<a href="{url}">📚 อธิบาย Pattern นี้คืออะไร ({label})</a>')
+
+
+def _build_super_signal_message(item, signal, super_meta):
+    emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
+    symbol = normalize_symbol(item.get("symbol") or "")
+    name = _html_escape(str(item.get("name") or "").strip())
+    
+    tv_symbol = symbol.replace("-", "")
+    avg_wr = super_meta.get("avg_wr", 0)
+    avg_exp = super_meta.get("avg_exp", 0)
+    confluence = super_meta.get("confluence", [])
+    
+    lines = [f"<b>{emoji} SUPER SIGNAL {signal} | {_html_escape(symbol)}</b>"]
+    if name:
+        lines.append(f"<i>{name}</i>")
+    lines.append("🏆 <b>ความแม่นยำย้อนหลังสูงพิเศษ (High Accuracy)</b>")
+    lines.append("────────────────")
+    
+    price = item.get("price")
+    change = item.get("change")
+    price_text = _format_price_value(price)
+    if price_text:
+        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
+        lines.append(f"<b>ราคาปัจจุบัน:</b> {price_text}{change_str}")
+
+    lines.append(f"<b>📊 Win Rate เฉลี่ย:</b> {avg_wr:.1f}%")
+    lines.append(f"<b>📈 คาดการณ์กำไร (ExpRR):</b> {avg_exp:.2f}")
+    lines.append(f"<b>🤝 Confluence:</b> " + ", ".join(confluence))
+    
+    primary_plan = _pick_primary_trade_plan(item)
+    pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
+    if pattern and pattern != "None":
+        lines.append(f"<b>🕯️ Confirmation Pattern:</b> {_html_escape(pattern)}")
+
+    if isinstance(primary_plan, dict):
+        stop_lines = _build_stop_context_lines(
+            item,
+            primary_plan,
+            signal=signal,
+            source_label="Super Signal Ensemble",
+        )
+        if stop_lines:
+            lines.append("────────────────")
+            lines.extend(stop_lines)
+            
+        exit_lines = _format_exit_levels_lines(primary_plan)
+        if exit_lines:
+            if not stop_lines:
+                lines.append("────────────────")
+            lines.extend([_html_escape(line) for line in exit_lines])
+            
+    lines.append("────────────────")
+    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 วิเคราะห์กราฟบน TradingView</a>")
+    
+    return "\n".join(lines)
 
 
 def _build_telegram_message(item, signal, best_conf, sources):
@@ -1389,6 +1538,26 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
         symbol = normalize_symbol(item.get("symbol") or "")
         if not symbol:
             continue
+
+        # 0. Check for Super Signal (Highest Priority)
+        for sig in ("BUY", "SELL"):
+            ss_ok, ss_reason, ss_meta = _evaluate_super_signal(item, sig)
+            if ss_ok:
+                ss_message = _build_super_signal_message(item, sig, ss_meta)
+                if ss_message:
+                    # Give Super Signal a very high score to ensure it's sent first
+                    score = 1000.0 + (float(ss_meta.get("avg_wr", 0)) * 2.0)
+                    candidates.append({
+                        "symbol": symbol,
+                        "strategy": "SS15",
+                        "signal": sig,
+                        "score": score,
+                        "confidence": float(ss_meta.get("avg_wr", 0)),
+                        "plan": _pick_primary_trade_plan(item),
+                        "edge_metrics": ss_meta,
+                        "message": ss_message,
+                        "cache_key": f"SS15|{symbol}|{sig}|{get_thai_now().strftime('%Y%m%d%H')}", # Hourly cache
+                    })
 
         cdc_plan = item.get("cdc_vixfix_15m")
         if isinstance(cdc_plan, dict):

@@ -1319,41 +1319,19 @@ def _build_cdc_vixfix_message(item, plan):
     lines.append("────────────────")
     
     entry_text = _format_price_value(plan.get("entry_price"))
-    exit_text = _format_price_value(plan.get("exit_price"))
-    stop_text = _format_price_value(plan.get("stop_loss"))
-    tp_text = _format_price_value(plan.get("take_profit"))
-    
-    move_parts = []
+    curr_text = _format_price_value(plan.get("current_price", item.get("price")))
+    change = item.get("change")
     if entry_text:
-        move_parts.append(f"จุดเข้า: {entry_text}")
-    if exit_text:
-        move_parts.append(f"จุดออก: {exit_text}")
-    elif tp_text:
-        move_parts.append(f"เป้าหมาย: {tp_text}")
-    if stop_text:
-        move_parts.append(f"SL: {stop_text}")
-        
-    if move_parts:
-        lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
-    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-        
-    exit_lines = _format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in exit_lines])
-        
-    profit_pct = plan.get("expected_profit_pct")
-    if isinstance(profit_pct, (int, float)):
-        lines.append(f"<b>💹 กำไรคาดการณ์:</b> {profit_pct:+.2f}%")
-        
-    running_pct = plan.get("running_profit_pct")
-    if isinstance(running_pct, (int, float)):
-        lines.append(f"<b>📈 กำไรปัจจุบัน (จากจุดเข้า):</b> {running_pct:+.2f}%")
-        
+        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
+    if curr_text:
+        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
+        price_label = "📍 ราคาปัจจุบัน" if signal in ("BUY", "SELL") else "📍 ราคา"
+        lines.append(f"<b>{price_label}:</b> {curr_text}{change_str}")
+
+    conf = _normalize_confidence(plan.get("confidence"))
+    if conf is not None:
+        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
+
     exit_trigger = str(plan.get("exit_trigger") or "").strip().upper()
     if exit_trigger:
         trigger_text = exit_trigger
@@ -1361,27 +1339,41 @@ def _build_cdc_vixfix_message(item, plan):
             trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
         elif exit_trigger == "CDC_RED_REVERSAL":
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
-        lines.append("<b>🚨 ทริกเกอร์จุดออก:</b> " + _html_escape(trigger_text))
-        
-    reason = plan.get("reason")
-    if isinstance(reason, str) and reason.strip():
-        lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
-        
-    pattern = plan.get("detected_pattern")
-    _append_pattern_context_lines(lines, pattern)
-        
-    conf = _normalize_confidence(plan.get("confidence"))
-    if conf is not None:
-        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
-        
+        lines.append("<b>🚨 ทริกเกอร์:</b> " + _html_escape(trigger_text))
+
+    edge = _extract_plan_edge_metrics(plan)
+    stats = []
+    trades = edge.get("trades")
+    win_rate = edge.get("win_rate_pct")
+    exp_rr = edge.get("expectancy_rr")
+    if isinstance(trades, (int, float)):
+        stats.append(f"ย้อนหลัง {int(trades)} ไม้")
+    if isinstance(win_rate, (int, float)):
+        stats.append(f"Win {float(win_rate):.0f}%")
+    if isinstance(exp_rr, (int, float)):
+        stats.append(f"ExpRR {float(exp_rr):.2f}")
+    if stats:
+        lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
+
+    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
+    if stop_lines:
+        lines.append("────────────────")
+        lines.extend(stop_lines)
+
+    exit_lines = _format_exit_levels_lines(plan)
+    if exit_lines:
+        if not stop_lines:
+            lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in exit_lines])
+
     lines.append("────────────────")
     last_signal_time = plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
         lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {_html_escape(last_signal_time)}")
-        
+
     lines.append("⏱️ <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
     lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
-    
+
     return "\n".join(lines)
 
 

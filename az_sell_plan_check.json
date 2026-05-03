@@ -1,0 +1,25 @@
+{
+  "signal": "WAIT",
+  "alert": false,
+  "filter_reasons": [],
+  "sell_whitelist_ok": false,
+  "sell_whitelist_reason": "sell_walkforward_win_rate_below_min",
+  "sell_optimizer_best": {
+    "fast_len": 6,
+    "slow_len": 66,
+    "direction_filter": "SELL",
+    "trades": 25,
+    "win_rate_pct": 24.0,
+    "avg_rr": -0.7266090117542068,
+    "expectancy_rr": -0.7266090117542068,
+    "train_trades": 15,
+    "valid_trades": 7,
+    "train_expectancy_rr": -0.6824767345582418,
+    "valid_expectancy_rr": -0.6459110991394905,
+    "train_win_rate_pct": 26.666666666666668,
+    "valid_win_rate_pct": 28.57142857142857,
+    "consistency_penalty": 0.03656563541875124,
+    "robustness_score": 91.56249999999999,
+    "opt_score": -0.5703186977330109
+  }
+}

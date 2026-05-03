@@ -647,11 +647,11 @@ def _extract_plan_edge_metrics(plan):
     for payload in candidate_payloads:
         win_rate = pick_numeric(
             payload,
-            ("historical_win_rate", "win_rate_pct", "historical_win_rate_tp1", "historical_win_rate_tp2"),
+            ("valid_win_rate_pct", "historical_win_rate", "win_rate_pct", "historical_win_rate_tp1", "historical_win_rate_tp2"),
         )
         trades = pick_numeric(
             payload,
-            ("historical_trades", "trades", "historical_trades_tp1", "historical_trades_tp2"),
+            ("valid_trades", "historical_trades", "trades", "historical_trades_tp1", "historical_trades_tp2"),
         )
         expectancy = pick_numeric(
             payload,
@@ -674,6 +674,158 @@ def _extract_plan_edge_metrics(plan):
                 "expectancy_rr": expectancy,
             }
     return best_metrics
+
+
+def _extract_optimizer_trade_metrics(optimizer):
+    if not isinstance(optimizer, dict):
+        return {}
+
+    def pick_numeric(obj, keys):
+        if not isinstance(obj, dict):
+            return None
+        for key in keys:
+            value = obj.get(key)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                return float(value)
+        return None
+
+    best = optimizer.get("best")
+    if not isinstance(best, dict):
+        return {}
+    return {
+        "win_rate_pct": pick_numeric(
+            best,
+            ("valid_win_rate_pct", "historical_win_rate", "win_rate_pct", "historical_win_rate_tp1", "historical_win_rate_tp2"),
+        ),
+        "trades": pick_numeric(
+            best,
+            ("valid_trades", "historical_trades", "trades", "historical_trades_tp1", "historical_trades_tp2"),
+        ),
+        "expectancy_rr": pick_numeric(
+            best,
+            ("expectancy_rr", "valid_expectancy_rr", "avg_rr", "historical_avg_rr", "expectancy_tp1_rr", "expectancy_tp2_rr"),
+        ),
+    }
+
+
+def _extract_signal_edge_metrics(plan, signal):
+    sig = str(signal or "").upper()
+    if sig == "SELL" and isinstance(plan, dict):
+        sell_metrics = _extract_optimizer_trade_metrics(plan.get("sell_optimizer"))
+        if any(isinstance(v, (int, float)) for v in sell_metrics.values()):
+            return sell_metrics
+    return _extract_plan_edge_metrics(plan)
+
+
+def _extract_walkforward_metrics(plan, optimizer_key="optimizer"):
+    if not isinstance(plan, dict):
+        return {}
+    optimizer = plan.get(optimizer_key)
+    best = optimizer.get("best") if isinstance(optimizer, dict) else None
+    if not isinstance(best, dict):
+        return {}
+    metrics = {}
+    for key in (
+        "valid_trades",
+        "valid_win_rate_pct",
+        "valid_expectancy_rr",
+        "train_trades",
+        "train_win_rate_pct",
+        "train_expectancy_rr",
+        "robustness_score",
+        "consistency_penalty",
+        "opt_score",
+    ):
+        value = best.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            metrics[key] = float(value)
+    return metrics
+
+
+def _evaluate_walkforward_gate(plan, signal):
+    if str(signal or "").upper() not in ("BUY", "SELL"):
+        return True, "not_entry_signal", {}
+    enabled = bool(getattr(config, "TELEGRAM_ALERT_ENTRY_REQUIRE_WALKFORWARD", True))
+    if not enabled:
+        return True, "walkforward_gate_disabled", {}
+    metrics = _extract_walkforward_metrics(plan)
+    if not metrics:
+        return True, "walkforward_not_available", {}
+    min_wr = getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_WIN_RATE", 60.0)
+    min_exp = getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_EXPECTANCY_RR", 0.05)
+    min_valid_trades = getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_VALID_TRADES", 6)
+    min_robustness = getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_ROBUSTNESS", 45.0)
+    try:
+        min_wr = float(min_wr)
+    except Exception:
+        min_wr = 60.0
+    try:
+        min_exp = float(min_exp)
+    except Exception:
+        min_exp = 0.05
+    try:
+        min_valid_trades = int(min_valid_trades)
+    except Exception:
+        min_valid_trades = 6
+    try:
+        min_robustness = float(min_robustness)
+    except Exception:
+        min_robustness = 45.0
+    valid_trades = metrics.get("valid_trades")
+    valid_wr = metrics.get("valid_win_rate_pct")
+    valid_exp = metrics.get("valid_expectancy_rr")
+    robustness = metrics.get("robustness_score")
+    if isinstance(valid_trades, (int, float)) and int(valid_trades) < int(min_valid_trades):
+        return False, "walkforward_valid_trades_below_min", metrics
+    if isinstance(valid_wr, (int, float)) and float(valid_wr) < float(min_wr):
+        return False, "walkforward_win_rate_below_min", metrics
+    if isinstance(valid_exp, (int, float)) and float(valid_exp) < float(min_exp):
+        return False, "walkforward_expectancy_below_min", metrics
+    if isinstance(robustness, (int, float)) and float(robustness) < float(min_robustness):
+        return False, "walkforward_robustness_below_min", metrics
+    return True, "pass", metrics
+
+
+def _evaluate_sell_whitelist_gate(plan):
+    enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_WHITELIST_ENABLE", True))
+    if not enabled:
+        return True, "sell_whitelist_disabled", {}
+    metrics = _extract_walkforward_metrics(plan, optimizer_key="sell_optimizer")
+    if not metrics:
+        return False, "sell_walkforward_not_available", {}
+    min_wr = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_WIN_RATE", 60.0)
+    min_exp = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_EXPECTANCY_RR", 0.05)
+    min_valid_trades = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_VALID_TRADES", 6)
+    min_robustness = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_ROBUSTNESS", 45.0)
+    try:
+        min_wr = float(min_wr)
+    except Exception:
+        min_wr = 60.0
+    try:
+        min_exp = float(min_exp)
+    except Exception:
+        min_exp = 0.05
+    try:
+        min_valid_trades = int(min_valid_trades)
+    except Exception:
+        min_valid_trades = 6
+    try:
+        min_robustness = float(min_robustness)
+    except Exception:
+        min_robustness = 45.0
+    valid_trades = metrics.get("valid_trades")
+    valid_wr = metrics.get("valid_win_rate_pct")
+    valid_exp = metrics.get("valid_expectancy_rr")
+    robustness = metrics.get("robustness_score")
+    if not isinstance(valid_trades, (int, float)) or int(valid_trades) < int(min_valid_trades):
+        return False, "sell_walkforward_valid_trades_below_min", metrics
+    if not isinstance(valid_wr, (int, float)) or float(valid_wr) < float(min_wr):
+        return False, "sell_walkforward_win_rate_below_min", metrics
+    if not isinstance(valid_exp, (int, float)) or float(valid_exp) < float(min_exp):
+        return False, "sell_walkforward_expectancy_below_min", metrics
+    if not isinstance(robustness, (int, float)) or float(robustness) < float(min_robustness):
+        return False, "sell_walkforward_robustness_below_min", metrics
+    return True, "pass", metrics
 
 
 def _evaluate_entry_quality_gate(plan, signal):
@@ -700,7 +852,7 @@ def _evaluate_entry_quality_gate(plan, signal):
         min_exp = 0.05
     if not isinstance(plan, dict):
         return False, "missing_plan", {}
-    metrics = _extract_plan_edge_metrics(plan)
+    metrics = _extract_signal_edge_metrics(plan, signal)
     wr = metrics.get("win_rate_pct")
     trades = metrics.get("trades")
     exp = metrics.get("expectancy_rr")
@@ -713,6 +865,17 @@ def _evaluate_entry_quality_gate(plan, signal):
         return False, "win_rate_below_min", metrics
     if isinstance(exp, (int, float)) and float(exp) < float(min_exp):
         return False, "expectancy_below_min", metrics
+    wf_ok, wf_reason, wf_metrics = _evaluate_walkforward_gate(plan, signal)
+    if not wf_ok:
+        merged = metrics.copy()
+        merged.update(wf_metrics)
+        return False, wf_reason, merged
+    if str(signal or "").upper() == "SELL":
+        sell_ok, sell_reason, sell_metrics = _evaluate_sell_whitelist_gate(plan)
+        if not sell_ok:
+            merged = metrics.copy()
+            merged.update(sell_metrics)
+            return False, sell_reason, merged
     return True, "pass", metrics
 
 
@@ -1083,6 +1246,37 @@ def _build_actionzone_message(item, az_plan):
             stats.append(f"ExpRR {float(exp_rr):.2f}")
         if stats:
             lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
+        wf_stats = []
+        valid_trades = best.get("valid_trades")
+        valid_win = best.get("valid_win_rate_pct")
+        valid_exp = best.get("valid_expectancy_rr")
+        if isinstance(valid_trades, (int, float)):
+            wf_stats.append(f"Valid {int(valid_trades)} ไม้")
+        if isinstance(valid_win, (int, float)):
+            wf_stats.append(f"WF Win {float(valid_win):.0f}%")
+        if isinstance(valid_exp, (int, float)):
+            wf_stats.append(f"WF ExpRR {float(valid_exp):.2f}")
+        if wf_stats:
+            lines.append("<b>🧭 Walk-forward:</b> " + " | ".join([_html_escape(s) for s in wf_stats]))
+    if signal == "SELL":
+        sell_optimizer = az_plan.get("sell_optimizer")
+        sell_best = sell_optimizer.get("best") if isinstance(sell_optimizer, dict) else None
+        if isinstance(sell_best, dict):
+            sell_stats = []
+            sell_valid_trades = sell_best.get("valid_trades")
+            sell_valid_win = sell_best.get("valid_win_rate_pct")
+            sell_valid_exp = sell_best.get("valid_expectancy_rr")
+            if isinstance(sell_valid_trades, (int, float)):
+                sell_stats.append(f"Valid {int(sell_valid_trades)} ไม้")
+            if isinstance(sell_valid_win, (int, float)):
+                sell_stats.append(f"Sell WF Win {float(sell_valid_win):.0f}%")
+            if isinstance(sell_valid_exp, (int, float)):
+                sell_stats.append(f"Sell WF ExpRR {float(sell_valid_exp):.2f}")
+            if sell_stats:
+                lines.append("<b>📉 Sell Whitelist:</b> " + " | ".join([_html_escape(s) for s in sell_stats]))
+        sell_reason = str(az_plan.get("sell_whitelist_reason") or "").strip()
+        if sell_reason:
+            lines.append(f"<b>⚠️ Sell Gate:</b> {_html_escape(sell_reason)}")
             
     stop_lines = _build_stop_context_lines(item, az_plan, signal=signal, source_label="ActionZone 15m")
     if stop_lines:
@@ -1576,6 +1770,9 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                     score = float(cdc_conf) + freshness + (10.0 if cdc_signal == "EXIT" else 4.0)
                     if trigger == "VIXFIX_TOP":
                         score += 5.0
+                    # Boost SELL signals with high confidence
+                    if cdc_signal == "SELL" and cdc_conf >= 85.0:
+                        score += 8.0
                     context_key = last_signal_time or trigger or (_format_price_value(cdc_plan.get("entry_price")) or "na")
                     candidates.append({
                         "symbol": symbol,
@@ -1636,6 +1833,9 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                             score += max(-4.0, min(8.0, float(exp) * 8.0))
                         if isinstance(trades, (int, float)):
                             score += max(0.0, min(4.0, float(trades) / 8.0))
+                        # Boost SELL signals with high win rate
+                        if az_signal == "SELL" and isinstance(wr, (int, float)) and wr >= 65.0:
+                            score += 12.0
                         last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
                         zone = str(az_plan.get("zone") or "").upper().strip()
                         entry_bucket = _format_price_value(az_plan.get("entry_price")) or "na"
@@ -1800,7 +2000,53 @@ def _notify_telegram_from_results(results):
         min_conf,
         dynamic_min_conf,
     )
+    
+    # Track win rate metrics for sent alerts
+    if sent > 0:
+        _track_alert_performance(candidates, sent)
+    
     return sent
+
+
+def _track_alert_performance(candidates, sent_count):
+    """Track and log performance metrics for sent alerts to ensure >60% win rate"""
+    if not candidates or sent_count <= 0:
+        return
+    
+    total_win_rate = 0.0
+    total_expectancy = 0.0
+    valid_count = 0
+    
+    for candidate in candidates:
+        edge_metrics = candidate.get("edge_metrics", {})
+        win_rate = edge_metrics.get("win_rate_pct")
+        expectancy = edge_metrics.get("expectancy_rr")
+        
+        if isinstance(win_rate, (int, float)) and isinstance(expectancy, (int, float)):
+            total_win_rate += win_rate
+            total_expectancy += expectancy
+            valid_count += 1
+    
+    if valid_count > 0:
+        avg_win_rate = total_win_rate / valid_count
+        avg_expectancy = total_expectancy / valid_count
+        
+        logger.info(
+            "Alert Performance Tracking: Avg Win Rate=%.1f%%, Avg Expectancy=%.2f, Alerts=%d",
+            avg_win_rate, avg_expectancy, sent_count
+        )
+        
+        # Log warning if win rate drops below target
+        if avg_win_rate < 60.0:
+            logger.warning(
+                "ALERT: Average win rate below 60%% target (%.1f%%). Consider tightening filters.",
+                avg_win_rate
+            )
+        elif avg_win_rate >= 65.0:
+            logger.info(
+                "SUCCESS: Average win rate exceeds 65%% (%.1f%%). System performing well.",
+                avg_win_rate
+            )
 
 
 def _get_thread_curl_session():
@@ -1971,9 +2217,10 @@ def _create_curl_session():
         raise
 
 
-def _ema_cross_15m_get_cached(symbol):
+def _ema_cross_15m_get_cached(symbol, profile_key="default"):
     sym = normalize_symbol(symbol)
-    cached = EMA_CROSS_15M_OPT_CACHE.get(sym)
+    cache_key = f"{sym}|{str(profile_key or 'default').lower()}"
+    cached = EMA_CROSS_15M_OPT_CACHE.get(cache_key)
     if not isinstance(cached, dict):
         return None
     ttl = getattr(config, "EMA_CROSS_15M_CACHE_TTL_SECONDS", 0)
@@ -1992,13 +2239,57 @@ def _ema_cross_15m_get_cached(symbol):
     return cached
 
 
-def _ema_cross_15m_set_cached(symbol, payload):
+def _ema_cross_15m_set_cached(symbol, payload, profile_key="default"):
     sym = normalize_symbol(symbol)
     if not isinstance(payload, dict):
         return
     payload = payload.copy()
     payload["cached_at"] = get_thai_now()
-    EMA_CROSS_15M_OPT_CACHE[sym] = payload
+    cache_key = f"{sym}|{str(profile_key or 'default').lower()}"
+    EMA_CROSS_15M_OPT_CACHE[cache_key] = payload
+
+
+def _sanitize_ema_lengths(fast_len, slow_len, default_fast=12, default_slow=26):
+    try:
+        fast = int(fast_len) if fast_len is not None else int(default_fast)
+    except Exception:
+        fast = int(default_fast)
+    try:
+        slow = int(slow_len) if slow_len is not None else int(default_slow)
+    except Exception:
+        slow = int(default_slow)
+    if fast < 2 or slow < 2 or fast >= slow:
+        fast, slow = int(default_fast), int(default_slow)
+    return fast, slow
+
+
+def _resolve_optimized_ema_lengths(symbol, df, use_opt=True, profile_key="default", direction_filter=None):
+    sym = normalize_symbol(symbol)
+    cached = _ema_cross_15m_get_cached(sym, profile_key=profile_key)
+    best_fast_len = None
+    best_slow_len = None
+    opt_meta = None
+    if isinstance(cached, dict):
+        best_fast_len = cached.get("fast_len")
+        best_slow_len = cached.get("slow_len")
+        opt_meta = cached.get("opt_meta")
+    if use_opt and isinstance(df, pd.DataFrame) and not df.empty and (best_fast_len is None or best_slow_len is None):
+        try:
+            opt_meta = optimize_best_ema_cross_15m(sym, df, direction_filter=direction_filter)
+        except Exception as e:
+            logger.warning("EMA optimization failed for %s: %s", sym, e, exc_info=True)
+            opt_meta = None
+        best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
+        if isinstance(best, dict):
+            best_fast_len = best.get("fast_len")
+            best_slow_len = best.get("slow_len")
+        best_fast_len, best_slow_len = _sanitize_ema_lengths(best_fast_len, best_slow_len)
+        _ema_cross_15m_set_cached(sym, {
+            "fast_len": best_fast_len,
+            "slow_len": best_slow_len,
+            "opt_meta": opt_meta,
+        }, profile_key=profile_key)
+    return (*_sanitize_ema_lengths(best_fast_len, best_slow_len), opt_meta)
 
 
 def _add_price_patterns(df):
@@ -2229,7 +2520,7 @@ def _actionzone_simulate_trade_rr(
     return None
 
 
-def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64, return_rr_list=False):
+def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64, return_rr_list=False, direction_filter=None):
     if df is None or df.empty:
         return None
     try:
@@ -2239,6 +2530,9 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         max_forward = int(max_forward)
     except Exception:
         return None
+    direction_filter = str(direction_filter or "").upper().strip()
+    if direction_filter not in ("", "BUY", "SELL"):
+        direction_filter = ""
     if fast_len < 2 or slow_len < 2 or fast_len >= slow_len:
         return None
     if tp_mult <= 0 or max_forward < 1:
@@ -2308,6 +2602,8 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
             direction_i = "SELL"
         else:
             continue
+        if direction_filter and direction_i != direction_filter:
+            continue
             
         atr_i = df["ATR"].iloc[i]
         vol_avg_i = df["Vol_Avg"].iloc[i]
@@ -2373,6 +2669,7 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         payload = {
             "fast_len": fast_len,
             "slow_len": slow_len,
+            "direction_filter": direction_filter or "BOTH",
             "trades": 0,
             "win_rate_pct": None,
             "avg_rr": None,
@@ -2386,6 +2683,7 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
     payload = {
         "fast_len": fast_len,
         "slow_len": slow_len,
+        "direction_filter": direction_filter or "BOTH",
         "trades": int(total_trades),
         "win_rate_pct": float(win_rate),
         "avg_rr": float(avg_rr),
@@ -2437,7 +2735,7 @@ def _actionzone_eval_candidate(train_res, valid_res, min_trades=8, min_valid_tra
     }
 
 
-def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=None, return_rr_list=False):
+def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=None, return_rr_list=False, direction_filter=None):
     sym = normalize_symbol(symbol)
     if not sym:
         return None
@@ -2448,26 +2746,12 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     df = _ema_cross_15m_prepare_df(raw)
     if df is None or getattr(df, "empty", True):
         return None
-    best_fast_len = None
-    best_slow_len = None
-    cached = _ema_cross_15m_get_cached(sym)
-    if isinstance(cached, dict):
-        best_fast_len = cached.get("fast_len")
-        best_slow_len = cached.get("slow_len")
+    direction_filter = str(direction_filter or "").upper().strip()
+    if direction_filter not in ("", "BUY", "SELL"):
+        direction_filter = ""
     use_opt = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", True)
-    if use_opt and (best_fast_len is None or best_slow_len is None):
-        opt_meta = optimize_best_ema_cross_15m(sym, df)
-        best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
-        if isinstance(best, dict):
-            best_fast_len = best.get("fast_len")
-            best_slow_len = best.get("slow_len")
-    try:
-        fast_len = int(best_fast_len) if best_fast_len is not None else 12
-        slow_len = int(best_slow_len) if best_slow_len is not None else 26
-    except Exception:
-        fast_len, slow_len = 12, 26
-    if fast_len < 2 or slow_len < 2 or fast_len >= slow_len:
-        fast_len, slow_len = 12, 26
+    profile_key = "sell_only" if direction_filter == "SELL" else "buy_only" if direction_filter == "BUY" else "default"
+    fast_len, slow_len, _ = _resolve_optimized_ema_lengths(sym, df, use_opt=use_opt, profile_key=profile_key, direction_filter=direction_filter or None)
     tp_mult = float(tp_mult if tp_mult is not None else getattr(config, "ACTIONZONE_15M_TP_MULT", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0)))
     max_forward = int(max_forward if max_forward is not None else getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64)))
     stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
@@ -2532,6 +2816,8 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         elif sell_signal.iloc[i]:
             direction_i = "SELL"
         else:
+            continue
+        if direction_filter and direction_i != direction_filter:
             continue
         atr_i = df["ATR"].iloc[i]
         vol_avg_i = df["Vol_Avg"].iloc[i]
@@ -2601,6 +2887,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
             "symbol": sym,
             "fast_len": fast_len,
             "slow_len": slow_len,
+            "direction_filter": direction_filter or "BOTH",
             "trades": 0,
             "win_rate_pct": None,
             "avg_rr": None,
@@ -2615,6 +2902,7 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
         "symbol": sym,
         "fast_len": fast_len,
         "slow_len": slow_len,
+        "direction_filter": direction_filter or "BOTH",
         "trades": int(total_trades),
         "win_rate_pct": float(win_rate),
         "avg_rr": float(avg_rr),
@@ -2625,9 +2913,77 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     return payload
 
 
-def optimize_best_ema_cross_15m(symbol, df):
+def build_actionzone_sell_whitelist(symbols, yf_period=None):
+    if not isinstance(symbols, (list, tuple)):
+        return {"symbols": [], "passed_symbols": [], "results": [], "summary": {}}
+    results = []
+    passed_symbols = []
+    weighted_valid_trades = 0.0
+    weighted_valid_wins = 0.0
+    weighted_valid_exp = 0.0
+    for raw_symbol in symbols:
+        sym = normalize_symbol(raw_symbol)
+        if not sym:
+            continue
+        raw = get_yf_history(sym, period=str(yf_period or getattr(config, "ACTIONZONE_15M_YF_PERIOD", "30d")), interval="15m", auto_adjust=True)
+        if raw is None or getattr(raw, "empty", True):
+            results.append({"symbol": sym, "passed": False, "reason": "missing_history"})
+            continue
+        df = _ema_cross_15m_prepare_df(raw)
+        if df is None or getattr(df, "empty", True):
+            results.append({"symbol": sym, "passed": False, "reason": "prepare_df_failed"})
+            continue
+        _, _, sell_opt_meta = _resolve_optimized_ema_lengths(
+            sym,
+            df,
+            use_opt=True,
+            profile_key="sell_only",
+            direction_filter="SELL",
+        )
+        gate_ok, gate_reason, gate_metrics = _evaluate_sell_whitelist_gate({"sell_optimizer": sell_opt_meta})
+        best = sell_opt_meta.get("best") if isinstance(sell_opt_meta, dict) else None
+        row = {
+            "symbol": sym,
+            "passed": bool(gate_ok),
+            "reason": str(gate_reason),
+            "optimizer": sell_opt_meta,
+            "best": best,
+            "metrics": gate_metrics,
+        }
+        if gate_ok:
+            passed_symbols.append(sym)
+            valid_trades = gate_metrics.get("valid_trades")
+            valid_wr = gate_metrics.get("valid_win_rate_pct")
+            valid_exp = gate_metrics.get("valid_expectancy_rr")
+            if isinstance(valid_trades, (int, float)) and float(valid_trades) > 0:
+                weighted_valid_trades += float(valid_trades)
+                if isinstance(valid_wr, (int, float)):
+                    weighted_valid_wins += float(valid_trades) * float(valid_wr) / 100.0
+                if isinstance(valid_exp, (int, float)):
+                    weighted_valid_exp += float(valid_trades) * float(valid_exp)
+        results.append(row)
+    summary = {
+        "symbols": len(results),
+        "passed_symbols": list(passed_symbols),
+        "passed_count": len(passed_symbols),
+        "weighted_valid_win_rate_pct": (weighted_valid_wins / weighted_valid_trades * 100.0) if weighted_valid_trades > 0 else None,
+        "weighted_valid_expectancy_rr": (weighted_valid_exp / weighted_valid_trades) if weighted_valid_trades > 0 else None,
+        "total_valid_trades": int(weighted_valid_trades) if weighted_valid_trades > 0 else 0,
+    }
+    return {
+        "symbols": [normalize_symbol(s) for s in symbols if normalize_symbol(s)],
+        "passed_symbols": list(passed_symbols),
+        "results": results,
+        "summary": summary,
+    }
+
+
+def optimize_best_ema_cross_15m(symbol, df, direction_filter=None):
     if not isinstance(df, pd.DataFrame) or df.empty:
         return None
+    direction_filter = str(direction_filter or "").upper().strip()
+    if direction_filter not in ("", "BUY", "SELL"):
+        direction_filter = ""
     enable = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True))
     if not enable:
         return None
@@ -2642,6 +2998,7 @@ def optimize_best_ema_cross_15m(symbol, df):
     max_forward = getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
     min_valid_trades = getattr(config, "ACTIONZONE_15M_MIN_VALID_TRADES", 4)
     train_ratio = getattr(config, "ACTIONZONE_15M_OPT_TRAIN_RATIO", 0.70)
+    max_evaluated = getattr(config, "ACTIONZONE_15M_OPT_MAX_EVALUATED", 96)
     try:
         fast_min = int(fast_min)
         fast_max = int(fast_max)
@@ -2654,6 +3011,7 @@ def optimize_best_ema_cross_15m(symbol, df):
         max_forward = int(max_forward)
         min_valid_trades = int(min_valid_trades)
         train_ratio = float(train_ratio)
+        max_evaluated = int(max_evaluated)
     except Exception:
         return None
     if fast_step < 1 or slow_step < 1:
@@ -2676,6 +3034,8 @@ def optimize_best_ema_cross_15m(symbol, df):
         max_forward = 64
     if train_ratio <= 0.50 or train_ratio >= 0.90:
         train_ratio = 0.70
+    if max_evaluated < 1:
+        max_evaluated = 96
     if len(df) < 180:
         train_ratio = 0.65
     split_idx = int(len(df) * train_ratio)
@@ -2684,45 +3044,75 @@ def optimize_best_ema_cross_15m(symbol, df):
     df_valid = df.iloc[split_idx:].copy()
     if len(df_train) < 80 or len(df_valid) < 60:
         return None
-    best = None
-    evaluated = 0
+    combinations = []
     for fast_len in range(fast_min, fast_max + 1, fast_step):
         for slow_len in range(slow_min, slow_max + 1, slow_step):
-            if fast_len >= slow_len:
-                continue
-            r_train = _backtest_ema_cross_15m(df_train, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
-            r_valid = _backtest_ema_cross_15m(df_valid, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
-            r_full = _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward)
-            evaluated += 1
-            if not r_train or not r_valid or not r_full:
-                continue
-            eval_info = _actionzone_eval_candidate(r_train, r_valid, min_trades=min_trades, min_valid_trades=min_valid_trades)
-            if not isinstance(eval_info, dict):
-                continue
-            trades = r_full.get("trades")
-            exp_rr = r_full.get("expectancy_rr")
-            win_rate = r_full.get("win_rate_pct")
-            if not isinstance(exp_rr, (int, float)):
-                continue
-            candidate = r_full.copy()
-            candidate.update(eval_info)
-            key = (
-                float(eval_info.get("opt_score")),
-                float(eval_info.get("valid_expectancy_rr")),
-                float(exp_rr),
-                float(win_rate) if isinstance(win_rate, (int, float)) else -1e9,
-                float(trades),
+            if fast_len < slow_len:
+                combinations.append((fast_len, slow_len))
+    if len(combinations) > max_evaluated:
+        anchor_pairs = [(8, 21), (9, 21), (10, 30), (12, 26), (12, 36), (20, 50)]
+        trimmed = []
+        seen_pairs = set()
+        valid_pairs = set(combinations)
+        for pair in anchor_pairs:
+            if pair in valid_pairs and pair not in seen_pairs:
+                trimmed.append(pair)
+                seen_pairs.add(pair)
+        stride = max(1, int(math.ceil(len(combinations) / float(max_evaluated))))
+        for pair in combinations[::stride]:
+            if pair not in seen_pairs:
+                trimmed.append(pair)
+                seen_pairs.add(pair)
+            if len(trimmed) >= max_evaluated:
+                break
+        combinations = trimmed[:max_evaluated]
+    best = None
+    evaluated = 0
+    for fast_len, slow_len in combinations:
+        try:
+            r_train = _backtest_ema_cross_15m(df_train, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, direction_filter=direction_filter or None)
+            r_valid = _backtest_ema_cross_15m(df_valid, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, direction_filter=direction_filter or None)
+            r_full = _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, direction_filter=direction_filter or None)
+        except Exception as e:
+            logger.warning(
+                "ActionZone optimizer failed for %s at fast=%s slow=%s: %s",
+                normalize_symbol(symbol),
+                fast_len,
+                slow_len,
+                e,
             )
-            if best is None:
+            continue
+        evaluated += 1
+        if not r_train or not r_valid or not r_full:
+            continue
+        eval_info = _actionzone_eval_candidate(r_train, r_valid, min_trades=min_trades, min_valid_trades=min_valid_trades)
+        if not isinstance(eval_info, dict):
+            continue
+        trades = r_full.get("trades")
+        exp_rr = r_full.get("expectancy_rr")
+        win_rate = r_full.get("win_rate_pct")
+        if not isinstance(exp_rr, (int, float)):
+            continue
+        candidate = r_full.copy()
+        candidate.update(eval_info)
+        key = (
+            float(eval_info.get("opt_score")),
+            float(eval_info.get("valid_expectancy_rr")),
+            float(exp_rr),
+            float(win_rate) if isinstance(win_rate, (int, float)) else -1e9,
+            float(trades),
+        )
+        if best is None:
+            best = candidate
+            best["_key"] = key
+        else:
+            if key > best.get("_key", (-1e18, -1e18, -1e18)):
                 best = candidate
                 best["_key"] = key
-            else:
-                if key > best.get("_key", (-1e18, -1e18, -1e18)):
-                    best = candidate
-                    best["_key"] = key
     if best is None:
         return {
             "symbol": normalize_symbol(symbol),
+            "direction_filter": direction_filter or "BOTH",
             "best": None,
             "evaluated": int(evaluated),
             "computed_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2730,6 +3120,7 @@ def optimize_best_ema_cross_15m(symbol, df):
     best.pop("_key", None)
     return {
         "symbol": normalize_symbol(symbol),
+        "direction_filter": direction_filter or "BOTH",
         "best": best,
         "evaluated": int(evaluated),
         "computed_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -3960,20 +4351,8 @@ class EMACross15m:
             df = _ema_cross_15m_prepare_df(data_15m)
             if df is None or df.empty:
                 return None
-            if best_fast_len is None or best_slow_len is None:
-                opt_meta = optimize_best_ema_cross_15m(sym, df)
-                best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
-                if isinstance(best, dict):
-                    best_fast_len = best.get("fast_len")
-                    best_slow_len = best.get("slow_len")
-                    _ema_cross_15m_set_cached(sym, {"fast_len": best_fast_len, "slow_len": best_slow_len, "opt_meta": opt_meta})
-            try:
-                best_fast_len = int(best_fast_len) if best_fast_len is not None else 12
-                best_slow_len = int(best_slow_len) if best_slow_len is not None else 26
-            except Exception:
-                best_fast_len, best_slow_len = 12, 26
-            if best_fast_len < 2 or best_slow_len < 2 or best_fast_len >= best_slow_len:
-                best_fast_len, best_slow_len = 12, 26
+            use_opt = getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True)
+            best_fast_len, best_slow_len, opt_meta = _resolve_optimized_ema_lengths(sym, df, use_opt=use_opt)
             df["EMA_FAST"] = df["Close"].ewm(span=best_fast_len, adjust=False).mean()
             df["EMA_SLOW"] = df["Close"].ewm(span=best_slow_len, adjust=False).mean()
             df["Zone"] = np.where(df["EMA_FAST"] > df["EMA_SLOW"], 1, -1)
@@ -4334,33 +4713,9 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
         avg_vol = float(df["Volume"].tail(20).mean())
         avg_range_pct = float(((df["High"] - df["Low"]) / df["Close"] * 100).tail(20).mean())
         
-        best_fast_len = None
-        best_slow_len = None
-        opt_meta = None
-        
-        cached = _ema_cross_15m_get_cached(sym)
-        if isinstance(cached, dict):
-            best_fast_len = cached.get("fast_len")
-            best_slow_len = cached.get("slow_len")
-            opt_meta = cached.get("opt_meta")
-            
         use_opt = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", True)
-        if use_opt and (best_fast_len is None or best_slow_len is None):
-            opt_meta = optimize_best_ema_cross_15m(sym, df)
-            best = opt_meta.get("best") if isinstance(opt_meta, dict) else None
-            if isinstance(best, dict):
-                best_fast_len = best.get("fast_len")
-                best_slow_len = best.get("slow_len")
-                _ema_cross_15m_set_cached(sym, {"fast_len": best_fast_len, "slow_len": best_slow_len, "opt_meta": opt_meta})
-        
-        try:
-            best_fast_len = int(best_fast_len) if best_fast_len is not None else 12
-            best_slow_len = int(best_slow_len) if best_slow_len is not None else 26
-        except Exception:
-            best_fast_len, best_slow_len = 12, 26
-            
-        if best_fast_len < 2 or best_slow_len < 2 or best_fast_len >= best_slow_len:
-            best_fast_len, best_slow_len = 12, 26
+        best_fast_len, best_slow_len, opt_meta = _resolve_optimized_ema_lengths(sym, df, use_opt=use_opt, profile_key="default")
+        _, _, sell_opt_meta = _resolve_optimized_ema_lengths(sym, df, use_opt=use_opt, profile_key="sell_only", direction_filter="SELL")
             
         smooth = getattr(config, "ACTIONZONE_15M_SMOOTH", 1)
         try:
@@ -4539,6 +4894,13 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
                     filter_reasons.append("no_bullish_pattern")
                 elif filtered_signal == "SELL" and not bool(df["Bearish_Pattern"].tail(4).any()):
                     filter_reasons.append("no_bearish_pattern")
+            wf_ok, wf_reason, _ = _evaluate_walkforward_gate({"optimizer": opt_meta}, filtered_signal)
+            if not wf_ok:
+                filter_reasons.append(wf_reason)
+            if filtered_signal == "SELL":
+                sell_ok, sell_reason, _ = _evaluate_sell_whitelist_gate({"sell_optimizer": sell_opt_meta})
+                if not sell_ok:
+                    filter_reasons.append(sell_reason)
             
             if filter_reasons:
                 filtered_signal = "WAIT"
@@ -4602,6 +4964,7 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             adx_now=adx_now,
         )
         last_signal_time_str = last_signal_time.strftime("%Y-%m-%d %H:%M") if last_signal_time is not None else None
+        sell_whitelist_ok, sell_whitelist_reason, _ = _evaluate_sell_whitelist_gate({"sell_optimizer": sell_opt_meta})
         return {
             "symbol": sym,
             "signal": filtered_signal,
@@ -4629,6 +4992,9 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             "ema_gap_pct": ema_gap_pct,
             "rvol": rvol,
             "optimizer": opt_meta,
+            "sell_optimizer": sell_opt_meta,
+            "sell_whitelist_ok": bool(sell_whitelist_ok),
+            "sell_whitelist_reason": None if sell_whitelist_ok else sell_whitelist_reason,
             "detected_pattern": detected_pattern,
         }
     except Exception as e:

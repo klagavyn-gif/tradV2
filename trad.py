@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, jsonify
 import argparse
 import json
+import hashlib
 import logging
 import os
 import re
@@ -117,6 +118,8 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
     maxsize=256,
     ttl_seconds=int(getattr(config, "TELEGRAM_ALERT_TTL_SECONDS", 1800)),
 )
+
+_HISTORY_STORE_LOCK = threading.Lock()
 
 try:
     _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
@@ -594,17 +597,53 @@ def _is_actionable_setup_value(value):
     return text not in {"WAIT", "HOLD", "NONE", "NEUTRAL"}
 
 
-def _collect_alert_sources(item, min_conf):
+def _strict_60_mode_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_STRICT_60_MODE", True))
+
+
+def _strict_60_allow_cdc():
+    if not _strict_60_mode_enabled():
+        return True
+    return not bool(getattr(config, "TELEGRAM_ALERT_STRICT_60_EXCLUDE_CDC", True))
+
+
+def _plan_trade_direction(plan):
+    if not isinstance(plan, dict):
+        return None
+    return _normalize_trade_direction(
+        plan.get("signal") or plan.get("raw_signal") or plan.get("setup") or plan.get("recommendation")
+    )
+
+
+def _plan_confidence_value(plan):
+    if not isinstance(plan, dict):
+        return None
+    conf = _normalize_confidence(plan.get("confidence"))
+    if conf is None:
+        conf = _normalize_confidence(plan.get("predicted_win_prob"))
+    if conf is None:
+        conf = _normalize_confidence(plan.get("win_prob"))
+    return conf
+
+
+def _collect_alert_sources(item, min_conf, signal=None, require_quality=False, allow_cdc=True):
     sources = []
 
-    def add(label, plan, setup_key="setup", conf_key="confidence"):
+    def add(label, plan, setup_key="setup", conf_key="confidence", allow_label=True):
+        if not allow_label:
+            return
         if not isinstance(plan, dict):
+            return
+        direction = _plan_trade_direction(plan)
+        if signal in ("BUY", "SELL") and direction != signal:
             return
         conf = _normalize_confidence(plan.get(conf_key))
         if conf is None or conf < min_conf:
             return
         setup = plan.get(setup_key)
         if setup_key in ("setup", "signal") and not _is_actionable_setup_value(setup):
+            return
+        if require_quality and direction in ("BUY", "SELL") and not _passes_entry_quality_gate(plan, direction):
             return
         text = label
         if isinstance(setup, str) and setup.strip():
@@ -616,7 +655,7 @@ def _collect_alert_sources(item, min_conf):
     add("Quantum 15m", item.get("quantum_15m"))
     add("EMA Cross 15m", item.get("ema_cross_15m"), setup_key="signal")
     add("ActionZone 15m", item.get("actionzone_15m"), setup_key="signal")
-    add("CDC+VixFix 15m", item.get("cdc_vixfix_15m"), setup_key="signal")
+    add("CDC+VixFix 15m", item.get("cdc_vixfix_15m"), setup_key="signal", allow_label=allow_cdc)
     add("Crypto Reversal 15m", item.get("crypto_reversal_15m"))
     sources.sort(key=lambda x: x[0], reverse=True)
     return [f"{text} ({conf:.0f}%)" for conf, text in sources[:3]]
@@ -892,13 +931,14 @@ def _evaluate_super_signal(item, signal):
         return False, "not_entry", {}
 
     # 1. Check Confluence & Backtest Stats
+    allow_cdc = _strict_60_allow_cdc()
     strategies = [
-        ("ActionZone", item.get("actionzone_15m")),
-        ("EMACross", item.get("ema_cross_15m")),
-        ("CDCVixFix", item.get("cdc_vixfix_15m")),
-        ("ShortTerm", item.get("short_term_15m")),
-        ("Sniper", item.get("sniper_15m")),
-        ("Quantum", item.get("quantum_15m")),
+        ("ActionZone", item.get("actionzone_15m"), True),
+        ("EMACross", item.get("ema_cross_15m"), True),
+        ("CDCVixFix", item.get("cdc_vixfix_15m"), allow_cdc),
+        ("ShortTerm", item.get("short_term_15m"), True),
+        ("Sniper", item.get("sniper_15m"), True),
+        ("Quantum", item.get("quantum_15m"), True),
     ]
 
     confirmed_strategies = []
@@ -906,14 +946,16 @@ def _evaluate_super_signal(item, signal):
     total_exp = 0.0
     count = 0
     
-    for name, plan in strategies:
+    for name, plan, enabled in strategies:
+        if not enabled:
+            continue
         if not isinstance(plan, dict):
             continue
         
-        plan_sig = _normalize_trade_direction(
-            plan.get("signal") or plan.get("raw_signal") or plan.get("setup") or plan.get("recommendation")
-        )
+        plan_sig = _plan_trade_direction(plan)
         if plan_sig != signal:
+            continue
+        if _strict_60_mode_enabled() and not _passes_entry_quality_gate(plan, signal):
             continue
             
         metrics = _extract_plan_edge_metrics(plan)
@@ -959,7 +1001,12 @@ def _evaluate_super_signal(item, signal):
             return False, "weak_adx", {"adx": adx}
     
     # Quality Gate 4: Candlestick Confirmation
-    primary_plan = _pick_primary_trade_plan(item)
+    primary_plan = _pick_primary_trade_plan(
+        item,
+        signal=signal,
+        require_quality=_strict_60_mode_enabled(),
+        allow_cdc=allow_cdc,
+    )
     pattern = str(primary_plan.get("detected_pattern") or "").upper() if isinstance(primary_plan, dict) else "NONE"
     if pattern == "NONE" or not pattern:
         return False, "no_candlestick_confirmation", {}
@@ -977,23 +1024,33 @@ def _passes_entry_quality_gate(plan, signal):
     return ok
 
 
-def _get_best_confidence(item):
+def _get_best_confidence(item, signal=None, require_quality=False, allow_cdc=True):
     best = None
-    for plan, setup_key, conf_key in (
-        (item.get("short_term_15m"), "setup", "confidence"),
-        (item.get("sniper_15m"), "setup", "confidence"),
-        (item.get("quantum_15m"), "setup", "confidence"),
-        (item.get("ema_cross_15m"), "signal", "confidence"),
-        (item.get("actionzone_15m"), "signal", "confidence"),
-        (item.get("cdc_vixfix_15m"), "signal", "confidence"),
-        (item.get("crypto_reversal_15m"), "setup", "confidence"),
-    ):
+    candidates = [
+        (item.get("short_term_15m"), "setup", "confidence", True),
+        (item.get("sniper_15m"), "setup", "confidence", True),
+        (item.get("quantum_15m"), "setup", "confidence", True),
+        (item.get("ema_cross_15m"), "signal", "confidence", True),
+        (item.get("actionzone_15m"), "signal", "confidence", True),
+        (item.get("cdc_vixfix_15m"), "signal", "confidence", allow_cdc),
+        (item.get("crypto_reversal_15m"), "setup", "confidence", True),
+    ]
+    for plan, setup_key, conf_key, enabled in candidates:
+        if not enabled:
+            continue
         if not isinstance(plan, dict):
             continue
         setup = plan.get(setup_key)
         if setup_key in ("setup", "signal") and not _is_actionable_setup_value(setup):
             continue
+        direction = _plan_trade_direction(plan)
+        if signal in ("BUY", "SELL") and direction != signal:
+            continue
+        if require_quality and direction in ("BUY", "SELL") and not _passes_entry_quality_gate(plan, direction):
+            continue
         conf = _normalize_confidence(plan.get(conf_key))
+        if conf is None:
+            conf = _plan_confidence_value(plan)
         if conf is None:
             continue
         if best is None or conf > best:
@@ -1001,30 +1058,33 @@ def _get_best_confidence(item):
     return best
 
 
-def _pick_primary_trade_plan(item):
+def _pick_primary_trade_plan(item, signal=None, require_quality=False, allow_cdc=True):
     candidates = [
-        item.get("cdc_vixfix_15m"),
-        item.get("actionzone_15m"),
-        item.get("ema_cross_15m"),
-        item.get("short_term_15m"),
-        item.get("sniper_15m"),
-        item.get("quantum_15m"),
-        item.get("crypto_reversal_15m"),
+        (item.get("cdc_vixfix_15m"), allow_cdc),
+        (item.get("actionzone_15m"), True),
+        (item.get("ema_cross_15m"), True),
+        (item.get("short_term_15m"), True),
+        (item.get("sniper_15m"), True),
+        (item.get("quantum_15m"), True),
+        (item.get("crypto_reversal_15m"), True),
     ]
     best_plan = None
     best_conf = -1.0
-    for plan in candidates:
+    for plan, enabled in candidates:
+        if not enabled:
+            continue
         if not isinstance(plan, dict):
             continue
         if "signal" in plan and not _is_actionable_setup_value(plan.get("signal")):
             continue
         if "setup" in plan and not _is_actionable_setup_value(plan.get("setup")):
             continue
-        conf = _normalize_confidence(plan.get("confidence"))
-        if conf is None:
-            conf = _normalize_confidence(plan.get("predicted_win_prob"))
-        if conf is None:
-            conf = _normalize_confidence(plan.get("win_prob"))
+        direction = _plan_trade_direction(plan)
+        if signal in ("BUY", "SELL") and direction != signal:
+            continue
+        if require_quality and direction in ("BUY", "SELL") and not _passes_entry_quality_gate(plan, direction):
+            continue
+        conf = _plan_confidence_value(plan)
         if conf is None:
             conf = 0.0
         if conf > best_conf:
@@ -1065,7 +1125,7 @@ def _append_pattern_context_lines(lines, pattern):
                 lines.append(f'<a href="{url}">📚 อธิบาย Pattern นี้คืออะไร ({label})</a>')
 
 
-def _build_super_signal_message(item, signal, super_meta):
+def _build_super_signal_message(item, signal, super_meta, primary_plan=None):
     emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
     name = _html_escape(str(item.get("name") or "").strip())
@@ -1092,7 +1152,13 @@ def _build_super_signal_message(item, signal, super_meta):
     lines.append(f"<b>📈 คาดการณ์กำไร (ExpRR):</b> {avg_exp:.2f}")
     lines.append(f"<b>🤝 Confluence:</b> " + ", ".join(confluence))
     
-    primary_plan = _pick_primary_trade_plan(item)
+    if not isinstance(primary_plan, dict):
+        primary_plan = _pick_primary_trade_plan(
+            item,
+            signal=signal,
+            require_quality=_strict_60_mode_enabled(),
+            allow_cdc=_strict_60_allow_cdc(),
+        )
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     if pattern and pattern != "None":
         lines.append(f"<b>🕯️ Confirmation Pattern:</b> {_html_escape(pattern)}")
@@ -1121,7 +1187,7 @@ def _build_super_signal_message(item, signal, super_meta):
     return "\n".join(lines)
 
 
-def _build_telegram_message(item, signal, best_conf, sources):
+def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None):
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
     name = _html_escape(str(item.get("name") or "").strip())
@@ -1148,7 +1214,13 @@ def _build_telegram_message(item, signal, best_conf, sources):
     if sources:
         lines.append(f"<b>แหล่งสัญญาณ:</b> " + ", ".join([_html_escape(s) for s in sources]))
         
-    primary_plan = _pick_primary_trade_plan(item)
+    if not isinstance(primary_plan, dict):
+        primary_plan = _pick_primary_trade_plan(
+            item,
+            signal=signal,
+            require_quality=_strict_60_mode_enabled(),
+            allow_cdc=_strict_60_allow_cdc(),
+        )
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     _append_pattern_context_lines(lines, pattern)
     if isinstance(primary_plan, dict):
@@ -1306,9 +1378,9 @@ def _build_actionzone_message(item, az_plan):
 
 def _build_cdc_vixfix_message(item, plan):
     signal = str(plan.get("signal") or "").upper()
-    if signal not in ("BUY", "EXIT", "SELL"):
+    if signal not in ("BUY", "SELL"):
         return None
-    emoji = "🟢" if signal == "BUY" else "🟠" if signal == "EXIT" else "🔴"
+    emoji = "🟢" if signal == "BUY" else "🔴"
     symbol = normalize_symbol(item.get("symbol") or "")
     name = _html_escape(str(item.get("name") or "").strip())
     tv_symbol = symbol.replace("-", "")
@@ -1322,16 +1394,35 @@ def _build_cdc_vixfix_message(item, plan):
     curr_text = _format_price_value(plan.get("current_price", item.get("price")))
     change = item.get("change")
     if entry_text:
-        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
-    if curr_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        price_label = "📍 ราคาปัจจุบัน" if signal in ("BUY", "SELL") else "📍 ราคา"
-        lines.append(f"<b>{price_label}:</b> {curr_text}{change_str}")
-
-    conf = _normalize_confidence(plan.get("confidence"))
-    if conf is not None:
-        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
-
+        move_parts.append(f"จุดเข้า: {entry_text}")
+    if exit_text:
+        move_parts.append(f"จุดออก: {exit_text}")
+    elif tp_text:
+        move_parts.append(f"เป้าหมาย: {tp_text}")
+    if stop_text:
+        move_parts.append(f"SL: {stop_text}")
+        
+    if move_parts:
+        lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
+    if stop_lines:
+        lines.append("────────────────")
+        lines.extend(stop_lines)
+        
+    exit_lines = _format_exit_levels_lines(plan)
+    if exit_lines:
+        if not stop_lines:
+            lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in exit_lines])
+        
+    profit_pct = plan.get("expected_profit_pct")
+    if isinstance(profit_pct, (int, float)):
+        lines.append(f"<b>💹 กำไรคาดการณ์:</b> {profit_pct:+.2f}%")
+        
+    running_pct = plan.get("running_profit_pct")
+    if isinstance(running_pct, (int, float)):
+        lines.append(f"<b>📈 กำไรปัจจุบัน (จากจุดเข้า):</b> {running_pct:+.2f}%")
+        
     exit_trigger = str(plan.get("exit_trigger") or "").strip().upper()
     if exit_trigger:
         trigger_text = exit_trigger
@@ -1339,33 +1430,19 @@ def _build_cdc_vixfix_message(item, plan):
             trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
         elif exit_trigger == "CDC_RED_REVERSAL":
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
-        lines.append("<b>🚨 ทริกเกอร์:</b> " + _html_escape(trigger_text))
-
-    edge = _extract_plan_edge_metrics(plan)
-    stats = []
-    trades = edge.get("trades")
-    win_rate = edge.get("win_rate_pct")
-    exp_rr = edge.get("expectancy_rr")
-    if isinstance(trades, (int, float)):
-        stats.append(f"ย้อนหลัง {int(trades)} ไม้")
-    if isinstance(win_rate, (int, float)):
-        stats.append(f"Win {float(win_rate):.0f}%")
-    if isinstance(exp_rr, (int, float)):
-        stats.append(f"ExpRR {float(exp_rr):.2f}")
-    if stats:
-        lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
-
-    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-
-    exit_lines = _format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in exit_lines])
-
+        lines.append("<b>🚨 ทริกเกอร์จุดออก:</b> " + _html_escape(trigger_text))
+        
+    reason = plan.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
+        
+    pattern = plan.get("detected_pattern")
+    _append_pattern_context_lines(lines, pattern)
+        
+    conf = _normalize_confidence(plan.get("confidence"))
+    if conf is not None:
+        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
+        
     lines.append("────────────────")
     last_signal_time = plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
@@ -1463,7 +1540,7 @@ def _telegram_kill_switch_state(results):
     if not isinstance(results, list) or not results:
         return False, "no-results"
     min_symbols = getattr(config, "TELEGRAM_KILL_SWITCH_MIN_SYMBOLS", 4)
-    exit_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_EXIT_RATIO", 0.50)
+    sell_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_SELL_RATIO", 0.50)
     trend_mismatch_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_TREND_MISMATCH_RATIO", 0.60)
     high_vol_pct = getattr(config, "TELEGRAM_KILL_SWITCH_HIGH_VOL_PCT", 4.0)
     high_vol_ratio_limit = getattr(config, "TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO", 0.50)
@@ -1472,9 +1549,9 @@ def _telegram_kill_switch_state(results):
     except Exception:
         min_symbols = 4
     try:
-        exit_ratio_limit = float(exit_ratio_limit)
+        sell_ratio_limit = float(sell_ratio_limit)
     except Exception:
-        exit_ratio_limit = 0.50
+        sell_ratio_limit = 0.50
     try:
         trend_mismatch_ratio_limit = float(trend_mismatch_ratio_limit)
     except Exception:
@@ -1489,7 +1566,7 @@ def _telegram_kill_switch_state(results):
         high_vol_ratio_limit = 0.50
     if min_symbols < 1:
         min_symbols = 1
-    exit_count = 0
+    sell_count = 0
     valid_count = 0
     az_count = 0
     trend_mismatch_count = 0
@@ -1503,8 +1580,8 @@ def _telegram_kill_switch_state(results):
         if isinstance(cdc_plan, dict):
             cdc_signal = str(cdc_plan.get("signal") or "").upper()
             is_top = bool(cdc_plan.get("is_market_top"))
-            if cdc_signal == "EXIT" or is_top:
-                exit_count += 1
+            if cdc_signal == "SELL" or is_top:
+                sell_count += 1
         az_plan = item.get("actionzone_15m")
         if isinstance(az_plan, dict):
             az_count += 1
@@ -1517,11 +1594,11 @@ def _telegram_kill_switch_state(results):
                     high_vol_count += 1
     if valid_count < min_symbols:
         return False, "insufficient-sample"
-    exit_ratio = float(exit_count) / float(valid_count) if valid_count > 0 else 0.0
+    sell_ratio = float(sell_count) / float(valid_count) if valid_count > 0 else 0.0
     trend_mismatch_ratio = float(trend_mismatch_count) / float(az_count) if az_count > 0 else 0.0
     high_vol_ratio = float(high_vol_count) / float(vol_count) if vol_count > 0 else 0.0
-    if exit_ratio >= exit_ratio_limit:
-        return True, f"exit_ratio={exit_ratio:.2f}"
+    if sell_ratio >= sell_ratio_limit:
+        return True, f"sell_ratio={sell_ratio:.2f}"
     if az_count >= min_symbols and trend_mismatch_ratio >= trend_mismatch_ratio_limit:
         return True, f"trend_mismatch_ratio={trend_mismatch_ratio:.2f}"
     if vol_count >= min_symbols and high_vol_ratio >= high_vol_ratio_limit:
@@ -1609,7 +1686,7 @@ def _actionzone_precision60_profile():
     }
 
 
-def _build_alert_backtest_summary(results, min_conf=None, exit_min_conf=None):
+def _build_alert_backtest_summary(results, min_conf=None):
     if not isinstance(results, list) or not results:
         return {
             "candidate_count": 0,
@@ -1624,18 +1701,12 @@ def _build_alert_backtest_summary(results, min_conf=None, exit_min_conf=None):
         }
     if min_conf is None:
         min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
-    if exit_min_conf is None:
-        exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
     try:
         min_conf = float(min_conf)
     except Exception:
         min_conf = 75.0
-    try:
-        exit_min_conf = float(exit_min_conf)
-    except Exception:
-        exit_min_conf = 60.0
     dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates, _ = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    candidates, _ = _build_telegram_candidates(results, dynamic_min_conf)
     alerts = []
     weighted_wr_sum = 0.0
     weighted_exp_sum = 0.0
@@ -1714,10 +1785,188 @@ def _build_alert_backtest_summary(results, min_conf=None, exit_min_conf=None):
     }
 
 
-def _build_telegram_candidates(results, min_conf, exit_min_conf):
+def _weighted_average_from_rows(rows, value_key, weight_key, digits=None):
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for row in rows or []:
+        value = row.get(value_key) if isinstance(row, dict) else None
+        weight = row.get(weight_key) if isinstance(row, dict) else None
+        if not isinstance(value, (int, float)):
+            continue
+        if not isinstance(weight, (int, float)) or float(weight) <= 0:
+            weight = 1.0
+        weighted_sum += float(value) * float(weight)
+        total_weight += float(weight)
+    if total_weight <= 0:
+        return None
+    result = weighted_sum / total_weight
+    if isinstance(digits, int):
+        return round(result, digits)
+    return result
+
+
+def _round_rule_value(value, digits=2):
+    if not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return round(float(value), int(digits))
+
+
+def _build_actionzone_rule_profile(results, direction):
+    direction = str(direction or "").upper().strip()
+    if direction not in ("BUY", "SELL"):
+        return None
+    optimizer_key = "sell_optimizer" if direction == "SELL" else "optimizer"
+    rows = []
+    passed_rows = []
+    blocked_rows = []
+    for item in results or []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        plan = item.get("actionzone_15m")
+        if not symbol or not isinstance(plan, dict):
+            continue
+        optimizer = plan.get(optimizer_key)
+        best = optimizer.get("best") if isinstance(optimizer, dict) else None
+        if not isinstance(best, dict):
+            continue
+        if direction == "SELL":
+            gate_ok, gate_reason, gate_metrics = _evaluate_sell_whitelist_gate({"sell_optimizer": optimizer})
+        else:
+            gate_ok, gate_reason, gate_metrics = _evaluate_walkforward_gate({"optimizer": optimizer}, direction)
+        trades = gate_metrics.get("valid_trades")
+        if not isinstance(trades, (int, float)) or float(trades) <= 0:
+            trades = best.get("trades")
+        if not isinstance(trades, (int, float)) or float(trades) <= 0:
+            trades = 1.0
+        row = {
+            "symbol": symbol,
+            "passed": bool(gate_ok),
+            "reason": str(gate_reason or "unknown"),
+            "fast_len": best.get("fast_len"),
+            "slow_len": best.get("slow_len"),
+            "trades": best.get("trades"),
+            "win_rate_pct": best.get("win_rate_pct"),
+            "expectancy_rr": best.get("expectancy_rr"),
+            "valid_trades": gate_metrics.get("valid_trades"),
+            "valid_win_rate_pct": gate_metrics.get("valid_win_rate_pct"),
+            "valid_expectancy_rr": gate_metrics.get("valid_expectancy_rr"),
+            "robustness_score": gate_metrics.get("robustness_score"),
+            "weight": float(trades),
+        }
+        rows.append(row)
+        if gate_ok:
+            passed_rows.append(row)
+        else:
+            blocked_rows.append(
+                {
+                    "symbol": symbol,
+                    "reason": str(gate_reason or "unknown"),
+                    "valid_trades": row.get("valid_trades"),
+                    "valid_win_rate_pct": row.get("valid_win_rate_pct"),
+                    "valid_expectancy_rr": row.get("valid_expectancy_rr"),
+                    "robustness_score": row.get("robustness_score"),
+                }
+            )
+    source_rows = passed_rows if passed_rows else rows
+    source_scope = "passed_symbols" if passed_rows else "all_profiles_fallback"
+    consensus_fast = _weighted_average_from_rows(source_rows, "fast_len", "weight", digits=0)
+    consensus_slow = _weighted_average_from_rows(source_rows, "slow_len", "weight", digits=0)
+    consensus_wr = _weighted_average_from_rows(source_rows, "valid_win_rate_pct", "weight", digits=2)
+    consensus_exp = _weighted_average_from_rows(source_rows, "valid_expectancy_rr", "weight", digits=3)
+    consensus_robustness = _weighted_average_from_rows(source_rows, "robustness_score", "weight", digits=1)
+    if consensus_wr is None:
+        consensus_wr = _weighted_average_from_rows(source_rows, "win_rate_pct", "weight", digits=2)
+    if consensus_exp is None:
+        consensus_exp = _weighted_average_from_rows(source_rows, "expectancy_rr", "weight", digits=3)
+    if direction == "SELL":
+        min_wr = _round_rule_value(getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_WIN_RATE", 60.0), 2)
+        min_exp = _round_rule_value(getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_EXPECTANCY_RR", 0.05), 3)
+        min_valid = int(getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_VALID_TRADES", 6))
+        min_robust = _round_rule_value(getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_ROBUSTNESS", 45.0), 1)
+    else:
+        min_wr = _round_rule_value(getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_WIN_RATE", 60.0), 2)
+        min_exp = _round_rule_value(getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_EXPECTANCY_RR", 0.05), 3)
+        min_valid = int(getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_VALID_TRADES", 6))
+        min_robust = _round_rule_value(getattr(config, "TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_ROBUSTNESS", 45.0), 1)
+    filters = {
+        "ema_fast_len": int(consensus_fast) if isinstance(consensus_fast, (int, float)) else None,
+        "ema_slow_len": int(consensus_slow) if isinstance(consensus_slow, (int, float)) else None,
+        "min_rvol": _round_rule_value(getattr(config, "ACTIONZONE_15M_MIN_RVOL", 1.15), 2),
+        "min_ema_gap_pct": _round_rule_value(getattr(config, "ACTIONZONE_15M_MIN_EMA_GAP_PCT", 0.05), 3),
+        "min_atr_pct": _round_rule_value(getattr(config, "ACTIONZONE_15M_MIN_ATR_PCT", 0.15), 3),
+        "max_atr_pct": _round_rule_value(getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.0), 2),
+        "min_adx": _round_rule_value(getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0), 1),
+        "require_ema200_alignment": bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True)),
+        "require_strong_trend": bool(getattr(config, "ACTIONZONE_15M_REQUIRE_STRONG_TREND", True)),
+        "max_bars_since_signal": int(getattr(config, "ACTIONZONE_15M_MAX_BARS_SINCE_SIGNAL", 1)),
+        "stop_atr_mult": _round_rule_value(getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.8), 2),
+        "tp_mult": _round_rule_value(getattr(config, "ACTIONZONE_15M_TP_MULT", 2.0), 2),
+    }
+    validation = {
+        "min_valid_win_rate_pct": min_wr,
+        "min_valid_expectancy_rr": min_exp,
+        "min_valid_trades": min_valid,
+        "min_robustness_score": min_robust,
+        "consensus_valid_win_rate_pct": consensus_wr,
+        "consensus_valid_expectancy_rr": consensus_exp,
+        "consensus_robustness_score": consensus_robustness,
+    }
+    checklist = [
+        f"EMA {filters['ema_fast_len']}/{filters['ema_slow_len']}" if filters.get("ema_fast_len") and filters.get("ema_slow_len") else "EMA ตาม profile ของ symbol",
+        f"RVOL >= {filters['min_rvol']}" if filters.get("min_rvol") is not None else None,
+        f"EMA gap >= {filters['min_ema_gap_pct']}%" if filters.get("min_ema_gap_pct") is not None else None,
+        f"ATR% อยู่ในช่วง {filters['min_atr_pct']}% - {filters['max_atr_pct']}%" if filters.get("min_atr_pct") is not None and filters.get("max_atr_pct") is not None else None,
+        f"ADX >= {filters['min_adx']}" if filters.get("min_adx") is not None else None,
+        "ราคาอยู่ฝั่งเดียวกับ EMA200" if filters.get("require_ema200_alignment") else None,
+        "เทรนด์ 1H ต้องสอดคล้อง" if filters.get("require_strong_trend") else None,
+        f"สัญญาณใหม่ไม่เกิน {filters['max_bars_since_signal']} แท่ง" if filters.get("max_bars_since_signal") is not None else None,
+        f"Walk-forward WR >= {validation['min_valid_win_rate_pct']}%" if validation.get("min_valid_win_rate_pct") is not None else None,
+        f"Walk-forward ExpRR >= {validation['min_valid_expectancy_rr']}" if validation.get("min_valid_expectancy_rr") is not None else None,
+        f"Valid trades >= {validation['min_valid_trades']}" if validation.get("min_valid_trades") is not None else None,
+    ]
+    if direction == "SELL":
+        checklist.append("ผ่าน sell whitelist")
+    checklist = [line for line in checklist if line]
+    return {
+        "strategy": "ActionZone 15m",
+        "direction": direction,
+        "generated_from": "backtest+walkforward",
+        "profile_count": len(rows),
+        "passed_count": len(passed_rows),
+        "consensus_scope": source_scope,
+        "use_for_alerts": bool(passed_rows),
+        "filters": filters,
+        "validation": validation,
+        "checklist": checklist,
+        "eligible_symbols": [row["symbol"] for row in passed_rows],
+        "blocked_symbols": blocked_rows[:10],
+        "symbol_profiles": rows,
+    }
+
+
+def _build_backtest_rulebook(results):
+    return {
+        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M"),
+        "strategies": {
+            "actionzone_15m": {
+                "buy": _build_actionzone_rule_profile(results, "BUY"),
+                "sell": _build_actionzone_rule_profile(results, "SELL"),
+            }
+        },
+        "notes": [
+            "Rulebook นี้สรุปจาก optimizer และ walk-forward ที่ระบบคำนวณอยู่แล้ว",
+            "เหมาะสำหรับใช้เป็น profile ตอนแจ้งเตือน โดยไม่ต้อง backtest ยาวทุกครั้ง",
+        ],
+    }
+
+
+def _build_telegram_candidates(results, min_conf):
     candidates = []
     quality_drop_counts = Counter()
     precision60 = _actionzone_precision60_profile()
+    strict_60 = _strict_60_mode_enabled()
+    allow_cdc = _strict_60_allow_cdc()
     for item in results:
         if not isinstance(item, dict) or item.get("error"):
             continue
@@ -1729,7 +1978,13 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
         for sig in ("BUY", "SELL"):
             ss_ok, ss_reason, ss_meta = _evaluate_super_signal(item, sig)
             if ss_ok:
-                ss_message = _build_super_signal_message(item, sig, ss_meta)
+                ss_plan = _pick_primary_trade_plan(
+                    item,
+                    signal=sig,
+                    require_quality=strict_60,
+                    allow_cdc=allow_cdc,
+                )
+                ss_message = _build_super_signal_message(item, sig, ss_meta, primary_plan=ss_plan)
                 if ss_message:
                     # Give Super Signal a very high score to ensure it's sent first
                     score = 1000.0 + (float(ss_meta.get("avg_wr", 0)) * 2.0)
@@ -1739,7 +1994,7 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                         "signal": sig,
                         "score": score,
                         "confidence": float(ss_meta.get("avg_wr", 0)),
-                        "plan": _pick_primary_trade_plan(item),
+                        "plan": ss_plan,
                         "edge_metrics": ss_meta,
                         "message": ss_message,
                         "cache_key": f"SS15|{symbol}|{sig}|{get_thai_now().strftime('%Y%m%d%H')}", # Hourly cache
@@ -1749,8 +2004,8 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
         if isinstance(cdc_plan, dict):
             cdc_signal = str(cdc_plan.get("signal") or "").upper()
             cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
-            required_conf = float(exit_min_conf) if cdc_signal == "EXIT" else float(min_conf)
-            if cdc_signal in ("BUY", "EXIT", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
+            required_conf = float(min_conf)
+            if cdc_signal in ("BUY", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
                 cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
                 if cdc_message:
                     edge = _extract_plan_edge_metrics(cdc_plan)
@@ -1758,8 +2013,8 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                     last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
                     if not last_signal_time:
                         freshness = 2.0
-                    trigger = str(cdc_plan.get("exit_trigger") or "").upper().strip()
-                    score = float(cdc_conf) + freshness + (10.0 if cdc_signal == "EXIT" else 4.0)
+                    trigger = str(cdc_plan.get("sell_trigger") or "").upper().strip()
+                    score = float(cdc_conf) + freshness + (6.0 if cdc_signal == "SELL" else 4.0)
                     if trigger == "VIXFIX_TOP":
                         score += 5.0
                     # Boost SELL signals with high confidence
@@ -1846,10 +2101,24 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
 
         signal = str(item.get("signal") or "").upper()
         if signal in ("BUY", "SELL"):
-            best_conf = _get_best_confidence(item)
+            best_conf = _get_best_confidence(item, signal=signal, require_quality=strict_60, allow_cdc=allow_cdc)
             if best_conf is not None and best_conf >= min_conf:
-                sources = _collect_alert_sources(item, min_conf)
-                primary_plan = _pick_primary_trade_plan(item)
+                sources = _collect_alert_sources(
+                    item,
+                    min_conf,
+                    signal=signal,
+                    require_quality=strict_60,
+                    allow_cdc=allow_cdc,
+                )
+                primary_plan = _pick_primary_trade_plan(
+                    item,
+                    signal=signal,
+                    require_quality=strict_60,
+                    allow_cdc=allow_cdc,
+                )
+                if not isinstance(primary_plan, dict):
+                    quality_drop_counts["no_primary_plan_after_strict_gate"] += 1
+                    continue
                 gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(primary_plan, signal)
                 if not gate_ok:
                     quality_drop_counts[gate_reason] += 1
@@ -1867,7 +2136,7 @@ def _build_telegram_candidates(results, min_conf, exit_min_conf):
                 source_count = len(sources)
                 if source_count < max(1, min_sources) and float(best_conf) < float(single_source_min_conf):
                     continue
-                message = _build_telegram_message(item, signal, best_conf, sources)
+                message = _build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
                 if message:
                     source_bonus = min(8.0, float(len(sources)) * 1.5)
                     score = float(best_conf) + source_bonus
@@ -1908,7 +2177,6 @@ def _notify_telegram_from_results(results):
         logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
         return 0
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
-    exit_min_conf = getattr(config, "TELEGRAM_ALERT_EXIT_MIN_CONFIDENCE", 60.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
     max_per_symbol = getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1)
     cooldown_minutes = getattr(config, "TELEGRAM_ALERT_COOLDOWN_MINUTES", 30)
@@ -1916,10 +2184,6 @@ def _notify_telegram_from_results(results):
         min_conf = float(min_conf)
     except Exception:
         min_conf = 75.0
-    try:
-        exit_min_conf = float(exit_min_conf)
-    except Exception:
-        exit_min_conf = 60.0
     try:
         max_per_run = int(max_per_run)
     except Exception:
@@ -1939,7 +2203,7 @@ def _notify_telegram_from_results(results):
     if cooldown_minutes < 1:
         cooldown_minutes = 1
     dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf, exit_min_conf)
+    candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
     quality_drop_counts = {}
     if isinstance(build_stats, dict):
         quality_drop_counts = build_stats.get("quality_drop_counts") or {}
@@ -2097,6 +2361,137 @@ def _normalize_price_columns(df, symbol=None):
     return df
 
 
+def _history_store_enabled():
+    return bool(getattr(config, "YF_HISTORY_STORE_ENABLE", True))
+
+
+def _history_store_dir():
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".data", "yf_history")
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
+
+
+def _history_store_file_path(symbol, interval, auto_adjust):
+    sym = normalize_symbol(symbol)
+    interval_text = str(interval or "1d").lower()
+    adj_text = "adj" if bool(auto_adjust) else "raw"
+    safe_symbol = re.sub(r"[^A-Z0-9_-]+", "_", sym or "UNKNOWN")
+    digest = hashlib.sha1(f"{safe_symbol}|{interval_text}|{adj_text}".encode("utf-8")).hexdigest()[:10]
+    return os.path.join(_history_store_dir(), f"{safe_symbol}_{interval_text}_{adj_text}_{digest}.csv")
+
+
+def _history_store_read(symbol, interval=None, auto_adjust=True):
+    if not _history_store_enabled():
+        return None
+    path = _history_store_file_path(symbol, interval, auto_adjust)
+    if not os.path.exists(path):
+        return None
+    try:
+        df = pd.read_csv(path)
+        if df.empty or "Datetime" not in df.columns:
+            return None
+        df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
+        df = df.dropna(subset=["Datetime"]).set_index("Datetime").sort_index()
+        df = _normalize_df_index(df)
+        df = _normalize_price_columns(df, symbol)
+        return df if df is not None and not df.empty else None
+    except Exception:
+        return None
+
+
+def _history_store_write(symbol, interval, auto_adjust, df):
+    if not _history_store_enabled() or df is None or getattr(df, "empty", True):
+        return
+    path = _history_store_file_path(symbol, interval, auto_adjust)
+    try:
+        out = df.copy()
+        out = _normalize_df_index(out)
+        out = _normalize_price_columns(out, symbol)
+        if out is None or out.empty:
+            return
+        out = out.sort_index()
+        out.index.name = "Datetime"
+        out = out.reset_index()
+        with _HISTORY_STORE_LOCK:
+            out.to_csv(path, index=False)
+    except Exception:
+        return
+
+
+def _history_store_merge(existing_df, new_df, symbol=None):
+    frames = []
+    if isinstance(existing_df, pd.DataFrame) and not existing_df.empty:
+        frames.append(existing_df.copy())
+    if isinstance(new_df, pd.DataFrame) and not new_df.empty:
+        frames.append(new_df.copy())
+    if not frames:
+        return None
+    merged = pd.concat(frames, axis=0)
+    merged = _normalize_df_index(merged)
+    merged = _normalize_price_columns(merged, symbol)
+    if merged is None or merged.empty:
+        return None
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    keep_rows = getattr(config, "YF_HISTORY_STORE_MAX_ROWS", 0)
+    try:
+        keep_rows = int(keep_rows)
+    except Exception:
+        keep_rows = 0
+    if keep_rows > 0 and len(merged) > keep_rows:
+        merged = merged.tail(keep_rows).copy()
+    return merged
+
+
+def _period_to_timedelta(period):
+    text = str(period or "").strip().lower()
+    if not text:
+        return None
+    if text == "ytd":
+        now = get_thai_now()
+        return now - datetime(now.year, 1, 1)
+    m = re.match(r"^(\d+)(m|mo|h|d|wk|w|y)$", text)
+    if not m:
+        return None
+    value = int(m.group(1))
+    unit = m.group(2)
+    if unit == "h":
+        return timedelta(hours=value)
+    if unit == "d":
+        return timedelta(days=value)
+    if unit in ("w", "wk"):
+        return timedelta(weeks=value)
+    if unit in ("m", "mo"):
+        return timedelta(days=value * 30)
+    if unit == "y":
+        return timedelta(days=value * 365)
+    return None
+
+
+def _slice_history_by_period(df, period):
+    if df is None or getattr(df, "empty", True):
+        return df
+    delta = _period_to_timedelta(period)
+    if delta is None:
+        return df.copy()
+    end_ts = df.index.max()
+    if pd.isna(end_ts):
+        return df.copy()
+    cutoff = end_ts - delta
+    sliced = df[df.index >= cutoff].copy()
+    return sliced if not sliced.empty else df.copy()
+
+
+def _remote_history_period(period, interval):
+    text = str(period or "").strip().lower()
+    if not text:
+        return period
+    delta = _period_to_timedelta(text)
+    intraday = str(interval or "").strip().lower() in {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
+    if intraday and isinstance(delta, timedelta) and delta > timedelta(days=60):
+        return "60d"
+    return period
+
+
 def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
     sym = normalize_symbol(symbol)
     if not sym:
@@ -2107,19 +2502,23 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
         return None
     if isinstance(cached, pd.DataFrame) and not cached.empty:
         return cached.copy()
+    disk_df = None
+    if interval:
+        disk_df = _history_store_read(sym, interval=interval, auto_adjust=auto_adjust)
     _configure_yf_tz_cache()
     for attempt in range(2):
         try:
             session = _get_thread_curl_session()
             ticker = yf.Ticker(sym, session=session)
+            remote_period = _remote_history_period(period, interval)
             if interval:
-                df = ticker.history(period=period, interval=interval, auto_adjust=auto_adjust)
+                df = ticker.history(period=remote_period, interval=interval, auto_adjust=auto_adjust)
             else:
-                df = ticker.history(period=period, auto_adjust=auto_adjust)
+                df = ticker.history(period=remote_period, auto_adjust=auto_adjust)
             if df is None or df.empty:
                 # Fallback: yfinance Ticker.history may sporadically return empty.
                 dl_kwargs = {
-                    "period": period,
+                    "period": remote_period,
                     "auto_adjust": auto_adjust,
                     "progress": False,
                     "threads": False,
@@ -2157,12 +2556,22 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                     except Exception:
                         df = None
                 if df is None or df.empty:
+                    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
+                        sliced_disk = _slice_history_by_period(disk_df, period)
+                        _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
+                        return sliced_disk.copy()
                     _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
                     return None
             df = _normalize_df_index(df)
             df = _normalize_price_columns(df, sym)
-            _YF_CACHE.set(key, df, ttl_seconds=cache_ttl_seconds)
-            return df.copy()
+            if interval:
+                merged_df = _history_store_merge(disk_df, df, symbol=sym)
+                if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                    df = merged_df
+                    _history_store_write(sym, interval, auto_adjust, merged_df)
+            sliced_df = _slice_history_by_period(df, period)
+            _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
+            return sliced_df.copy()
         except Exception as e:
             msg = str(e).lower()
             if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
@@ -2176,8 +2585,16 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                 )
                 continue
             logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
+            if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
+                sliced_disk = _slice_history_by_period(disk_df, period)
+                _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
+                return sliced_disk.copy()
             _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
             return None
+    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
+        sliced_disk = _slice_history_by_period(disk_df, period)
+        _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
+        return sliced_disk.copy()
     _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
     return None
 
@@ -2320,6 +2737,72 @@ def _add_price_patterns(df):
                          np.where(df["Bearish_Pinbar"], "Bearish Pinbar", "None"))))
     
     return df
+
+
+def _recent_pattern_confirmation(df, idx, direction, lookback_bars=3, mode="engulfing_pinbar"):
+    if df is None or getattr(df, "empty", True):
+        return False, "None", None
+    if direction not in ("BUY", "SELL"):
+        return False, "None", None
+    try:
+        idx = int(idx)
+        lookback_bars = max(1, int(lookback_bars))
+    except Exception:
+        return False, "None", None
+    if idx < 0 or idx >= len(df):
+        return False, "None", None
+    mode_text = str(mode or "engulfing_pinbar").strip().lower()
+    start = max(0, idx - lookback_bars + 1)
+    window = df.iloc[start: idx + 1]
+    if window.empty:
+        return False, "None", None
+    if direction == "BUY":
+        allowed = {"bullish engulfing", "bullish pinbar"}
+    else:
+        allowed = {"bearish engulfing", "bearish pinbar"}
+    names = window["Pattern_Name"].tolist() if "Pattern_Name" in window.columns else []
+    for rel_i in range(len(window) - 1, -1, -1):
+        raw_name = str(names[rel_i] or "").strip()
+        if not raw_name or raw_name.lower() not in allowed:
+            continue
+        abs_i = start + rel_i
+        if mode_text == "engulfing_only" and "engulfing" not in raw_name.lower():
+            continue
+        if mode_text == "pinbar_only" and "pinbar" not in raw_name.lower():
+            continue
+        return True, raw_name, abs_i
+    return False, "None", None
+
+
+def _candle_based_risk(df, idx, direction, atr_value, default_stop, buffer_atr=0.15):
+    if df is None or getattr(df, "empty", True):
+        return None
+    if direction not in ("BUY", "SELL"):
+        return None
+    try:
+        idx = int(idx)
+    except Exception:
+        return None
+    if idx < 0 or idx >= len(df):
+        return None
+    try:
+        default_stop = float(default_stop)
+    except Exception:
+        return None
+    try:
+        atr_buf = float(buffer_atr)
+    except Exception:
+        atr_buf = 0.15
+    atr_component = 0.0
+    if isinstance(atr_value, (int, float)) and float(atr_value) > 0:
+        atr_component = float(atr_value) * max(0.0, atr_buf)
+    low_i = float(df["Low"].iloc[idx]) if pd.notna(df["Low"].iloc[idx]) else None
+    high_i = float(df["High"].iloc[idx]) if pd.notna(df["High"].iloc[idx]) else None
+    if direction == "BUY" and low_i is not None:
+        return float(min(default_stop, low_i - atr_component))
+    if direction == "SELL" and high_i is not None:
+        return float(max(default_stop, high_i + atr_component))
+    return float(default_stop)
 
 
 def _ema_cross_15m_prepare_df(raw_df):
@@ -2529,25 +3012,29 @@ def _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=5.0, max_forward=64,
         return None
     if tp_mult <= 0 or max_forward < 1:
         return None
-    stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
+    stop_mult = getattr(config, "EMA_CROSS_15M_STOP_ATR_MULT", getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5))
     try:
         stop_mult = float(stop_mult)
     except Exception:
         stop_mult = 1.5
     if stop_mult <= 0:
         stop_mult = 1.0
-    min_rvol = getattr(config, "ACTIONZONE_15M_MIN_RVOL", 1.15)
-    min_ema_gap_pct = getattr(config, "ACTIONZONE_15M_MIN_EMA_GAP_PCT", 0.05)
-    min_atr_pct = getattr(config, "ACTIONZONE_15M_MIN_ATR_PCT", 0.15)
-    max_atr_pct = getattr(config, "ACTIONZONE_15M_MAX_ATR_PCT", 6.00)
-    min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
-    require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
-    require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", False))
-    time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
-    tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
-    tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
-    move_sl_to_be = bool(getattr(config, "ACTIONZONE_15M_MOVE_SL_TO_BE", True))
-    trailing_atr_mult = getattr(config, "ACTIONZONE_15M_TRAILING_ATR_MULT", None)
+    min_rvol = getattr(config, "EMA_CROSS_15M_MIN_RVOL", 1.0)
+    min_ema_gap_pct = getattr(config, "EMA_CROSS_15M_MIN_EMA_GAP_PCT", 0.03)
+    min_atr_pct = getattr(config, "EMA_CROSS_15M_MIN_ATR_PCT", 0.10)
+    max_atr_pct = getattr(config, "EMA_CROSS_15M_MAX_ATR_PCT", 6.00)
+    min_adx = getattr(config, "EMA_CROSS_15M_MIN_ADX", 18.0)
+    require_ema200_alignment = bool(getattr(config, "EMA_CROSS_15M_REQUIRE_EMA200_ALIGNMENT", True))
+    require_pattern = bool(getattr(config, "EMA_CROSS_15M_REQUIRE_PATTERN", False))
+    pattern_lookback = getattr(config, "EMA_CROSS_15M_PATTERN_LOOKBACK_BARS", 3)
+    pattern_mode = getattr(config, "EMA_CROSS_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
+    use_candle_stop = bool(getattr(config, "EMA_CROSS_15M_USE_CANDLE_STOP", True))
+    candle_stop_buffer_atr = getattr(config, "EMA_CROSS_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
+    time_stop_bars = getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", max_forward)
+    tp1_r = 1.0
+    tp1_fraction = 0.0
+    move_sl_to_be = False
+    trailing_atr_mult = None
     try:
         min_rvol = float(min_rvol)
     except Exception:
@@ -2695,6 +3182,16 @@ def _actionzone_eval_candidate(train_res, valid_res, min_trades=8, min_valid_tra
     valid_exp = valid_res.get("expectancy_rr")
     train_win = train_res.get("win_rate_pct")
     valid_win = valid_res.get("win_rate_pct")
+    target_win_rate = getattr(config, "ACTIONZONE_15M_OPT_TARGET_WIN_RATE", 60.0)
+    target_expectancy = getattr(config, "ACTIONZONE_15M_OPT_TARGET_EXPECTANCY_RR", 0.08)
+    try:
+        target_win_rate = float(target_win_rate)
+    except Exception:
+        target_win_rate = 60.0
+    try:
+        target_expectancy = float(target_expectancy)
+    except Exception:
+        target_expectancy = 0.08
     if not isinstance(train_trades, int) or train_trades < int(min_trades):
         return None
     if not isinstance(valid_trades, int) or valid_trades < int(min_valid_trades):
@@ -2706,14 +3203,30 @@ def _actionzone_eval_candidate(train_res, valid_res, min_trades=8, min_valid_tra
     robust_valid = min(1.0, float(valid_trades) / float(max(int(min_valid_trades) * 2, 8)))
     robustness = 0.65 * robust_train + 0.35 * robust_valid
     consistency_penalty = abs(float(train_exp) - float(valid_exp))
-    win_edge = ((float(valid_win) - 50.0) / 100.0) if isinstance(valid_win, (int, float)) else 0.0
-    # Practical objective: prefer high validation expectancy, enough trade count,
-    # and stable train/validation behavior (low overfitting gap).
+    valid_win_val = float(valid_win) if isinstance(valid_win, (int, float)) else None
+    train_win_val = float(train_win) if isinstance(train_win, (int, float)) else None
+    win_edge = ((valid_win_val - 50.0) / 100.0) if valid_win_val is not None else 0.0
+    win_target_bonus = 0.0
+    if valid_win_val is not None:
+        if valid_win_val >= target_win_rate:
+            win_target_bonus += min(0.55, (valid_win_val - target_win_rate) / 40.0)
+        else:
+            win_target_bonus -= min(0.85, (target_win_rate - valid_win_val) / 18.0)
+    exp_target_bonus = 0.0
+    if float(valid_exp) >= target_expectancy:
+        exp_target_bonus += min(0.35, (float(valid_exp) - target_expectancy) / max(0.05, target_expectancy + 0.20))
+    else:
+        exp_target_bonus -= min(0.45, (target_expectancy - float(valid_exp)) / max(0.05, target_expectancy + 0.15))
+    train_valid_win_gap = abs(float(train_win_val) - float(valid_win_val)) / 100.0 if train_win_val is not None and valid_win_val is not None else 0.0
+    # Practical objective: prefer validation win rate near/above 60%, keep expectancy positive,
+    # and penalize unstable train/validation behavior.
     opt_score = (
-        (float(valid_exp) * 0.58)
-        + (float(train_exp) * 0.24)
-        + (win_edge * 0.18)
-    ) * (0.60 + 0.40 * robustness) - (consistency_penalty * 0.35)
+        (win_edge * 0.52)
+        + (float(valid_exp) * 0.28)
+        + (float(train_exp) * 0.12)
+        + win_target_bonus
+        + exp_target_bonus
+    ) * (0.58 + 0.42 * robustness) - (consistency_penalty * 0.32) - (train_valid_win_gap * 0.25)
     return {
         "train_trades": int(train_trades),
         "valid_trades": int(valid_trades),
@@ -2721,6 +3234,70 @@ def _actionzone_eval_candidate(train_res, valid_res, min_trades=8, min_valid_tra
         "valid_expectancy_rr": float(valid_exp),
         "train_win_rate_pct": float(train_win) if isinstance(train_win, (int, float)) else None,
         "valid_win_rate_pct": float(valid_win) if isinstance(valid_win, (int, float)) else None,
+        "consistency_penalty": float(consistency_penalty),
+        "robustness_score": float(robustness * 100.0),
+        "opt_score": float(opt_score),
+    }
+
+
+def _ema_cross_eval_candidate(train_res, valid_res, min_trades=8, min_valid_trades=4):
+    if not isinstance(train_res, dict) or not isinstance(valid_res, dict):
+        return None
+    train_trades = train_res.get("trades")
+    valid_trades = valid_res.get("trades")
+    train_exp = train_res.get("expectancy_rr")
+    valid_exp = valid_res.get("expectancy_rr")
+    train_win = train_res.get("win_rate_pct")
+    valid_win = valid_res.get("win_rate_pct")
+    target_win_rate = getattr(config, "EMA_CROSS_15M_OPT_TARGET_WIN_RATE", 60.0)
+    target_expectancy = getattr(config, "EMA_CROSS_15M_OPT_TARGET_EXPECTANCY_RR", 0.10)
+    try:
+        target_win_rate = float(target_win_rate)
+    except Exception:
+        target_win_rate = 60.0
+    try:
+        target_expectancy = float(target_expectancy)
+    except Exception:
+        target_expectancy = 0.10
+    if not isinstance(train_trades, int) or train_trades < int(min_trades):
+        return None
+    if not isinstance(valid_trades, int) or valid_trades < int(min_valid_trades):
+        return None
+    if not isinstance(train_exp, (int, float)) or not isinstance(valid_exp, (int, float)):
+        return None
+    if not isinstance(train_win, (int, float)) or not isinstance(valid_win, (int, float)):
+        return None
+    target_trades = max(int(min_trades) * 2, 16)
+    robust_train = min(1.0, float(train_trades) / float(target_trades))
+    robust_valid = min(1.0, float(valid_trades) / float(max(int(min_valid_trades) * 2, 10)))
+    robustness = 0.60 * robust_train + 0.40 * robust_valid
+    consistency_penalty = abs(float(train_exp) - float(valid_exp))
+    valid_win_val = float(valid_win)
+    train_win_val = float(train_win)
+    win_edge = (valid_win_val - 50.0) / 100.0
+    if valid_win_val >= target_win_rate:
+        win_target_bonus = min(0.70, (valid_win_val - target_win_rate) / 35.0)
+    else:
+        win_target_bonus = -min(1.05, (target_win_rate - valid_win_val) / 14.0)
+    if float(valid_exp) >= target_expectancy:
+        exp_target_bonus = min(0.30, (float(valid_exp) - target_expectancy) / max(0.05, target_expectancy + 0.20))
+    else:
+        exp_target_bonus = -min(0.55, (target_expectancy - float(valid_exp)) / max(0.05, target_expectancy + 0.10))
+    train_valid_win_gap = abs(train_win_val - valid_win_val) / 100.0
+    opt_score = (
+        (win_edge * 0.68)
+        + (float(valid_exp) * 0.18)
+        + (float(train_exp) * 0.07)
+        + win_target_bonus
+        + exp_target_bonus
+    ) * (0.56 + 0.44 * robustness) - (consistency_penalty * 0.28) - (train_valid_win_gap * 0.34)
+    return {
+        "train_trades": int(train_trades),
+        "valid_trades": int(valid_trades),
+        "train_expectancy_rr": float(train_exp),
+        "valid_expectancy_rr": float(valid_exp),
+        "train_win_rate_pct": float(train_win_val),
+        "valid_win_rate_pct": float(valid_win_val),
         "consistency_penalty": float(consistency_penalty),
         "robustness_score": float(robustness * 100.0),
         "opt_score": float(opt_score),
@@ -2760,6 +3337,10 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
     min_adx = getattr(config, "ACTIONZONE_15M_MIN_ADX", 24.0)
     require_ema200_alignment = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_EMA200_ALIGNMENT", True))
     require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", False))
+    pattern_lookback = getattr(config, "ACTIONZONE_15M_PATTERN_LOOKBACK_BARS", 3)
+    pattern_mode = getattr(config, "ACTIONZONE_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
+    use_candle_stop = bool(getattr(config, "ACTIONZONE_15M_USE_CANDLE_STOP", True))
+    candle_stop_buffer_atr = getattr(config, "ACTIONZONE_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
     time_stop_bars = getattr(config, "ACTIONZONE_15M_TIME_STOP_BARS", None)
     tp1_r = getattr(config, "ACTIONZONE_15M_TP1_R", 1.0)
     tp1_fraction = getattr(config, "ACTIONZONE_15M_TP1_FRACTION", 0.5)
@@ -2840,13 +3421,19 @@ def backtest_actionzone_15m(symbol, yf_period=None, tp_mult=None, max_forward=No
                     continue
                 if direction_i == "SELL" and float(entry_i) > float(ema200_i):
                     continue
-        if require_pattern:
-            if direction_i == "BUY" and not bool(df["Bullish_Pattern"].iloc[max(0, i-3):i+1].any()):
-                continue
-            if direction_i == "SELL" and not bool(df["Bearish_Pattern"].iloc[max(0, i-3):i+1].any()):
-                continue
+        pattern_ok, _, pattern_idx = _recent_pattern_confirmation(df, i, direction_i, lookback_bars=pattern_lookback, mode=pattern_mode)
+        if require_pattern and not pattern_ok:
+            continue
         risk_i = float(atr_i * stop_mult)
         sl_i = entry_i - risk_i if direction_i == "BUY" else entry_i + risk_i
+        if use_candle_stop:
+            stop_ref_idx = pattern_idx if isinstance(pattern_idx, int) else i
+            candle_sl_i = _candle_based_risk(df, stop_ref_idx, direction_i, atr_i, sl_i, buffer_atr=candle_stop_buffer_atr)
+            if isinstance(candle_sl_i, (int, float)):
+                sl_i = float(candle_sl_i)
+                risk_i = abs(float(entry_i) - float(sl_i))
+        if not isinstance(risk_i, (int, float)) or float(risk_i) <= 0:
+            continue
         tp_i = entry_i + risk_i * tp_mult if direction_i == "BUY" else entry_i - risk_i * tp_mult
         rr = _actionzone_simulate_trade_rr(
             df,
@@ -2976,21 +3563,21 @@ def optimize_best_ema_cross_15m(symbol, df, direction_filter=None):
     direction_filter = str(direction_filter or "").upper().strip()
     if direction_filter not in ("", "BUY", "SELL"):
         direction_filter = ""
-    enable = getattr(config, "ACTIONZONE_15M_USE_OPTIMIZATION", getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True))
+    enable = getattr(config, "EMA_CROSS_15M_ENABLE_OPTIMIZATION", True)
     if not enable:
         return None
-    fast_min = getattr(config, "ACTIONZONE_15M_FAST_MIN", getattr(config, "EMA_CROSS_15M_FAST_MIN", 6))
-    fast_max = getattr(config, "ACTIONZONE_15M_FAST_MAX", getattr(config, "EMA_CROSS_15M_FAST_MAX", 24))
-    fast_step = getattr(config, "ACTIONZONE_15M_FAST_STEP", getattr(config, "EMA_CROSS_15M_FAST_STEP", 2))
-    slow_min = getattr(config, "ACTIONZONE_15M_SLOW_MIN", getattr(config, "EMA_CROSS_15M_SLOW_MIN", 18))
-    slow_max = getattr(config, "ACTIONZONE_15M_SLOW_MAX", getattr(config, "EMA_CROSS_15M_SLOW_MAX", 80))
-    slow_step = getattr(config, "ACTIONZONE_15M_SLOW_STEP", getattr(config, "EMA_CROSS_15M_SLOW_STEP", 2))
-    min_trades = getattr(config, "ACTIONZONE_15M_MIN_TRADES", getattr(config, "EMA_CROSS_15M_MIN_TRADES", 8))
-    tp_mult = getattr(config, "ACTIONZONE_15M_TP_MULT", getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0))
-    max_forward = getattr(config, "ACTIONZONE_15M_MAX_FORWARD_BARS", getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64))
-    min_valid_trades = getattr(config, "ACTIONZONE_15M_MIN_VALID_TRADES", 4)
-    train_ratio = getattr(config, "ACTIONZONE_15M_OPT_TRAIN_RATIO", 0.70)
-    max_evaluated = getattr(config, "ACTIONZONE_15M_OPT_MAX_EVALUATED", 96)
+    fast_min = getattr(config, "EMA_CROSS_15M_FAST_MIN", 6)
+    fast_max = getattr(config, "EMA_CROSS_15M_FAST_MAX", 24)
+    fast_step = getattr(config, "EMA_CROSS_15M_FAST_STEP", 2)
+    slow_min = getattr(config, "EMA_CROSS_15M_SLOW_MIN", 18)
+    slow_max = getattr(config, "EMA_CROSS_15M_SLOW_MAX", 80)
+    slow_step = getattr(config, "EMA_CROSS_15M_SLOW_STEP", 2)
+    min_trades = getattr(config, "EMA_CROSS_15M_MIN_TRADES", 8)
+    tp_mult = getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0)
+    max_forward = getattr(config, "EMA_CROSS_15M_MAX_FORWARD_BARS", 64)
+    min_valid_trades = getattr(config, "EMA_CROSS_15M_MIN_VALID_TRADES", 4)
+    train_ratio = getattr(config, "EMA_CROSS_15M_OPT_TRAIN_RATIO", 0.70)
+    max_evaluated = getattr(config, "EMA_CROSS_15M_OPT_MAX_EVALUATED", 180)
     try:
         fast_min = int(fast_min)
         fast_max = int(fast_max)
@@ -3067,7 +3654,7 @@ def optimize_best_ema_cross_15m(symbol, df, direction_filter=None):
             r_full = _backtest_ema_cross_15m(df, fast_len, slow_len, tp_mult=tp_mult, max_forward=max_forward, direction_filter=direction_filter or None)
         except Exception as e:
             logger.warning(
-                "ActionZone optimizer failed for %s at fast=%s slow=%s: %s",
+                "EMA Cross optimizer failed for %s at fast=%s slow=%s: %s",
                 normalize_symbol(symbol),
                 fast_len,
                 slow_len,
@@ -3077,7 +3664,7 @@ def optimize_best_ema_cross_15m(symbol, df, direction_filter=None):
         evaluated += 1
         if not r_train or not r_valid or not r_full:
             continue
-        eval_info = _actionzone_eval_candidate(r_train, r_valid, min_trades=min_trades, min_valid_trades=min_valid_trades)
+        eval_info = _ema_cross_eval_candidate(r_train, r_valid, min_trades=min_trades, min_valid_trades=min_valid_trades)
         if not isinstance(eval_info, dict):
             continue
         trades = r_full.get("trades")
@@ -4881,10 +5468,23 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
                     filter_reasons.append("above_ema200")
             
             require_pattern = bool(getattr(config, "ACTIONZONE_15M_REQUIRE_PATTERN", True))
-            if require_pattern:
-                if filtered_signal == "BUY" and not bool(df["Bullish_Pattern"].tail(4).any()):
+            pattern_lookback = getattr(config, "ACTIONZONE_15M_PATTERN_LOOKBACK_BARS", 3)
+            pattern_mode = getattr(config, "ACTIONZONE_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
+            pattern_ok = False
+            pattern_name = "None"
+            pattern_idx = None
+            if filtered_signal in ("BUY", "SELL"):
+                pattern_ok, pattern_name, pattern_idx = _recent_pattern_confirmation(
+                    df,
+                    len(df) - 1,
+                    filtered_signal,
+                    lookback_bars=pattern_lookback,
+                    mode=pattern_mode,
+                )
+            if require_pattern and filtered_signal in ("BUY", "SELL") and not pattern_ok:
+                if filtered_signal == "BUY":
                     filter_reasons.append("no_bullish_pattern")
-                elif filtered_signal == "SELL" and not bool(df["Bearish_Pattern"].tail(4).any()):
+                elif filtered_signal == "SELL":
                     filter_reasons.append("no_bearish_pattern")
             wf_ok, wf_reason, _ = _evaluate_walkforward_gate({"optimizer": opt_meta}, filtered_signal)
             if not wf_ok:
@@ -4897,19 +5497,7 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             if filter_reasons:
                 filtered_signal = "WAIT"
         
-        detected_pattern = "None"
-        if filtered_signal == "BUY":
-            recent_patterns = df["Pattern_Name"].tail(4).values
-            for p in reversed(recent_patterns):
-                if p in ("Bullish Engulfing", "Bullish Pinbar"):
-                    detected_pattern = p
-                    break
-        elif filtered_signal == "SELL":
-            recent_patterns = df["Pattern_Name"].tail(4).values
-            for p in reversed(recent_patterns):
-                if p in ("Bearish Engulfing", "Bearish Pinbar"):
-                    detected_pattern = p
-                    break
+        detected_pattern = pattern_name if filtered_signal in ("BUY", "SELL") and pattern_ok else "None"
 
         stop_mult = getattr(config, "ACTIONZONE_15M_STOP_ATR_MULT", 1.5)
         min_stop_pct = getattr(config, "ACTIONZONE_15M_MIN_STOP_PCT", 1.0)
@@ -4939,10 +5527,21 @@ def _actionzone_15m_alert(symbol, data_15m=None, data_1h=None):
             risk_dist = max(float(atr_now) * stop_mult, abs(float(entry_price)) * (min_stop_pct / 100.0))
             if filtered_signal == "BUY":
                 stop_loss = float(entry_price - risk_dist)
-                take_profit = float(entry_price + (risk_dist * tp_mult))
             else:
                 stop_loss = float(entry_price + risk_dist)
-                take_profit = float(entry_price - (risk_dist * tp_mult))
+            use_candle_stop = bool(getattr(config, "ACTIONZONE_15M_USE_CANDLE_STOP", True))
+            candle_stop_buffer_atr = getattr(config, "ACTIONZONE_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
+            if use_candle_stop:
+                stop_ref_idx = pattern_idx if isinstance(pattern_idx, int) else (len(df) - 1)
+                candle_stop = _candle_based_risk(df, stop_ref_idx, filtered_signal, atr_now, stop_loss, buffer_atr=candle_stop_buffer_atr)
+                if isinstance(candle_stop, (int, float)):
+                    stop_loss = float(candle_stop)
+                    risk_dist = abs(float(entry_price) - float(stop_loss))
+            if risk_dist and risk_dist > 0:
+                if filtered_signal == "BUY":
+                    take_profit = float(entry_price + (risk_dist * tp_mult))
+                else:
+                    take_profit = float(entry_price - (risk_dist * tp_mult))
         confidence = _actionzone_compute_confidence(
             filtered_signal,
             trend_dir,
@@ -5010,6 +5609,7 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 df.index = df.index.tz_localize(None)
             except Exception:
                 pass
+        df = _add_price_patterns(df)
         close = df["Close"].astype(float)
         high = df["High"].astype(float)
         low = df["Low"].astype(float)
@@ -5026,6 +5626,11 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         vix_lb = getattr(config, "CDC_VIXFIX_15M_VIX_PERCENTILE_LOOKBACK", 50)
         vix_ph = getattr(config, "CDC_VIXFIX_15M_VIX_PERCENTILE_FACTOR", 0.85)
         alert_bars = getattr(config, "CDC_VIXFIX_15M_ALERT_BARS", 2)
+        require_pattern = bool(getattr(config, "CDC_VIXFIX_15M_REQUIRE_PATTERN", True))
+        pattern_lookback = getattr(config, "CDC_VIXFIX_15M_PATTERN_LOOKBACK_BARS", 3)
+        pattern_mode = getattr(config, "CDC_VIXFIX_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
+        use_candle_stop = bool(getattr(config, "CDC_VIXFIX_15M_USE_CANDLE_STOP", True))
+        candle_stop_buffer_atr = getattr(config, "CDC_VIXFIX_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
         try:
             fast_len = max(2, int(fast_len))
             slow_len = max(fast_len + 1, int(slow_len))
@@ -5080,6 +5685,30 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             except Exception:
                 bars_since_entry = None
         entry_recent = entry_idx is not None and bars_since_entry is not None and bars_since_entry <= alert_bars
+        entry_pos = None
+        if entry_idx is not None:
+            try:
+                entry_pos = int(df.index.get_loc(entry_idx))
+            except Exception:
+                entry_pos = None
+        buy_pattern_ok = False
+        buy_pattern_name = "None"
+        buy_pattern_idx = None
+        if isinstance(entry_pos, int):
+            buy_pattern_ok, buy_pattern_name, buy_pattern_idx = _recent_pattern_confirmation(
+                df,
+                entry_pos,
+                "BUY",
+                lookback_bars=pattern_lookback,
+                mode=pattern_mode,
+            )
+        sell_pattern_ok, sell_pattern_name, sell_pattern_idx = _recent_pattern_confirmation(
+            df,
+            len(df) - 1,
+            "SELL",
+            lookback_bars=pattern_lookback,
+            mode=pattern_mode,
+        )
         entry_price = float(close.loc[entry_idx]) if entry_idx is not None and pd.notna(close.loc[entry_idx]) else None
         stop_loss = None
         if entry_idx is not None:
@@ -5131,24 +5760,60 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 take_profit = entry_price + (atr * 2.0)
         last_time_str = entry_idx.strftime("%Y-%m-%d %H:%M") if entry_idx is not None else None
         signal = "WAIT"
-        reason = "ยังไม่เกิดจังหวะเข้าหรือออกตาม CDC+StochRSI+VixFix"
-        exit_trigger = None
+        reason = "ยังไม่เกิดจังหวะซื้อหรือขายตาม CDC+StochRSI+VixFix"
+        sell_trigger = None
+        detected_pattern = "None"
         if entry_recent:
-            signal = "BUY"
-            reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
+            if not require_pattern or buy_pattern_ok:
+                signal = "BUY"
+                reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
+                detected_pattern = buy_pattern_name if buy_pattern_ok else "None"
         elif entry_idx is not None and bars_since_entry is not None:
             if bool(is_market_top.iloc[-1]):
-                signal = "EXIT"
-                reason = "VixFix บอกโซนยืดตัวสูง ควรทยอยปิดกำไร"
-                exit_trigger = "VIXFIX_TOP"
+                if not require_pattern or sell_pattern_ok:
+                    signal = "SELL"
+                    reason = "VixFix บอกโซนยืดตัวสูง เป็นจังหวะขาย"
+                    sell_trigger = "VIXFIX_TOP"
+                    detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
             elif bool(red.iloc[-1]):
-                signal = "EXIT"
-                reason = "โครงสร้าง CDC พลิกเป็น Red ควรปิดสถานะ"
-                exit_trigger = "CDC_RED_REVERSAL"
+                if not require_pattern or sell_pattern_ok:
+                    signal = "SELL"
+                    reason = "โครงสร้าง CDC พลิกเป็น Red เป็นจังหวะขาย"
+                    sell_trigger = "CDC_RED_REVERSAL"
+                    detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
+        if signal == "BUY" and entry_price is not None:
+            min_stop_price = entry_price - (abs(entry_price) * (min_sl_pct / 100.0))
+            atr_stop_price = None
+            if atr is not None and atr > 0:
+                atr_stop_price = entry_price - (atr * sl_atr_mult)
+            candidate_stops = [x for x in (stop_loss, min_stop_price, atr_stop_price) if isinstance(x, (int, float))]
+            if candidate_stops:
+                stop_loss = float(min(candidate_stops))
+            if use_candle_stop:
+                stop_ref_idx = buy_pattern_idx if isinstance(buy_pattern_idx, int) else (entry_pos if isinstance(entry_pos, int) else None)
+                if isinstance(stop_ref_idx, int):
+                    candle_stop = _candle_based_risk(df, stop_ref_idx, "BUY", atr, stop_loss, buffer_atr=candle_stop_buffer_atr)
+                    if isinstance(candle_stop, (int, float)):
+                        stop_loss = float(candle_stop)
+        elif signal == "SELL":
+            sell_entry_price = current_price if current_price is not None else entry_price
+            if sell_entry_price is not None:
+                min_stop_price = sell_entry_price + (abs(sell_entry_price) * (min_sl_pct / 100.0))
+                atr_stop_price = None
+                if atr is not None and atr > 0:
+                    atr_stop_price = sell_entry_price + (atr * sl_atr_mult)
+                candidate_stops = [x for x in (min_stop_price, atr_stop_price) if isinstance(x, (int, float))]
+                if candidate_stops:
+                    stop_loss = float(max(candidate_stops))
+                if use_candle_stop:
+                    stop_ref_idx = sell_pattern_idx if isinstance(sell_pattern_idx, int) else (len(df) - 1)
+                    candle_stop = _candle_based_risk(df, stop_ref_idx, "SELL", atr, stop_loss, buffer_atr=candle_stop_buffer_atr)
+                    if isinstance(candle_stop, (int, float)):
+                        stop_loss = float(candle_stop)
         expected_profit_pct = None
         if entry_price is not None:
             ref_exit = take_profit
-            if signal == "EXIT" and current_price is not None:
+            if signal == "SELL" and current_price is not None:
                 ref_exit = current_price
             if ref_exit is not None and entry_price > 0:
                 expected_profit_pct = ((ref_exit - entry_price) / entry_price) * 100.0
@@ -5158,12 +5823,12 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         conf = 45.0
         if signal == "BUY":
             conf += 25.0
-        if signal == "EXIT":
+        if signal == "SELL":
             conf += 20.0
         if pd.notna(k.iloc[-1]) and pd.notna(d.iloc[-1]):
             if signal == "BUY" and float(k.iloc[-1]) > float(d.iloc[-1]):
                 conf += 10.0
-            if signal == "EXIT" and bool(is_market_top.iloc[-1]):
+            if signal == "SELL" and bool(is_market_top.iloc[-1]):
                 conf += 10.0
         if conf > 95:
             conf = 95.0
@@ -5172,7 +5837,7 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "setup": "CDC+StochRSI+VixFix 15m",
             "entry_price": entry_price,
             "current_price": current_price,
-            "exit_price": current_price if signal == "EXIT" else None,
+            "exit_price": current_price if signal == "SELL" else None,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "expected_profit_pct": expected_profit_pct,
@@ -5181,11 +5846,12 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "last_signal_time": last_time_str,
             "bars_since_entry": bars_since_entry,
             "is_market_top": bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
-            "exit_trigger": exit_trigger,
+            "sell_trigger": sell_trigger,
             "trend_color": "GREEN" if bool(green.iloc[-1]) else "RED" if bool(red.iloc[-1]) else "NEUTRAL",
             "stoch_k": float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None,
             "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
-            "reason": reason
+            "reason": reason,
+            "detected_pattern": detected_pattern,
         }
     except Exception:
         return None
@@ -6038,6 +6704,7 @@ def analyze():
         _notify_telegram_from_results(results)
 
     alert_backtest = _build_alert_backtest_summary(results)
+    backtest_rules = _build_backtest_rulebook(results)
     cleaned = [_clean_json_value(r) for r in results]
     meta = {
         "request": {
@@ -6048,6 +6715,7 @@ def analyze():
         },
         "summary": _build_analysis_summary(results, requested_symbols=len(symbols), period=period),
         "telegram_alerts": alert_backtest,
+        "backtest_rules": backtest_rules,
         "health": _build_health_snapshot(),
     }
     return jsonify({'results': cleaned, 'meta': _clean_json_value(meta)})
@@ -6065,6 +6733,7 @@ def _run_once(symbols, period, notify_telegram):
     if notify_telegram:
         _notify_telegram_from_results(results)
     alert_backtest = _build_alert_backtest_summary(results)
+    backtest_rules = _build_backtest_rulebook(results)
     payload = {
         "results": [_clean_json_value(r) for r in results],
         "meta": _clean_json_value(
@@ -6077,6 +6746,7 @@ def _run_once(symbols, period, notify_telegram):
                 },
                 "summary": _build_analysis_summary(results, requested_symbols=len(uniq), period=period),
                 "telegram_alerts": alert_backtest,
+                "backtest_rules": backtest_rules,
                 "health": _build_health_snapshot(),
             }
         ),

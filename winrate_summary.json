@@ -1,0 +1,291 @@
+﻿{
+  "symbols": [
+    "BTC-USD",
+    "ETH-USD",
+    "BNB-USD",
+    "ADA-USD",
+    "SOL-USD",
+    "XRP-USD",
+    "DOGE-USD",
+    "DOT-USD",
+    "LINK-USD",
+    "AVAX-USD"
+  ],
+  "per_strategy": {
+    "ActionZone 15m": {
+      "measured_symbols": 10,
+      "total_trades": 81.0,
+      "weighted_win_rate_pct": 24.691358024691358,
+      "weighted_expectancy_rr": -0.7637697312490782,
+      "samples": [
+        {
+          "symbol": "BTC-USD",
+          "win_rate_pct": 23.076923076923077,
+          "trades": 13.0,
+          "expectancy_rr": -0.9223726817667477,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "ETH-USD",
+          "win_rate_pct": 33.33333333333333,
+          "trades": 9.0,
+          "expectancy_rr": -0.89326643091191,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "BNB-USD",
+          "win_rate_pct": 0.0,
+          "trades": 4.0,
+          "expectancy_rr": -1.0572646033951982,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "ADA-USD",
+          "win_rate_pct": 36.36363636363637,
+          "trades": 11.0,
+          "expectancy_rr": -0.44465019077041396,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "SOL-USD",
+          "win_rate_pct": 10.0,
+          "trades": 10.0,
+          "expectancy_rr": -0.7914927162769547,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "XRP-USD",
+          "win_rate_pct": 50.0,
+          "trades": 4.0,
+          "expectancy_rr": -0.5400902688979238,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "DOGE-USD",
+          "win_rate_pct": 25.0,
+          "trades": 4.0,
+          "expectancy_rr": -0.8548527979662695,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "DOT-USD",
+          "win_rate_pct": 14.285714285714285,
+          "trades": 7.0,
+          "expectancy_rr": -0.6503484048035056,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "LINK-USD",
+          "win_rate_pct": 27.27272727272727,
+          "trades": 11.0,
+          "expectancy_rr": -0.7975422931780275,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "AVAX-USD",
+          "win_rate_pct": 25.0,
+          "trades": 8.0,
+          "expectancy_rr": -0.7368489361419902,
+          "signal": "WAIT",
+          "error": null
+        }
+      ]
+    },
+    "EMA Cross 15m": {
+      "measured_symbols": 10,
+      "total_trades": 265.0,
+      "weighted_win_rate_pct": 22.641509433962263,
+      "weighted_expectancy_rr": -0.7798385430432935,
+      "samples": [
+        {
+          "symbol": "BTC-USD",
+          "win_rate_pct": 17.647058823529413,
+          "trades": 34.0,
+          "expectancy_rr": -0.9223726817667477,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "ETH-USD",
+          "win_rate_pct": 13.559322033898304,
+          "trades": 59.0,
+          "expectancy_rr": -0.89326643091191,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "BNB-USD",
+          "win_rate_pct": 15.384615384615385,
+          "trades": 13.0,
+          "expectancy_rr": -1.0572646033951982,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "ADA-USD",
+          "win_rate_pct": 42.42424242424242,
+          "trades": 33.0,
+          "expectancy_rr": -0.44465019077041396,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "SOL-USD",
+          "win_rate_pct": 17.391304347826086,
+          "trades": 23.0,
+          "expectancy_rr": -0.7914927162769547,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "XRP-USD",
+          "win_rate_pct": 38.46153846153847,
+          "trades": 13.0,
+          "expectancy_rr": -0.5400902688979238,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "DOGE-USD",
+          "win_rate_pct": 23.52941176470588,
+          "trades": 17.0,
+          "expectancy_rr": -0.8548527979662695,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "DOT-USD",
+          "win_rate_pct": 22.22222222222222,
+          "trades": 18.0,
+          "expectancy_rr": -0.6503484048035056,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "LINK-USD",
+          "win_rate_pct": 22.22222222222222,
+          "trades": 36.0,
+          "expectancy_rr": -0.7975422931780275,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "AVAX-USD",
+          "win_rate_pct": 26.31578947368421,
+          "trades": 19.0,
+          "expectancy_rr": -0.7368489361419902,
+          "signal": "WAIT",
+          "error": null
+        }
+      ]
+    },
+    "CDC+VixFix 15m": {
+      "measured_symbols": 0,
+      "total_trades": 0.0,
+      "weighted_win_rate_pct": null,
+      "weighted_expectancy_rr": null,
+      "samples": [
+        {
+          "symbol": "BTC-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "ETH-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "BNB-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "ADA-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "SOL-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "XRP-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "DOGE-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "DOT-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        },
+        {
+          "symbol": "LINK-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "WAIT",
+          "error": null
+        },
+        {
+          "symbol": "AVAX-USD",
+          "win_rate_pct": null,
+          "trades": null,
+          "expectancy_rr": null,
+          "signal": "SELL",
+          "error": null
+        }
+      ]
+    }
+  },
+  "telegram_alerts": {
+    "candidate_count": 0,
+    "measured_count": 0,
+    "estimated_win_rate_pct": null,
+    "average_expectancy_rr": null,
+    "average_confidence": null,
+    "total_historical_trades": 0,
+    "dynamic_min_confidence": 78.53182480064488,
+    "alerts": [],
+    "by_strategy": {}
+  }
+}

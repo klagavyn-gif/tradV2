@@ -1,0 +1,85 @@
+{
+  "summary": {
+    "symbols_measured": 10,
+    "avg_days_per_symbol": 59.54375000000001,
+    "total_alerts": 1124,
+    "buy_alerts": 490,
+    "sell_alerts": 634,
+    "weekly_alerts_watchlist": 132.13813372520204,
+    "weekly_buy_watchlist": 57.604702424687716,
+    "weekly_sell_watchlist": 74.53343130051431,
+    "avg_weekly_per_symbol": 13.213813372520203
+  },
+  "per_symbol": {
+    "BTC-USD": {
+      "buy": 44,
+      "sell": 64,
+      "total": 108,
+      "days": 59.645833333333336,
+      "weekly": 12.67481662591687
+    },
+    "ETH-USD": {
+      "buy": 65,
+      "sell": 59,
+      "total": 124,
+      "days": 59.635416666666664,
+      "weekly": 14.555109170305677
+    },
+    "BNB-USD": {
+      "buy": 50,
+      "sell": 63,
+      "total": 113,
+      "days": 59.635416666666664,
+      "weekly": 13.263930131004368
+    },
+    "ADA-USD": {
+      "buy": 47,
+      "sell": 59,
+      "total": 106,
+      "days": 59.635416666666664,
+      "weekly": 12.44227074235808
+    },
+    "SOL-USD": {
+      "buy": 50,
+      "sell": 62,
+      "total": 112,
+      "days": 59.479166666666664,
+      "weekly": 13.18108581436077
+    },
+    "XRP-USD": {
+      "buy": 44,
+      "sell": 68,
+      "total": 112,
+      "days": 59.479166666666664,
+      "weekly": 13.18108581436077
+    },
+    "DOGE-USD": {
+      "buy": 51,
+      "sell": 67,
+      "total": 118,
+      "days": 59.479166666666664,
+      "weekly": 13.88721541155867
+    },
+    "DOT-USD": {
+      "buy": 47,
+      "sell": 63,
+      "total": 110,
+      "days": 59.479166666666664,
+      "weekly": 12.945709281961472
+    },
+    "LINK-USD": {
+      "buy": 51,
+      "sell": 65,
+      "total": 116,
+      "days": 59.479166666666664,
+      "weekly": 13.65183887915937
+    },
+    "AVAX-USD": {
+      "buy": 41,
+      "sell": 64,
+      "total": 105,
+      "days": 59.489583333333336,
+      "weekly": 12.35510418490632
+    }
+  }
+}

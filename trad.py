@@ -35,6 +35,13 @@ _YF_TZ_CACHE_LOCK = threading.Lock()
 _YF_TZ_CACHE_READY = False
 
 
+def _project_yf_cache_dir():
+    try:
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yf_cache")
+    except Exception:
+        return ""
+
+
 def _configure_yf_tz_cache(force_temp=False):
     global _YF_TZ_CACHE_READY
     if _YF_TZ_CACHE_READY and not force_temp:
@@ -59,6 +66,37 @@ def _configure_yf_tz_cache(force_temp=False):
             except Exception:
                 continue
         _YF_TZ_CACHE_READY = True
+
+
+def _clear_yf_runtime_cache(clear_tz_cache=False):
+    cache_dir = _project_yf_cache_dir()
+    patterns = ["cookies.db", "cookies.db-shm", "cookies.db-wal"]
+    if clear_tz_cache:
+        patterns.extend(["tkr-tz.db", "tkr-tz.db-shm", "tkr-tz.db-wal"])
+    for filename in patterns:
+        if not cache_dir:
+            continue
+        path = os.path.join(cache_dir, filename)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            continue
+    _THREAD_LOCAL.curl_session = None
+    if clear_tz_cache:
+        global _YF_TZ_CACHE_READY
+        _YF_TZ_CACHE_READY = False
+
+
+def _is_yf_auth_error(message):
+    msg = str(message or "").lower()
+    return (
+        "invalid crumb" in msg
+        or '"code":"unauthorized"' in msg
+        or "code\":\"unauthorized\"" in msg
+        or "http error 401" in msg
+        or "unauthorized" in msg and "finance" in msg
+    )
 
 # Helper to get current Thai time (naive)
 def get_thai_now():
@@ -2506,7 +2544,7 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
     if interval:
         disk_df = _history_store_read(sym, interval=interval, auto_adjust=auto_adjust)
     _configure_yf_tz_cache()
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             session = _get_thread_curl_session()
             ticker = yf.Ticker(sym, session=session)
@@ -2530,6 +2568,10 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                     df = yf.download(sym, **dl_kwargs)
                 except Exception as dl_e:
                     dl_msg = str(dl_e).lower()
+                    if attempt < 2 and _is_yf_auth_error(dl_msg):
+                        logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, dl_e)
+                        _clear_yf_runtime_cache(clear_tz_cache=True)
+                        continue
                     if "certificate verify locations" in dl_msg or "curl: (77)" in dl_msg:
                         try:
                             insecure_session = curl_requests.Session(
@@ -2577,6 +2619,10 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
             if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
                 _configure_yf_tz_cache(force_temp=True)
                 _THREAD_LOCAL.curl_session = None
+                continue
+            if attempt < 2 and _is_yf_auth_error(msg):
+                logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, e)
+                _clear_yf_runtime_cache(clear_tz_cache=True)
                 continue
             if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
                 _THREAD_LOCAL.curl_session = curl_requests.Session(
@@ -3860,7 +3906,7 @@ def get_basic_info(symbol):
     if isinstance(cached, dict) and cached:
         return dict(cached)
     _configure_yf_tz_cache()
-    for attempt in range(2):
+    for attempt in range(3):
         try:
             session = _get_thread_curl_session()
             info = yf.Ticker(sym, session=session).info or {}
@@ -3878,6 +3924,10 @@ def get_basic_info(symbol):
             if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
                 _configure_yf_tz_cache(force_temp=True)
                 _THREAD_LOCAL.curl_session = None
+                continue
+            if attempt < 2 and _is_yf_auth_error(msg):
+                logger.warning("Resetting yfinance cookie/session cache after auth error for %s info: %s", sym, e)
+                _clear_yf_runtime_cache(clear_tz_cache=True)
                 continue
             if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
                 _THREAD_LOCAL.curl_session = curl_requests.Session(

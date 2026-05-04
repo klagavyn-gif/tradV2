@@ -2537,6 +2537,12 @@ def _chart_interval(interval):
     return text or "1d"
 
 
+def _prefer_chart_api():
+    if bool(getattr(config, "YF_PREFER_CHART_API", False)):
+        return True
+    return str(os.environ.get("GITHUB_ACTIONS", "")).strip().lower() == "true"
+
+
 def _fetch_yahoo_chart_history(symbol, period, interval=None, auto_adjust=True):
     sym = normalize_symbol(symbol)
     if not sym:
@@ -2611,12 +2617,27 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
     if interval:
         disk_df = _history_store_read(sym, interval=interval, auto_adjust=auto_adjust)
     _configure_yf_tz_cache()
+    remote_period = _remote_history_period(period, interval)
+    if _prefer_chart_api():
+        try:
+            df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                df = _normalize_price_columns(df, sym)
+                if interval:
+                    merged_df = _history_store_merge(disk_df, df, symbol=sym)
+                    if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                        df = merged_df
+                        _history_store_write(sym, interval, auto_adjust, merged_df)
+                sliced_df = _slice_history_by_period(df, period)
+                _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
+                return sliced_df.copy()
+        except Exception as e:
+            logger.warning("Preferred Yahoo chart API fetch failed for %s: %s", sym, e)
     auth_error_seen = False
     for attempt in range(3):
         try:
             session = _get_thread_curl_session()
             ticker = yf.Ticker(sym, session=session)
-            remote_period = _remote_history_period(period, interval)
             if interval:
                 df = ticker.history(period=remote_period, interval=interval, auto_adjust=auto_adjust)
             else:
@@ -3998,6 +4019,10 @@ def get_basic_info(symbol):
     cached = _YF_INFO_CACHE.get(cache_key)
     if isinstance(cached, dict) and cached:
         return dict(cached)
+    if _prefer_chart_api():
+        payload = {'name': sym, 'sector': 'N/A', 'market_cap': 0, 'pe_ratio': 'N/A', 'dividend_yield': 0}
+        _YF_INFO_CACHE.set(cache_key, payload)
+        return dict(payload)
     _configure_yf_tz_cache()
     for attempt in range(3):
         try:

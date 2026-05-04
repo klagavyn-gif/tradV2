@@ -2530,6 +2530,73 @@ def _remote_history_period(period, interval):
     return period
 
 
+def _chart_interval(interval):
+    text = str(interval or "").strip().lower()
+    if text == "1h":
+        return "60m"
+    return text or "1d"
+
+
+def _fetch_yahoo_chart_history(symbol, period, interval=None, auto_adjust=True):
+    sym = normalize_symbol(symbol)
+    if not sym:
+        return None
+    session = _get_thread_curl_session()
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+    params = {
+        "range": str(period or "1mo"),
+        "interval": _chart_interval(interval),
+        "includePrePost": "false",
+        "events": "div,splits,capitalGains",
+    }
+    response = session.get(url, params=params, timeout=20)
+    status_code = int(getattr(response, "status_code", 0))
+    if status_code >= 400:
+        raise RuntimeError(f"Yahoo chart API HTTP {status_code} for {sym}")
+    payload = response.json()
+    chart = ((payload or {}).get("chart") or {})
+    error = chart.get("error")
+    if error:
+        raise RuntimeError(f"Yahoo chart API error for {sym}: {error}")
+    results = chart.get("result") or []
+    if not results:
+        return None
+    result = results[0] or {}
+    timestamps = result.get("timestamp") or []
+    indicators = result.get("indicators") or {}
+    quote_list = indicators.get("quote") or []
+    if not timestamps or not quote_list:
+        return None
+    quote = quote_list[0] or {}
+    df = pd.DataFrame(
+        {
+            "Open": quote.get("open") or [],
+            "High": quote.get("high") or [],
+            "Low": quote.get("low") or [],
+            "Close": quote.get("close") or [],
+            "Volume": quote.get("volume") or [],
+        },
+        index=pd.to_datetime(timestamps, unit="s", utc=True),
+    )
+    if auto_adjust:
+        adjclose_list = indicators.get("adjclose") or []
+        if adjclose_list:
+            adjclose = adjclose_list[0].get("adjclose") or []
+            if len(adjclose) == len(df.index):
+                raw_close = pd.to_numeric(df["Close"], errors="coerce")
+                adj_close = pd.to_numeric(pd.Series(adjclose, index=df.index), errors="coerce")
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    ratio = adj_close / raw_close.replace(0, np.nan)
+                ratio = ratio.replace([np.inf, -np.inf], np.nan)
+                for col in ("Open", "High", "Low", "Close"):
+                    series = pd.to_numeric(df[col], errors="coerce")
+                    df[col] = series * ratio.fillna(1.0)
+    df = df.dropna(subset=["Open", "High", "Low", "Close"], how="all")
+    if df.empty:
+        return None
+    return _normalize_df_index(df)
+
+
 def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
     sym = normalize_symbol(symbol)
     if not sym:
@@ -2544,6 +2611,7 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
     if interval:
         disk_df = _history_store_read(sym, interval=interval, auto_adjust=auto_adjust)
     _configure_yf_tz_cache()
+    auth_error_seen = False
     for attempt in range(3):
         try:
             session = _get_thread_curl_session()
@@ -2569,6 +2637,7 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                 except Exception as dl_e:
                     dl_msg = str(dl_e).lower()
                     if attempt < 2 and _is_yf_auth_error(dl_msg):
+                        auth_error_seen = True
                         logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, dl_e)
                         _clear_yf_runtime_cache(clear_tz_cache=True)
                         continue
@@ -2598,6 +2667,11 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                     except Exception:
                         df = None
                 if df is None or df.empty:
+                    if auth_error_seen:
+                        try:
+                            df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
+                        except Exception as chart_e:
+                            logger.warning("Yahoo chart API fallback failed for %s: %s", sym, chart_e)
                     if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
                         sliced_disk = _slice_history_by_period(disk_df, period)
                         _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
@@ -2621,6 +2695,7 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                 _THREAD_LOCAL.curl_session = None
                 continue
             if attempt < 2 and _is_yf_auth_error(msg):
+                auth_error_seen = True
                 logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, e)
                 _clear_yf_runtime_cache(clear_tz_cache=True)
                 continue
@@ -2630,6 +2705,24 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
                     impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
                 )
                 continue
+            if _is_yf_auth_error(msg):
+                auth_error_seen = True
+            if auth_error_seen:
+                try:
+                    remote_period = _remote_history_period(period, interval)
+                    df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        df = _normalize_price_columns(df, sym)
+                        if interval:
+                            merged_df = _history_store_merge(disk_df, df, symbol=sym)
+                            if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
+                                df = merged_df
+                                _history_store_write(sym, interval, auto_adjust, merged_df)
+                        sliced_df = _slice_history_by_period(df, period)
+                        _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
+                        return sliced_df.copy()
+                except Exception as chart_e:
+                    logger.warning("Yahoo chart API fallback failed for %s: %s", sym, chart_e)
             logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
             if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
                 sliced_disk = _slice_history_by_period(disk_df, period)

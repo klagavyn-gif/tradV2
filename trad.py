@@ -1430,15 +1430,23 @@ def _build_cdc_vixfix_message(item, plan):
     
     entry_text = _format_price_value(plan.get("entry_price"))
     curr_text = _format_price_value(plan.get("current_price", item.get("price")))
+    stop_text = _format_price_value(plan.get("stop_loss"))
+    tp_text = _format_price_value(plan.get("take_profit"))
+    exit_text = _format_price_value(plan.get("exit_price"))
     change = item.get("change")
+    move_parts = []
     if entry_text:
         move_parts.append(f"จุดเข้า: {entry_text}")
+    if curr_text:
+        move_parts.append(f"ราคาปัจจุบัน: {curr_text}")
     if exit_text:
         move_parts.append(f"จุดออก: {exit_text}")
     elif tp_text:
         move_parts.append(f"เป้าหมาย: {tp_text}")
     if stop_text:
         move_parts.append(f"SL: {stop_text}")
+    if isinstance(change, (int, float)):
+        move_parts.append(f"เปลี่ยนแปลง: {change:+.2f}%")
         
     if move_parts:
         lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
@@ -1461,14 +1469,14 @@ def _build_cdc_vixfix_message(item, plan):
     if isinstance(running_pct, (int, float)):
         lines.append(f"<b>📈 กำไรปัจจุบัน (จากจุดเข้า):</b> {running_pct:+.2f}%")
         
-    exit_trigger = str(plan.get("exit_trigger") or "").strip().upper()
-    if exit_trigger:
-        trigger_text = exit_trigger
-        if exit_trigger == "VIXFIX_TOP":
+    sell_trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    if sell_trigger:
+        trigger_text = sell_trigger
+        if sell_trigger == "VIXFIX_TOP":
             trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
-        elif exit_trigger == "CDC_RED_REVERSAL":
+        elif sell_trigger == "CDC_RED_REVERSAL":
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
-        lines.append("<b>🚨 ทริกเกอร์จุดออก:</b> " + _html_escape(trigger_text))
+        lines.append("<b>🚨 ทริกเกอร์ฝั่งขาย:</b> " + _html_escape(trigger_text))
         
     reason = plan.get("reason")
     if isinstance(reason, str) and reason.strip():

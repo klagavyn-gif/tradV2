@@ -1450,6 +1450,16 @@ def _build_cdc_vixfix_message(item, plan):
         
     if move_parts:
         lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+    forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
+    forecast_score = plan.get("forecast_score")
+    forecast_reason = str(plan.get("forecast_reason") or "").strip()
+    if forecast_dir:
+        forecast_line = f"<b>🧭 คาดทิศทาง:</b> {_html_escape(forecast_dir)}"
+        if isinstance(forecast_score, (int, float)):
+            forecast_line += f" ({float(forecast_score):.0f}/100)"
+        lines.append(forecast_line)
+        if forecast_reason:
+            lines.append("<b>📝 ภาพกราฟ:</b> " + _html_escape(forecast_reason))
     stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
     if stop_lines:
         lines.append("────────────────")
@@ -2050,7 +2060,12 @@ def _build_telegram_candidates(results, min_conf):
         if isinstance(cdc_plan, dict):
             cdc_signal = str(cdc_plan.get("signal") or "").upper()
             cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
-            required_conf = float(min_conf)
+            cdc_min_conf = getattr(config, "CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE", min_conf)
+            try:
+                cdc_min_conf = float(cdc_min_conf)
+            except Exception:
+                cdc_min_conf = float(min_conf)
+            required_conf = min(float(min_conf), float(cdc_min_conf))
             if cdc_signal in ("BUY", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
                 cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
                 if cdc_message:
@@ -2971,6 +2986,82 @@ def _candle_based_risk(df, idx, direction, atr_value, default_stop, buffer_atr=0
     if direction == "SELL" and high_i is not None:
         return float(max(default_stop, high_i + atr_component))
     return float(default_stop)
+
+
+def _cdc_forecast_bias(close, fast, slow, k, d, market_top, momentum_lookback=3):
+    try:
+        lookback = max(1, int(momentum_lookback))
+    except Exception:
+        lookback = 3
+    bull_score = 0.0
+    bear_score = 0.0
+    reasons = []
+    close_now = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+    fast_now = float(fast.iloc[-1]) if pd.notna(fast.iloc[-1]) else None
+    slow_now = float(slow.iloc[-1]) if pd.notna(slow.iloc[-1]) else None
+    k_now = float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None
+    d_now = float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None
+    fast_prev = float(fast.iloc[-1 - lookback]) if len(fast) > lookback and pd.notna(fast.iloc[-1 - lookback]) else None
+    close_prev = float(close.iloc[-1 - lookback]) if len(close) > lookback and pd.notna(close.iloc[-1 - lookback]) else None
+    if isinstance(fast_now, (int, float)) and isinstance(slow_now, (int, float)):
+        if fast_now > slow_now:
+            bull_score += 18.0
+            reasons.append("EMA เร็วเหนือ EMA ช้า")
+        elif fast_now < slow_now:
+            bear_score += 18.0
+            reasons.append("EMA เร็วต่ำกว่า EMA ช้า")
+    if isinstance(close_now, (int, float)) and isinstance(fast_now, (int, float)):
+        if close_now > fast_now:
+            bull_score += 12.0
+            reasons.append("ราคายืนเหนือ EMA เร็ว")
+        elif close_now < fast_now:
+            bear_score += 12.0
+            reasons.append("ราคาต่ำกว่า EMA เร็ว")
+    if isinstance(fast_now, (int, float)) and isinstance(fast_prev, (int, float)):
+        if fast_now > fast_prev:
+            bull_score += 10.0
+            reasons.append("EMA เร็วกำลังชันขึ้น")
+        elif fast_now < fast_prev:
+            bear_score += 10.0
+            reasons.append("EMA เร็วกำลังชันลง")
+    if isinstance(close_now, (int, float)) and isinstance(close_prev, (int, float)) and close_prev != 0:
+        momentum_pct = ((close_now - close_prev) / abs(close_prev)) * 100.0
+        if momentum_pct > 0:
+            bull_score += min(12.0, 6.0 + momentum_pct * 4.0)
+            reasons.append("โมเมนตัมสั้นเป็นบวก")
+        elif momentum_pct < 0:
+            bear_score += min(12.0, 6.0 + abs(momentum_pct) * 4.0)
+            reasons.append("โมเมนตัมสั้นเป็นลบ")
+    if isinstance(k_now, (int, float)) and isinstance(d_now, (int, float)):
+        if k_now > d_now:
+            bull_score += 8.0
+            reasons.append("StochRSI K อยู่เหนือ D")
+        elif k_now < d_now:
+            bear_score += 8.0
+            reasons.append("StochRSI K อยู่ต่ำกว่า D")
+        if k_now < 35.0 and d_now < 35.0:
+            bull_score += 6.0
+            reasons.append("อยู่โซนเด้งกลับ")
+        if k_now > 70.0 and d_now > 70.0:
+            bear_score += 6.0
+            reasons.append("อยู่โซนพักตัว")
+    if bool(market_top):
+        bear_score += 14.0
+        reasons.append("VixFix เข้าพื้นที่เสี่ยงยอด")
+    gap = abs(bull_score - bear_score)
+    direction = "NEUTRAL"
+    if bull_score >= bear_score + 8.0:
+        direction = "BUY"
+    elif bear_score >= bull_score + 8.0:
+        direction = "SELL"
+    score = min(92.0, 50.0 + gap)
+    return {
+        "direction": direction,
+        "score": float(max(50.0, score)),
+        "bull_score": float(bull_score),
+        "bear_score": float(bear_score),
+        "reason": ", ".join(reasons[:4]),
+    }
 
 
 def _ema_cross_15m_prepare_df(raw_df):
@@ -5807,6 +5898,10 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         pattern_mode = getattr(config, "CDC_VIXFIX_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
         use_candle_stop = bool(getattr(config, "CDC_VIXFIX_15M_USE_CANDLE_STOP", True))
         candle_stop_buffer_atr = getattr(config, "CDC_VIXFIX_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
+        relaxed_entry_enable = bool(getattr(config, "CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE", True))
+        relaxed_stoch_max = getattr(config, "CDC_VIXFIX_15M_RELAXED_STOCH_MAX", 45.0)
+        forecast_lookback = getattr(config, "CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK", 3)
+        forecast_min_score = getattr(config, "CDC_VIXFIX_15M_FORECAST_MIN_SCORE", 60.0)
         try:
             fast_len = max(2, int(fast_len))
             slow_len = max(fast_len + 1, int(slow_len))
@@ -5821,6 +5916,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             vix_lb = max(2, int(vix_lb))
             vix_ph = float(vix_ph)
             alert_bars = max(0, int(alert_bars))
+            relaxed_stoch_max = float(relaxed_stoch_max)
+            forecast_lookback = max(1, int(forecast_lookback))
+            forecast_min_score = float(forecast_min_score)
         except Exception:
             return None
         fast = close.ewm(span=fast_len, adjust=False).mean()
@@ -5850,9 +5948,37 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         lower_band = mid - sdev
         range_low = wvf1.rolling(vix_lb).min() * vix_ph
         is_market_top = (wvf1 <= lower_band) | (wvf1 <= range_low)
+        forecast = _cdc_forecast_bias(
+            close,
+            fast,
+            slow,
+            k,
+            d,
+            bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
+            momentum_lookback=forecast_lookback,
+        )
+        forecast_dir = str(forecast.get("direction") or "NEUTRAL").upper()
+        forecast_score = float(forecast.get("score") or 50.0)
+        fast_slope_up = fast.diff(forecast_lookback) > 0
+        fast_slope_down = fast.diff(forecast_lookback) < 0
+        relaxed_long_condition = (
+            bull
+            & (k > d)
+            & (d < relaxed_stoch_max)
+            & (close > fast)
+            & fast_slope_up.fillna(False)
+            & (~is_market_top.fillna(False))
+        )
+        relaxed_sell_condition = (
+            bear
+            & (k < d)
+            & (close < fast)
+            & fast_slope_down.fillna(False)
+        )
+        buy_ready = long_condition | (relaxed_long_condition if relaxed_entry_enable else False)
         entry_idx = None
-        if long_condition.any():
-            entry_idx = long_condition[long_condition].index[-1]
+        if buy_ready.any():
+            entry_idx = buy_ready[buy_ready].index[-1]
         bars_since_entry = None
         if entry_idx is not None:
             try:
@@ -5940,9 +6066,13 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         sell_trigger = None
         detected_pattern = "None"
         if entry_recent:
-            if not require_pattern or buy_pattern_ok:
+            allow_buy = forecast_dir == "BUY" or forecast_score >= forecast_min_score
+            if (not require_pattern or buy_pattern_ok) and allow_buy:
                 signal = "BUY"
-                reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
+                if long_condition.iloc[-1]:
+                    reason = "EMA เร็วเหนือ EMA ช้า และ StochRSI ตัดขึ้นในโซน Oversold"
+                else:
+                    reason = "แนวโน้มสั้นฟื้นตัว, โมเมนตัมกลับขึ้น และราคายืนเหนือ EMA เร็ว"
                 detected_pattern = buy_pattern_name if buy_pattern_ok else "None"
         elif entry_idx is not None and bars_since_entry is not None:
             if bool(is_market_top.iloc[-1]):
@@ -5956,6 +6086,12 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                     signal = "SELL"
                     reason = "โครงสร้าง CDC พลิกเป็น Red เป็นจังหวะขาย"
                     sell_trigger = "CDC_RED_REVERSAL"
+                    detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
+            elif relaxed_entry_enable and bool(relaxed_sell_condition.iloc[-1]) and forecast_dir == "SELL" and forecast_score >= forecast_min_score:
+                if not require_pattern or sell_pattern_ok:
+                    signal = "SELL"
+                    reason = "แนวโน้มสั้นอ่อนแรง, โมเมนตัมกลับลง และราคาหลุด EMA เร็ว"
+                    sell_trigger = "TREND_ROLLOVER"
                     detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
         if signal == "BUY" and entry_price is not None:
             min_stop_price = entry_price - (abs(entry_price) * (min_sl_pct / 100.0))
@@ -6006,6 +6142,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 conf += 10.0
             if signal == "SELL" and bool(is_market_top.iloc[-1]):
                 conf += 10.0
+        conf += max(0.0, min(12.0, (forecast_score - 50.0) * 0.30))
+        if forecast_dir == signal:
+            conf += 6.0
         if conf > 95:
             conf = 95.0
         return {
@@ -6024,6 +6163,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "is_market_top": bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
             "sell_trigger": sell_trigger,
             "trend_color": "GREEN" if bool(green.iloc[-1]) else "RED" if bool(red.iloc[-1]) else "NEUTRAL",
+            "forecast_direction": forecast_dir,
+            "forecast_score": forecast_score,
+            "forecast_reason": forecast.get("reason"),
             "stoch_k": float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None,
             "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
             "reason": reason,

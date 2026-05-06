@@ -251,14 +251,12 @@
     <script>
         let chartInstances = {};
         let watchlist = [];
-        let watchlistAutoTimer = null;
         let watchlistRequestInFlight = false;
         let currentAnalyzeController = null;
         let currentWatchlistController = null;
         let watchlistSearchText = '';
         let watchlistSortMode = 'added';
         let latestResultsMap = {};
-        let buyPriceStore = {};
         let currentHealthSnapshot = null;
         let lastAnalysisMeta = null;
         const MAX_SYMBOLS_PER_REQUEST = 30;
@@ -323,7 +321,6 @@
                 { plan: result.cdc_vixfix_15m, source: 'CDC+VixFix 15m' },
                 { plan: result.actionzone_15m, source: 'ActionZone 15m' },
                 { plan: result.ema_cross_15m, source: 'EMA Cross 15m' },
-                { plan: result.crypto_reversal_15m, source: 'Crypto Reversal 15m' },
             ];
             for (const candidate of candidates) {
                 const plan = candidate.plan;
@@ -499,11 +496,6 @@
             return symbol.toString().trim().toUpperCase().replace(/^\$+/, '');
         }
 
-        function getSymbolDomId(symbol) {
-            const key = getSymbolKey(symbol);
-            return key.replace(/[^A-Z0-9]/g, '_');
-        }
-
         function parseSymbolsInput(rawInput, maxCount) {
             const cap = Math.max(1, Number(maxCount) || MAX_SYMBOLS_PER_REQUEST);
             const tokens = (rawInput || '').toString().replace(/\n/g, ',').replace(/;/g, ',').split(',');
@@ -530,26 +522,6 @@
             if (watchlistBtn) watchlistBtn.disabled = !!disabled;
         }
 
-        function loadBuyPriceStore() {
-            const raw = localStorage.getItem('buyPriceStore');
-            if (!raw) return;
-            try {
-                const parsed = JSON.parse(raw);
-                if (parsed && typeof parsed === 'object') {
-                    buyPriceStore = parsed;
-                }
-            } catch (e) {
-                buyPriceStore = {};
-            }
-        }
-
-        function saveBuyPriceStore() {
-            try {
-                localStorage.setItem('buyPriceStore', JSON.stringify(buyPriceStore));
-            } catch (e) {
-            }
-        }
-
         document.getElementById('searchForm').addEventListener('submit', function(e) {
             e.preventDefault();
             analyzeSymbols();
@@ -568,7 +540,6 @@
                 }
             }
             renderWatchlist();
-            startWatchlistAutoAnalyze();
         }
 
         function saveWatchlist() {
@@ -692,15 +663,9 @@
             await autoAnalyzeWatchlistForAlerts(true);
         }
 
-        function startWatchlistAutoAnalyze() {
-            if (watchlistAutoTimer !== null) return;
-            watchlistAutoTimer = setInterval(autoAnalyzeWatchlistForAlerts, 5 * 60 * 1000);
-        }
-
         async function autoAnalyzeWatchlistForAlerts(showMessage) {
             if (!watchlist.length) return;
             if (watchlistRequestInFlight) return;
-            if (!showMessage && document.hidden) return;
             const period = document.getElementById('periodSelect').value;
             const symbols = watchlist.join(',');
             if (!symbols) return;
@@ -715,7 +680,7 @@
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({ symbols: symbols, period: period }),
+                    body: JSON.stringify({ symbols: symbols, period: period, include_chart_data: false }),
                     signal: currentWatchlistController.signal
                 });
                 if (!response.ok) {
@@ -842,11 +807,9 @@
                 }
 
                 const symbolKey = getSymbolKey(result.symbol);
-                const symbolDomId = getSymbolDomId(result.symbol);
                 if (symbolKey) {
                     latestResultsMap[symbolKey] = result;
                 }
-                const storedBuyPrice = symbolKey && buyPriceStore[symbolKey] ? buyPriceStore[symbolKey] : '';
 
                 const resonanceScore = (typeof result.resonance_score === 'number') ? formatNumber(result.resonance_score, 3) : 'N/A';
                 const price = (typeof result.price === 'number') ? formatNumber(result.price, 5) : 'N/A';
@@ -858,7 +821,6 @@
                 let tradeSignal = result.signal || 'Hold';
                 let tradeConfidence = null;
                 let tradeStop = null;
-                let tradeTarget = null;
                 let tradePlan = null;
                 if (cdcVixFix && cdcVixFix.signal && cdcVixFix.signal !== 'WAIT') {
                     tradeSource = 'CDC+VixFix 15m';
@@ -869,11 +831,6 @@
                     }
                     if (typeof cdcVixFix.stop_loss === 'number') {
                         tradeStop = cdcVixFix.stop_loss;
-                    }
-                    if (typeof cdcVixFix.take_profit === 'number') {
-                        tradeTarget = cdcVixFix.take_profit;
-                    } else if (typeof cdcVixFix.exit_price === 'number') {
-                        tradeTarget = cdcVixFix.exit_price;
                     }
                 }
                 if (tradeSource === 'ทั่วไป' && actionZone && actionZone.signal && actionZone.signal !== 'WAIT') {
@@ -901,38 +858,13 @@
                     if (typeof emaCross.stop_loss === 'number') {
                         tradeStop = emaCross.stop_loss;
                     }
-                    if (typeof emaCross.take_profit === 'number') {
-                        tradeTarget = emaCross.take_profit;
-                    }
                 }
-                let essentialExitLevels = [];
-                if (tradePlan && Array.isArray(tradePlan.exit_levels) && tradePlan.exit_levels.length) {
-                    essentialExitLevels = tradePlan.exit_levels;
-                }
-                const entryRiskText = (tradePlan && typeof tradePlan.entry_risk_pct === 'number')
-                    ? formatNumber(tradePlan.entry_risk_pct, 2) + '%'
-                    : 'N/A';
-                const entryRiskLine = (tradePlan && typeof tradePlan.entry_risk_pct === 'number')
-                    ? `<div class="small mb-1">ความเสี่ยงตั้งต้นต่อไม้ (จุดเข้า): ${entryRiskText}</div>`
-                    : `<div class="small mb-1 text-muted">ความเสี่ยงตั้งต้นต่อไม้คำนวณเมื่อมีสัญญาณเข้าจริง</div>`;
-                const essentialExitHtml = essentialExitLevels.length
-                    ? `<div class="mt-2">
-                        <div class="small fw-semibold mb-1">จุดออกทำกำไรแนะนำ</div>
-                        ${entryRiskLine}
-                        ${essentialExitLevels.slice(0, 3).map(lv => {
-                            const label = lv && lv.label ? lv.label : 'TP';
-                            const target = (lv && typeof lv.target_price === 'number') ? formatNumber(lv.target_price, 5) : 'N/A';
-                            const profitPct = (lv && typeof lv.profit_pct === 'number') ? formatNumber(lv.profit_pct, 2) + '%' : 'N/A';
-                            const spacingPct = (lv && typeof lv.spacing_pct === 'number') ? formatNumber(lv.spacing_pct, 2) + '%' : 'N/A';
-                            const riskRemain = (lv && typeof lv.risk_remaining_pct === 'number') ? formatNumber(lv.risk_remaining_pct, 2) + '%' : 'N/A';
-                            const closeRatio = (lv && typeof lv.close_ratio_pct === 'number') ? formatNumber(lv.close_ratio_pct, 0) + '%' : 'N/A';
-                            return `<div class="small">${label} → ราคา ${target} | กำไร ${profitPct} | ระยะห่าง ${spacingPct} | ความเสี่ยงคงเหลือ ${riskRemain} | แนะนำขาย ${closeRatio}</div>`;
-                        }).join('')}
-                    </div>`
-                    : '';
                 const essentialConfidenceText = typeof tradeConfidence === 'number' ? formatNumber(tradeConfidence, 1) + '%' : 'N/A';
                 const essentialStopText = typeof tradeStop === 'number' ? formatNumber(tradeStop, 5) : 'N/A';
-                const essentialTargetText = typeof tradeTarget === 'number' ? formatNumber(tradeTarget, 5) : 'N/A';
+                const essentialPatternText = tradePlan && tradePlan.detected_pattern && tradePlan.detected_pattern !== 'None'
+                    ? tradePlan.detected_pattern
+                    : 'N/A';
+                const essentialLastSignalText = tradePlan && tradePlan.last_signal_time ? tradePlan.last_signal_time : 'N/A';
                 const essentialsHtml = `
                     <div class="mt-3">
                         <h5>แผนเทรดที่จำเป็น</h5>
@@ -954,292 +886,42 @@
                                 <div class="result-value">${essentialStopText}</div>
                             </div>
                             <div class="result-item">
-                                <div class="result-label">เป้าทำกำไร</div>
-                                <div class="result-value">${essentialTargetText}</div>
+                                <div class="result-label">Pattern ยืนยัน</div>
+                                <div class="result-value">${escapeHtml(essentialPatternText)}</div>
+                            </div>
+                            <div class="result-item">
+                                <div class="result-label">สัญญาณล่าสุด</div>
+                                <div class="result-value">${escapeHtml(essentialLastSignalText)}</div>
                             </div>
                         </div>
-                        ${essentialExitHtml}
                     </div>
                 `;
-
-                let emaCrossHtml = '';
-                if (result.ema_cross_15m) {
-                    const ec = result.ema_cross_15m;
-                    const ecSignal = ec.signal || 'WAIT';
-                    const ecZone = ec.zone || '-';
-                    const ecTrend = ec.trend || (ecZone === 'GREEN' ? 'UP' : (ecZone === 'RED' ? 'DOWN' : '-'));
-                    const ecPrice = (typeof ec.current_price === 'number') ? formatNumber(ec.current_price, 5) : 'N/A';
-                    const ecEmaFast = (typeof ec.ema_fast === 'number') ? formatNumber(ec.ema_fast, 5) : 'N/A';
-                    const ecEmaSlow = (typeof ec.ema_slow === 'number') ? formatNumber(ec.ema_slow, 5) : 'N/A';
-                    const ecFastLen = (typeof ec.ema_fast_length === 'number') ? ec.ema_fast_length : 12;
-                    const ecSlowLen = (typeof ec.ema_slow_length === 'number') ? ec.ema_slow_length : 26;
-                    const ecSl = (typeof ec.stop_loss === 'number') ? formatNumber(ec.stop_loss, 5) : 'N/A';
-                    const ecTp = (typeof ec.take_profit === 'number') ? formatNumber(ec.take_profit, 5) : 'N/A';
-                    const ecRr = (typeof ec.risk_reward === 'number') ? '1:' + formatNumber(ec.risk_reward, 1) : 'N/A';
-                    const ecConf = typeof ec.predicted_win_prob === 'number'
-                        ? formatNumber(ec.predicted_win_prob, 1) + '%'
-                        : (typeof ec.confidence === 'number' ? formatNumber(ec.confidence, 1) + '%' : 'N/A');
-                    const ecBars = typeof ec.expected_holding_bars_15m === 'number' ? ec.expected_holding_bars_15m : null;
-                    const ecMovePct = (typeof ec.expected_move_pct === 'number') ? formatNumber(ec.expected_move_pct, 1) + '%' : 'N/A';
-                    const ecLastTime = ec.last_cross_time || '-';
-                    const ecBarsSince = typeof ec.bars_since_cross === 'number' ? ec.bars_since_cross : null;
-                    const ecHistTrades = typeof ec.historical_trades === 'number' ? ec.historical_trades : null;
-                    const ecHistWin = typeof ec.historical_win_rate === 'number'
-                        ? formatNumber(ec.historical_win_rate, 1) + '%'
-                        : 'N/A';
-                    const ecHistRr = typeof ec.historical_avg_rr === 'number'
-                        ? '1:' + formatNumber(Math.abs(ec.historical_avg_rr), 2)
-                        : 'N/A';
-                    let ecExpectText = '';
-                    if (ecBars !== null) {
-                        const hours = (ecBars * 15) / 60;
-                        ecExpectText = ecMovePct + ' ~ ' + ecBars + ' แท่ง (' + formatNumber(hours, 1) + ' ชม.)';
-                    }
-                    const zoneLabel = ecZone === 'GREEN' ? ('Zone เขียว (EMA' + ecFastLen + ' อยู่เหนือ EMA' + ecSlowLen + ')') :
-                        ecZone === 'RED' ? ('Zone แดง (EMA' + ecFastLen + ' อยู่ใต้ EMA' + ecSlowLen + ')') : ecZone;
-                    let recentText = '';
-                    if (ecBarsSince !== null) {
-                        recentText = 'เกิดสัญญาณตัดกันมาแล้วประมาณ ' + ecBarsSince + ' แท่ง 15 นาที';
-                    }
-                    emaCrossHtml = `
-                        <div class="mt-3">
-                            <h5>EMA Cross 15 นาที (สัญญาณ: ${ecSignal})</h5>
-                            <div class="mb-2">
-                                <span class="badge ${ecZone === 'GREEN' ? 'bg-success' : (ecZone === 'RED' ? 'bg-danger' : 'bg-secondary')}">โซน: ${zoneLabel}</span>
-                                <span class="badge ${ecTrend === 'UP' ? 'bg-success' : (ecTrend === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">Trend: ${ecTrend}</span>
-                                <span class="badge bg-secondary ms-2">Risk : Reward: ${ecRr}</span>
-                                <span class="badge bg-info text-dark ms-2">โอกาสชนะ (ปรับสูตร): ${ecConf}</span>
-                                <span class="badge bg-dark ms-2">RVOL: ${(typeof ec.rvol === 'number') ? formatNumber(ec.rvol, 2) : 'N/A'}</span>
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
-                                    <div class="result-value">${ecPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA${ecFastLen}</div>
-                                    <div class="result-value">${ecEmaFast}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA${ecSlowLen}</div>
-                                    <div class="result-value">${ecEmaSlow}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss</div>
-                                    <div class="result-value">${ecSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit</div>
-                                    <div class="result-value">${ecTp}</div>
-                                </div>
-                                ${ecHistTrades !== null ? `
-                                <div class="result-item">
-                                    <div class="result-label">ประวัติสัญญาณในกรอบข้อมูลนี้</div>
-                                    <div class="result-value">${ecHistTrades} ครั้ง ชนะ ${ecHistWin} (ค่าเฉลี่ย R:R ${ecHistRr})</div>
-                                </div>` : ''}
-                                ${ecExpectText ? `
-                                <div class="result-item">
-                                    <div class="result-label">คาดว่าราคาเคลื่อนที่ได้ประมาณ</div>
-                                    <div class="result-value">${ecExpectText}</div>
-                                </div>` : ''}
-                            </div>
-                            <div class="mt-2 small text-muted">
-                                จุดเข้าใช้หลักการ EMA${ecFastLen} ตัด EMA${ecSlowLen} (ปรับค่าจากระบบหา EMA ที่ดีที่สุด)
-                                <br>จุดตัดล่าสุด: ${ecLastTime} ${recentText ? '(' + recentText + ')' : ''}
-                            </div>
-                        </div>
-                    `;
+                const analysisLines = [];
+                if (tradePlan && typeof tradePlan.reason === 'string' && tradePlan.reason.trim()) {
+                    analysisLines.push(tradePlan.reason.trim());
                 }
-
-                let actionZoneHtml = '';
-                if (result.actionzone_15m) {
-                    const az = result.actionzone_15m;
-                    const azSignal = az.signal || 'WAIT';
-                    const azZone = az.zone || '-';
-                    const azRaw = az.raw_signal || 'WAIT';
-                    const azTrend = az.trend_1h || '-';
-                    const azTrendStrength = az.trend_strength_1h || '-';
-                    const azAlign = az.trend_alignment;
-                    const azReco = az.recommendation || azSignal || 'WAIT';
-                    const azPrice = (typeof az.current_price === 'number') ? formatNumber(az.current_price, 5) : 'N/A';
-                    const azEmaFast = (typeof az.ema_fast === 'number') ? formatNumber(az.ema_fast, 5) : 'N/A';
-                    const azEmaSlow = (typeof az.ema_slow === 'number') ? formatNumber(az.ema_slow, 5) : 'N/A';
-                    const azFastLen = (typeof az.ema_fast_length === 'number') ? az.ema_fast_length : 12;
-                    const azSlowLen = (typeof az.ema_slow_length === 'number') ? az.ema_slow_length : 26;
-                    const azSmooth = (typeof az.smooth === 'number') ? az.smooth : 1;
-                    const azWin = typeof az.win_prob === 'number' ? formatNumber(az.win_prob, 1) + '%' : (typeof az.confidence === 'number' ? formatNumber(az.confidence, 1) + '%' : 'N/A');
-                    const azBarsSince = typeof az.bars_since_signal === 'number' ? az.bars_since_signal : null;
-                    const azLastTime = az.last_signal_time || '-';
-                    const azGap = (typeof az.ema_gap_pct === 'number') ? formatNumber(az.ema_gap_pct, 2) + '%' : 'N/A';
-                    const azRvol = (typeof az.rvol === 'number') ? formatNumber(az.rvol, 2) : 'N/A';
-                    const azSl = (typeof az.stop_loss === 'number') ? formatNumber(az.stop_loss, 5) : 'N/A';
-                    const azAtr = (typeof az.atr === 'number') ? formatNumber(az.atr, 5) : 'N/A';
-                    const ob = result.order_blocks_15m || {};
-                    const obSupport = (typeof ob.nearest_support === 'number') ? formatNumber(ob.nearest_support, 5) : 'N/A';
-                    const obResistance = (typeof ob.nearest_resistance === 'number') ? formatNumber(ob.nearest_resistance, 5) : 'N/A';
-                    const obSupports = Array.isArray(ob.support_levels) ? ob.support_levels.slice(0, 3).map(v => formatNumber(v, 5)).join(', ') : '';
-                    const obResists = Array.isArray(ob.resistance_levels) ? ob.resistance_levels.slice(0, 3).map(v => formatNumber(v, 5)).join(', ') : '';
-                    let azRecent = '';
-                    if (azBarsSince !== null) {
-                        azRecent = 'ผ่านไป ' + azBarsSince + ' แท่ง 15 นาที';
-                    }
-                    actionZoneHtml = `
-                        <div class="mt-3">
-                            <h5>ActionZone 15 นาที (สัญญาณ: ${azSignal})</h5>
-                            <div class="mb-2">
-                                <span class="badge ${azZone === 'GREEN' ? 'bg-success' : (azZone === 'RED' ? 'bg-danger' : 'bg-secondary')}">โซน: ${azZone}</span>
-                                <span class="badge ${azTrend === 'UP' ? 'bg-success' : (azTrend === 'DOWN' ? 'bg-danger' : 'bg-secondary')} ms-2">Trend 1H: ${azTrend}</span>
-                                <span class="badge ${azAlign ? 'bg-success' : 'bg-warning text-dark'} ms-2">Trend Alignment: ${azAlign ? 'OK' : 'Mismatch'}</span>
-                                <span class="badge bg-info text-dark ms-2">โอกาสชนะ: ${azWin}</span>
-                                <span class="badge bg-dark ms-2">RVOL: ${azRvol}</span>
-                                <span class="badge ${azReco.indexOf('BUY') !== -1 ? 'bg-success' : (azReco.indexOf('SELL') !== -1 ? 'bg-danger' : 'bg-secondary')} ms-2">คำแนะนำ: ${azReco}</span>
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
-                                    <div class="result-value">${azPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA${azFastLen} (Smooth ${azSmooth})</div>
-                                    <div class="result-value">${azEmaFast}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA${azSlowLen}</div>
-                                    <div class="result-value">${azEmaSlow}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">EMA Gap</div>
-                                    <div class="result-value">${azGap}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">แนวรับ Order Block ใกล้สุด</div>
-                                    <div class="result-value">${obSupport}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">แนวต้าน Order Block ใกล้สุด</div>
-                                    <div class="result-value">${obResistance}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss แนะนำ</div>
-                                    <div class="result-value">${azSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">ATR (15m)</div>
-                                    <div class="result-value">${azAtr}</div>
-                                </div>
-                            </div>
-                            <div class="mt-2 small text-muted">
-                                สัญญาณดิบ: ${azRaw} • จุดตัดล่าสุด: ${azLastTime} ${azRecent ? '(' + azRecent + ')' : ''} • Trend Strength 1H: ${azTrendStrength}
-                                ${obSupports ? '<br>แนวรับล่าสุด: ' + obSupports : ''}
-                                ${obResists ? '<br>แนวต้านล่าสุด: ' + obResists : ''}
-                            </div>
-                        </div>
-                    `;
-                }
-
-                let cryptoReversalHtml = '';
-                if (result.crypto_reversal_15m) {
-                    const cr = result.crypto_reversal_15m;
-                    const crPrice = (typeof cr.current_price === 'number') ? formatNumber(cr.current_price, 5) : 'N/A';
-                    const crRsi = (typeof cr.rsi === 'number') ? formatNumber(cr.rsi, 3) : 'N/A';
-                    const crAtr = (typeof cr.atr === 'number') ? formatNumber(cr.atr, 5) : 'N/A';
-                    const crSl = (typeof cr.stop_loss === 'number') ? formatNumber(cr.stop_loss, 5) : 'N/A';
-                    const crTp = (typeof cr.take_profit === 'number') ? formatNumber(cr.take_profit, 5) : 'N/A';
-                    const crConf = typeof cr.confidence === 'number' ? cr.confidence + '%' : (cr.confidence || 'N/A');
-                    const crSetup = cr.setup || 'WAIT';
-                    const crPattern = cr.pattern || '-';
-                    const crReason = cr.reason || '-';
-                    let crRrText = 'N/A';
-                    if (typeof cr.risk_reward === 'number' && cr.risk_reward > 0) {
-                        crRrText = '1:' + formatNumber(cr.risk_reward, 2);
-                    }
-                    let crWinProbText = '';
-                    if (typeof cr.win_prob === 'number') {
-                        crWinProbText = formatNumber(cr.win_prob, 1) + '%';
-                    }
-                    let crExpectText = '';
-                    if (typeof cr.expected_move_pct === 'number') {
-                        const move = formatNumber(cr.expected_move_pct, 1);
-                        const bars = typeof cr.expected_holding_bars_15m === 'number' ? cr.expected_holding_bars_15m : null;
-                        if (bars !== null) {
-                            const hours = (bars * 15) / 60;
-                            crExpectText = move + '% ~ ' + bars + ' แท่ง (' + formatNumber(hours, 1) + ' ชม.)';
-                        } else {
-                            crExpectText = move + '%';
+                if (tradePlan && Array.isArray(tradePlan.analysis_points)) {
+                    tradePlan.analysis_points.forEach(point => {
+                        if (typeof point === 'string' && point.trim()) {
+                            analysisLines.push(point.trim());
                         }
-                    }
-                    let smcHtml = '';
-                    if (cr.smc_setup && cr.smc_setup !== 'NONE') {
-                        const smcEntry = (typeof cr.smc_entry === 'number') ? formatNumber(cr.smc_entry, 5) : 'N/A';
-                        const smcSl = (typeof cr.smc_stop_loss === 'number') ? formatNumber(cr.smc_stop_loss, 5) : 'N/A';
-                        const smcTp = (typeof cr.smc_take_profit === 'number') ? formatNumber(cr.smc_take_profit, 5) : 'N/A';
-                        const smcRr = (typeof cr.smc_rr === 'number') ? '1:' + formatNumber(cr.smc_rr, 2) : 'N/A';
-                        smcHtml = `
-                            <div class="mt-2">
-                                <h6>SMC Liquidity Sweep Entry (${cr.smc_setup})</h6>
-                                <div class="result-grid">
-                                    <div class="result-item">
-                                        <div class="result-label">จุดเข้า (SMC)</div>
-                                        <div class="result-value">${smcEntry}</div>
-                                    </div>
-                                    <div class="result-item">
-                                        <div class="result-label">Stop Loss (SMC)</div>
-                                        <div class="result-value">${smcSl}</div>
-                                    </div>
-                                    <div class="result-item">
-                                        <div class="result-label">Take Profit (SMC)</div>
-                                        <div class="result-value">${smcTp}</div>
-                                    </div>
-                                    <div class="result-item">
-                                        <div class="result-label">Risk : Reward (SMC)</div>
-                                        <div class="result-value">${smcRr}</div>
-                                    </div>
-                                </div>
-                            </div>
-                        `;
-                    }
-
-                    cryptoReversalHtml = `
-                        <div class="mt-3">
-                            <h5>Crypto Reversal 15 นาที (${crSetup})</h5>
-                            <div class="mb-2">
-                                <span class="badge bg-success">ความมั่นใจ (Reversal): ${crConf}</span>
-                                <span class="badge bg-secondary ms-2">รูปแบบ: ${crPattern}</span>
-                                <span class="badge bg-dark ms-2">Risk : Reward (Reversal): ${crRrText}</span>
-                                ${crWinProbText ? `<span class="badge bg-info text-dark ms-2">Win Prob: ${crWinProbText}</span>` : ''}
-                            </div>
-                            <div class="result-grid">
-                                <div class="result-item">
-                                    <div class="result-label">ราคา 15 นาที ล่าสุด</div>
-                                    <div class="result-value">${crPrice}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">RSI (15m)</div>
-                                    <div class="result-value">${crRsi}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">ATR (15m)</div>
-                                    <div class="result-value">${crAtr}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Stop Loss</div>
-                                    <div class="result-value">${crSl}</div>
-                                </div>
-                                <div class="result-item">
-                                    <div class="result-label">Take Profit</div>
-                                    <div class="result-value">${crTp}</div>
-                                </div>
-                                ${crExpectText ? `
-                                <div class="result-item">
-                                    <div class="result-label">คาดว่าไปได้ประมาณ</div>
-                                    <div class="result-value">${crExpectText}</div>
-                                </div>` : ''}
-                            </div>
-                            <div class="mt-2"><strong>เหตุผลสัญญาณ Crypto Reversal:</strong> ${crReason}</div>
-                            ${smcHtml}
-                        </div>
-                    `;
+                    });
                 }
+                if (tradePlan && typeof tradePlan.forecast_direction === 'string' && tradePlan.forecast_direction.trim()) {
+                    analysisLines.push(
+                        'Forecast: ' + tradePlan.forecast_direction.trim().toUpperCase()
+                        + (typeof tradePlan.forecast_score === 'number' ? ' (' + formatNumber(tradePlan.forecast_score, 0) + '/100)' : '')
+                    );
+                }
+                const compactAnalysisLines = [...new Set(analysisLines)].slice(0, 6);
+                const compactAnalysisHtml = compactAnalysisLines.length
+                    ? `<div class="mt-3">
+                        <h5>เหตุผลวิเคราะห์</h5>
+                        <div class="empty-state text-start">
+                            ${compactAnalysisLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}
+                        </div>
+                    </div>`
+                    : '';
 
                 card.innerHTML = `
                     <div class="result-header d-flex justify-content-between align-items-center">
@@ -1292,27 +974,7 @@
                         </div>
                     </div>
                     ${essentialsHtml}
-                    <div class="mt-3">
-                        <label for="buyPrice-${symbolDomId}" class="form-label small">ราคาที่ซื้อ/ถืออยู่ (ต่อหุ้น)</label>
-                        <div class="input-group input-group-sm mb-1">
-                            <input type="number"
-                                   class="form-control"
-                                   id="buyPrice-${symbolDomId}"
-                                   min="0"
-                                   step="0.0001"
-                                   placeholder="กรอกราคาที่ซื้อ"
-                                   value="${storedBuyPrice}">
-                            <button type="button"
-                                    class="btn btn-outline-success"
-                                    onclick="calculateDecision('${symbolKey}')">
-                                คำนวณการตัดสินใจ
-                            </button>
-                        </div>
-                        <div id="decision-${symbolDomId}" class="small mt-1"></div>
-                    </div>
-                    ${actionZoneHtml}
-                    ${emaCrossHtml}
-                    ${cryptoReversalHtml}
+                    ${compactAnalysisHtml}
                     <div class="chart-container">
                         <canvas id="chart-${result.symbol}"></canvas>
                     </div>
@@ -1323,315 +985,9 @@
             });
         }
 
-        function calculateDecision(symbol) {
-            const key = getSymbolKey(symbol);
-            if (!key) return;
-            const domId = getSymbolDomId(symbol);
-            const input = document.getElementById('buyPrice-' + domId);
-            const decisionEl = document.getElementById('decision-' + domId);
-            if (!input || !decisionEl) return;
-            const raw = input.value.trim();
-            const buyPrice = parseFloat(raw);
-            if (!raw || isNaN(buyPrice) || buyPrice <= 0) {
-                decisionEl.innerHTML = '<span class="text-danger">กรุณากรอกราคาซื้อที่ถูกต้อง</span>';
-                return;
-            }
-            const result = latestResultsMap[key];
-            if (!result) {
-                decisionEl.innerHTML = '<span class="text-danger">ไม่พบข้อมูลวิเคราะห์ล่าสุด โปรดกดวิเคราะห์สัญลักษณ์นี้ก่อน</span>';
-                return;
-            }
-            buyPriceStore[key] = buyPrice;
-            saveBuyPriceStore();
-            const context = buildDecisionContext(result, buyPrice);
-            const advice = buildDecisionAdvice(context);
-            decisionEl.innerHTML = renderDecisionAdvice(advice);
-        }
-
-        function buildDecisionContext(result, buyPrice) {
-            const s = result.sovereign_4h || null;
-            const st = result.short_term_15m || null;
-            const q = result.quantum_15m || null;
-            const ema = result.ema_cross_15m || null;
-            const pred = result.prediction || null;
-            let currentPrice = null;
-            if (typeof result.price === 'number') {
-                currentPrice = result.price;
-            } else if (s && typeof s.current_price === 'number') {
-                currentPrice = s.current_price;
-            } else if (st && typeof st.current_price === 'number') {
-                currentPrice = st.current_price;
-            }
-            const profitPct = currentPrice && buyPrice ? ((currentPrice - buyPrice) / buyPrice) * 100 : null;
-            let atrPct = null;
-            if (st && typeof st.atr === 'number' && typeof st.current_price === 'number' && st.current_price > 0) {
-                atrPct = (st.atr / st.current_price) * 100;
-            }
-            let rvol = null;
-            if (st && typeof st.rvol === 'number') {
-                rvol = st.rvol;
-            }
-            const adx = q && typeof q.adx === 'number' ? q.adx : null;
-            let emaWinProb = null;
-            let emaExpectedMovePct = null;
-            let emaExpectedBars = null;
-            if (ema) {
-                if (typeof ema.predicted_win_prob === 'number') {
-                    emaWinProb = ema.predicted_win_prob;
-                } else if (typeof ema.confidence === 'number') {
-                    emaWinProb = ema.confidence;
-                }
-                if (typeof ema.expected_move_pct === 'number') {
-                    emaExpectedMovePct = ema.expected_move_pct;
-                }
-                if (typeof ema.expected_holding_bars_15m === 'number') {
-                    emaExpectedBars = ema.expected_holding_bars_15m;
-                }
-            }
-            let predDirection = '';
-            let predProbability = null;
-            if (pred) {
-                if (typeof pred.direction === 'string') {
-                    predDirection = pred.direction;
-                }
-                if (typeof pred.probability === 'number') {
-                    predProbability = pred.probability;
-                }
-            }
-            return {
-                currentPrice: currentPrice,
-                buyPrice: buyPrice,
-                profitPct: profitPct,
-                rsi: typeof result.rsi === 'number' ? result.rsi : null,
-                resonanceScore: typeof result.resonance_score === 'number' ? result.resonance_score : null,
-                signal: result.signal || '',
-                trend: s && s.trend_status ? s.trend_status : (result.phase_status || ''),
-                sovereignReco: s && s.recommendation ? s.recommendation : '',
-                sovereignStop: s && typeof s.entry_stop_loss === 'number' ? s.entry_stop_loss : null,
-                sovereignTrail: s && typeof s.trailing_stop === 'number' ? s.trailing_stop : null,
-                shortStop: st && typeof st.stop_loss === 'number' ? st.stop_loss : null,
-                shortTakeProfit: st && typeof st.take_profit === 'number' ? st.take_profit : null,
-                atrPct: typeof atrPct === 'number' ? atrPct : null,
-                rvol: rvol,
-                adx: adx,
-                emaWinProb: emaWinProb,
-                emaExpectedMovePct: emaExpectedMovePct,
-                emaExpectedBars: emaExpectedBars,
-                predDirection: predDirection,
-                predProbability: predProbability
-            };
-        }
-
-        function classifyRisk(context) {
-            const atrPct = typeof context.atrPct === 'number' ? context.atrPct : null;
-            const rvol = typeof context.rvol === 'number' ? context.rvol : null;
-            const adx = typeof context.adx === 'number' ? context.adx : null;
-            const resonance = typeof context.resonanceScore === 'number' ? context.resonanceScore : null;
-            const trend = (context.trend || '').toUpperCase();
-            if (atrPct !== null || rvol !== null) {
-                if ((atrPct !== null && atrPct >= 5) || (rvol !== null && rvol >= 3)) {
-                    return 'HIGH';
-                }
-                if ((atrPct !== null && atrPct <= 2.5) && (rvol === null || rvol <= 1.5)) {
-                    return 'LOW';
-                }
-            }
-            if (adx !== null) {
-                if (adx >= 45) return 'HIGH';
-                if (adx <= 20 && atrPct !== null && atrPct <= 2) return 'LOW';
-            }
-            if (resonance !== null) {
-                if (resonance >= 60 && trend.indexOf('BULL') !== -1) return 'LOW';
-                if (resonance <= -60 && trend.indexOf('BEAR') !== -1) return 'HIGH';
-            }
-            return 'MEDIUM';
-        }
-
-        function buildDecisionAdvice(context) {
-            const advice = {
-                stance: '',
-                summary: '',
-                profitPct: context.profitPct,
-                stopLoss: null,
-                takeProfit: null,
-                notes: [],
-                risk: 'MEDIUM'
-            };
-            const profit = typeof context.profitPct === 'number' ? context.profitPct : null;
-            const rsi = context.rsi;
-            const resonance = context.resonanceScore;
-            const trend = (context.trend || '').toUpperCase();
-            const reco = (context.sovereignReco || '').toUpperCase();
-            const signal = (context.signal || '').toUpperCase();
-            const risk = classifyRisk(context);
-            advice.risk = risk;
-            const emaWinProb = typeof context.emaWinProb === 'number' ? context.emaWinProb : null;
-            const predDir = (context.predDirection || '').toUpperCase();
-            const predProb = typeof context.predProbability === 'number' ? context.predProbability : null;
-            let maxLoss = risk === 'LOW' ? 5 : (risk === 'HIGH' ? 12 : 8);
-            if (predProb !== null) {
-                if (predDir === 'DOWN' && predProb >= 65) {
-                    maxLoss -= 2;
-                } else if (predDir === 'UP' && predProb >= 70) {
-                    maxLoss += 1;
-                }
-            }
-            if (emaWinProb !== null) {
-                if (emaWinProb >= 75) {
-                    maxLoss += 1;
-                } else if (emaWinProb <= 45) {
-                    maxLoss -= 1;
-                }
-            }
-            if (maxLoss < 3) {
-                maxLoss = 3;
-            }
-            if (maxLoss > 15) {
-                maxLoss = 15;
-            }
-            const lossLimit = -maxLoss;
-            let baseStop = context.sovereignStop || context.shortStop || null;
-            let stopFromRisk = null;
-            if (context.buyPrice && context.buyPrice > 0) {
-                stopFromRisk = context.buyPrice * (1 - maxLoss / 100);
-            }
-            if (stopFromRisk !== null) {
-                if (!baseStop) {
-                    baseStop = stopFromRisk;
-                } else {
-                    if (risk === 'HIGH') {
-                        baseStop = Math.min(baseStop, stopFromRisk);
-                    } else {
-                        baseStop = Math.max(baseStop, stopFromRisk);
-                    }
-                }
-            }
-            let baseTp = context.shortTakeProfit || null;
-            if (!baseTp && context.buyPrice && context.buyPrice > 0) {
-                baseTp = context.buyPrice * 1.15;
-            }
-            advice.stopLoss = baseStop;
-            advice.takeProfit = baseTp;
-            const isUptrend = trend.indexOf('BULL') !== -1 || signal === 'BUY' || reco.indexOf('BUY') !== -1;
-            const isDowntrend = trend.indexOf('BEAR') !== -1 || signal === 'SELL';
-            const strongResonance = typeof resonance === 'number' && resonance >= 60;
-            const weakResonance = typeof resonance === 'number' && resonance <= -20;
-            if (profit === null || context.currentPrice === null) {
-                advice.stance = 'WATCH';
-                advice.summary = 'ข้อมูลราคายังไม่ครบ แนะนำเฝ้าดูและไม่เพิ่มความเสี่ยง';
-                advice.notes.push('ระบบไม่พบราคาปัจจุบันที่ชัดเจนจากการวิเคราะห์ล่าสุด');
-                return advice;
-            }
-            if (profit < lossLimit) {
-                advice.stance = 'CUT_LOSS';
-                advice.summary = 'ขาดทุนเกินกรอบความเสี่ยงที่กำหนด แนะนำพิจารณาตัดขาดทุนเพื่อลดความเสี่ยง';
-                advice.stopLoss = baseStop || stopFromRisk || (context.currentPrice * 0.97);
-                advice.takeProfit = context.buyPrice;
-                advice.notes.push('การปล่อยให้ขาดทุนลึกอาจกระทบพอร์ตในระยะยาว');
-                if (isDowntrend || weakResonance) {
-                    advice.notes.push('แนวโน้มตอนนี้ไม่สนับสนุน ให้เน้นรักษาทุนมากกว่าลุ้นกลับตัว');
-                }
-                return advice;
-            }
-            if (profit >= 15) {
-                advice.stance = 'TAKE_PROFIT';
-                advice.summary = 'กำไรมากกว่า 15% แนะนำทยอยขายทำกำไรและเลื่อนจุดตัดขาดทุนตาม';
-                advice.stopLoss = context.currentPrice * 0.95;
-                advice.takeProfit = context.currentPrice * 1.03;
-                advice.notes.push('การล็อกกำไรบางส่วนช่วยลดผลกระทบหากตลาดกลับตัวแรง');
-                if (isUptrend && strongResonance) {
-                    advice.notes.push('แนวโน้มยังดี สามารถถือส่วนที่เหลือให้กำไรวิ่งต่อได้');
-                }
-                return advice;
-            }
-            if (profit >= 3 && profit < 15) {
-                if (isUptrend && !weakResonance && (rsi === null || rsi < 70)) {
-                    advice.stance = 'HOLD';
-                    advice.summary = 'กำไรอยู่ในโซนปลอดภัย แนวโน้มยังสนับสนุน แนะนำถือและเลื่อนจุดตัดขาดทุน';
-                    advice.stopLoss = context.currentPrice * 0.95;
-                    advice.takeProfit = context.currentPrice * 1.08;
-                    advice.notes.push('เลื่อนจุดตัดขาดทุนขึ้นตามราคาเพื่อล็อกกำไรบางส่วน');
-                } else {
-                    advice.stance = 'TAKE_PROFIT';
-                    advice.summary = 'แนวโน้มเริ่มอ่อนแรง แม้ยังมีกำไร แนะนำทยอยขายบางส่วน';
-                    advice.stopLoss = context.currentPrice * 0.96;
-                    advice.takeProfit = context.currentPrice * 1.03;
-                    advice.notes.push('RSI สูงหรือแนวโน้มไม่ชัดเจนอาจบ่งชี้ภาวะใกล้จบรอบ');
-                }
-                return advice;
-            }
-            if (profit > lossLimit && profit < 3) {
-                if (isUptrend && !weakResonance && (rsi === null || (rsi > 35 && rsi < 70))) {
-                    advice.stance = 'HOLD';
-                    advice.summary = 'กำไร/ขาดทุนยังไม่มาก และแนวโน้มยังไม่เสียหาย แนะนำถือและตั้งจุดตัดขาดทุนให้ชัดเจน';
-                    advice.stopLoss = baseStop || stopFromRisk || (context.buyPrice * 0.93);
-                    advice.takeProfit = context.buyPrice * 1.12;
-                } else if (isDowntrend && weakResonance) {
-                    advice.stance = 'CUT_LOSS';
-                    advice.summary = 'แนวโน้มไม่สนับสนุนและไม่มีสัญญาณเชิงบวก แนะนำจำกัดการขาดทุน';
-                    advice.stopLoss = baseStop || stopFromRisk || (context.currentPrice * 0.97);
-                    advice.takeProfit = context.buyPrice * 1.03;
-                } else {
-                    advice.stance = 'WATCH';
-                    advice.summary = 'สัญญาณผสมกัน ยังไม่ชัดเจน ให้ใช้ขนาดไม้เล็กและเฝ้าดูใกล้ชิด';
-                    advice.stopLoss = baseStop || stopFromRisk || (context.buyPrice * 0.94);
-                    advice.takeProfit = context.buyPrice * 1.08;
-                }
-                return advice;
-            }
-            advice.stance = 'WATCH';
-            advice.summary = 'สภาวะไม่เข้าเกณฑ์ชัดเจน แนะนำรอดูสัญญาณรอบใหม่';
-            advice.notes.push('รอสัญญาณรอบใหม่จาก ActionZone, EMA Cross หรือ Crypto Reversal เพื่อยืนยันอีกครั้ง');
-            return advice;
-        }
-
-        function renderDecisionAdvice(advice) {
-            if (!advice) return '';
-            const profitText = typeof advice.profitPct === 'number'
-                ? 'กำไร/ขาดทุนปัจจุบัน: ' + formatNumber(advice.profitPct, 2) + '%'
-                : 'กำไร/ขาดทุนปัจจุบัน: N/A';
-            let riskText = '';
-            if (advice.risk === 'HIGH') {
-                riskText = 'กลุ่มความเสี่ยง: สูง';
-            } else if (advice.risk === 'LOW') {
-                riskText = 'กลุ่มความเสี่ยง: ต่ำ';
-            } else {
-                riskText = 'กลุ่มความเสี่ยง: กลาง';
-            }
-            let stanceLabel = '';
-            if (advice.stance === 'HOLD') {
-                stanceLabel = '<span class="badge bg-primary me-1">ถือ</span>';
-            } else if (advice.stance === 'TAKE_PROFIT') {
-                stanceLabel = '<span class="badge bg-success me-1">ทำกำไร</span>';
-            } else if (advice.stance === 'CUT_LOSS') {
-                stanceLabel = '<span class="badge bg-danger me-1">ตัดขาดทุน</span>';
-            } else {
-                stanceLabel = '<span class="badge bg-secondary me-1">เฝ้าดู</span>';
-            }
-            const stopLossText = advice.stopLoss
-                ? 'Stop loss โดยประมาณ: ' + formatNumber(advice.stopLoss, 5)
-                : 'Stop loss โดยประมาณ: N/A';
-            const takeProfitText = advice.takeProfit
-                ? 'เป้าทำกำไรถัดไป: ' + formatNumber(advice.takeProfit, 5)
-                : 'เป้าทำกำไรถัดไป: N/A';
-            const notesHtml = advice.notes && advice.notes.length
-                ? '<ul class="mb-0">' + advice.notes.map(n => '<li>' + n + '</li>').join('') + '</ul>'
-                : '';
-            return `
-                <div class="border rounded p-2 bg-light">
-                    <div>${stanceLabel}${advice.summary}</div>
-                    <div class="small mt-1">${profitText}</div>
-                    <div class="small">${riskText}</div>
-                    <div class="small">${stopLossText}</div>
-                    <div class="small">${takeProfitText}</div>
-                    ${notesHtml}
-                </div>
-            `;
-        }
-
         function renderChart(canvasId, chartData) {
             const canvas = document.getElementById(canvasId);
-            if (!canvas) return;
+            if (!canvas || !chartData) return;
             const ctx = canvas.getContext('2d');
             const existing = chartInstances[canvasId];
             if (existing) {
@@ -1766,22 +1122,13 @@
                         detail: az.signal + trendText + (confAz ? ' (' + formatNumber(confAz, 1) + '%)' : '')
                     });
                 }
-                const cr = result.crypto_reversal_15m;
-                if (cr && cr.setup && cr.setup.indexOf('WAIT') === -1) {
-                    const confCr = typeof cr.confidence === 'number' ? cr.confidence : 0;
-                    if (confCr >= 80) {
+                const cdc = result.cdc_vixfix_15m;
+                if (cdc && cdc.signal && cdc.signal !== 'WAIT') {
+                    const confCdc = typeof cdc.confidence === 'number' ? cdc.confidence : 0;
+                    if (confCdc >= 68) {
                         tags.push({
-                            label: 'Crypto Reversal 15m',
-                            detail: cr.setup + ' (' + confCr + '%)'
-                        });
-                    }
-                }
-                if (cr && cr.smc_setup && cr.smc_setup !== 'NONE') {
-                    const smcRr = typeof cr.smc_rr === 'number' ? cr.smc_rr : 0;
-                    if (smcRr >= 1.5) {
-                        tags.push({
-                            label: 'Crypto SMC 15m',
-                            detail: cr.smc_setup + ' (R:R 1:' + smcRr.toFixed(1) + ')'
+                            label: 'CDC+VixFix 15m',
+                            detail: cdc.signal + (confCdc ? ' (' + formatNumber(confCdc, 1) + '%)' : '') + (cdc.sell_trigger ? ' | ' + cdc.sell_trigger : '')
                         });
                     }
                 }
@@ -1812,10 +1159,9 @@
             const scored = important.map(item => {
                 let score = 0;
                 item.tags.forEach(t => {
+                    if (t.label === 'CDC+VixFix 15m') score += 240;
                     if (t.label === 'ActionZone 15m') score += 220;
                     if (t.label === 'EMA Cross 15m') score += 180;
-                    if (t.label === 'Crypto Reversal 15m') score += 160;
-                    if (t.label === 'Crypto SMC 15m') score += 140;
                     if (t.detail) {
                         const m = t.detail.match(/(\d+)%/);
                         if (m && m[1]) {
@@ -1846,7 +1192,6 @@
         }
 
         loadWatchlist();
-        loadBuyPriceStore();
         renderAnalysisSummary(null);
         renderActionQueue(null);
         refreshSystemHealth();

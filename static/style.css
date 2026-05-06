@@ -605,8 +605,7 @@ body::after {
 }
 
 .btn-outline-primary,
-.btn-outline-secondary,
-.btn-outline-success {
+.btn-outline-secondary {
     border-width: 1px;
     background: rgba(255, 255, 255, 0.92);
 }
@@ -619,11 +618,6 @@ body::after {
 .btn-outline-secondary {
     border-color: rgba(115, 129, 160, 0.28);
     color: #55637f;
-}
-
-.btn-outline-success {
-    border-color: rgba(15, 157, 120, 0.28);
-    color: var(--success);
 }
 
 .results-stack,
@@ -707,21 +701,6 @@ body::after {
     padding: 0.58em 0.8em;
     font-weight: 800;
     letter-spacing: 0.01em;
-}
-
-.signal-buy {
-    background: linear-gradient(135deg, #0aa870, #33c48e);
-    color: #fff;
-}
-
-.signal-sell {
-    background: linear-gradient(135deg, #df4967, #ff8658);
-    color: #fff;
-}
-
-.signal-hold {
-    background: linear-gradient(135deg, #78849b, #9ca7bb);
-    color: #fff;
 }
 
 .loading {
@@ -887,20 +866,6 @@ body::after {
     max-width: 52ch;
     margin: 0 auto;
     color: var(--text-soft);
-}
-
-.table {
-    --bs-table-bg: transparent;
-}
-
-.table th,
-.table td {
-    vertical-align: middle;
-}
-
-.table > :not(caption) > * > * {
-    padding: 0.8rem 0.85rem;
-    border-bottom-color: rgba(112, 134, 185, 0.16);
 }
 
 .small.text-muted,

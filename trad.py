@@ -1431,54 +1431,39 @@ def _build_cdc_vixfix_message(item, plan):
     entry_text = _format_price_value(plan.get("entry_price"))
     curr_text = _format_price_value(plan.get("current_price", item.get("price")))
     stop_text = _format_price_value(plan.get("stop_loss"))
-    tp_text = _format_price_value(plan.get("take_profit"))
-    exit_text = _format_price_value(plan.get("exit_price"))
     change = item.get("change")
     move_parts = []
     if entry_text:
-        move_parts.append(f"จุดเข้า: {entry_text}")
+        move_parts.append(f"จุดอ้างอิง: {entry_text}")
     if curr_text:
         move_parts.append(f"ราคาปัจจุบัน: {curr_text}")
-    if exit_text:
-        move_parts.append(f"จุดออก: {exit_text}")
-    elif tp_text:
-        move_parts.append(f"เป้าหมาย: {tp_text}")
     if stop_text:
         move_parts.append(f"SL: {stop_text}")
     if isinstance(change, (int, float)):
         move_parts.append(f"เปลี่ยนแปลง: {change:+.2f}%")
-        
     if move_parts:
         lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+
+    conf = _normalize_confidence(plan.get("confidence"))
+    if conf is not None:
+        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
+
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")
-    forecast_reason = str(plan.get("forecast_reason") or "").strip()
     if forecast_dir:
         forecast_line = f"<b>🧭 คาดทิศทาง:</b> {_html_escape(forecast_dir)}"
         if isinstance(forecast_score, (int, float)):
             forecast_line += f" ({float(forecast_score):.0f}/100)"
         lines.append(forecast_line)
-        if forecast_reason:
-            lines.append("<b>📝 ภาพกราฟ:</b> " + _html_escape(forecast_reason))
-    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-        
-    exit_lines = _format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in exit_lines])
-        
-    profit_pct = plan.get("expected_profit_pct")
-    if isinstance(profit_pct, (int, float)):
-        lines.append(f"<b>💹 กำไรคาดการณ์:</b> {profit_pct:+.2f}%")
-        
-    running_pct = plan.get("running_profit_pct")
-    if isinstance(running_pct, (int, float)):
-        lines.append(f"<b>📈 กำไรปัจจุบัน (จากจุดเข้า):</b> {running_pct:+.2f}%")
-        
+
+    trend_bias = str(plan.get("trend_bias") or "").strip()
+    if trend_bias:
+        lines.append("<b>📐 โครงสร้าง:</b> " + _html_escape(trend_bias))
+
+    reason = plan.get("reason")
+    if isinstance(reason, str) and reason.strip():
+        lines.append("<b>🧠 มุมมองหลัก:</b> " + _html_escape(reason.strip()))
+
     sell_trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
     if sell_trigger:
         trigger_text = sell_trigger
@@ -1486,19 +1471,30 @@ def _build_cdc_vixfix_message(item, plan):
             trigger_text = "VIXFIX_TOP (ถึงโซนยืดตัวสูง)"
         elif sell_trigger == "CDC_RED_REVERSAL":
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
-        lines.append("<b>🚨 ทริกเกอร์ฝั่งขาย:</b> " + _html_escape(trigger_text))
-        
-    reason = plan.get("reason")
-    if isinstance(reason, str) and reason.strip():
-        lines.append("<b>🧠 เหตุผล:</b> " + _html_escape(reason.strip()))
+        elif sell_trigger == "TREND_ROLLOVER":
+            trigger_text = "TREND_ROLLOVER (โมเมนตัมอ่อนแรงต่อเนื่อง)"
+        lines.append("<b>🚨 Trigger:</b> " + _html_escape(trigger_text))
+
+    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
+    if stop_lines:
+        lines.append("────────────────")
+        lines.extend(stop_lines)
+
+    analysis_points = plan.get("analysis_points")
+    if isinstance(analysis_points, list):
+        analysis_lines = []
+        for point in analysis_points:
+            text = str(point).strip()
+            if text:
+                analysis_lines.append("• " + _html_escape(text))
+        if analysis_lines:
+            lines.append("────────────────")
+            lines.append("<b>🔎 เหตุผลเชิงวิเคราะห์:</b>")
+            lines.extend(analysis_lines[:6])
         
     pattern = plan.get("detected_pattern")
     _append_pattern_context_lines(lines, pattern)
-        
-    conf = _normalize_confidence(plan.get("confidence"))
-    if conf is not None:
-        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
-        
+
     lines.append("────────────────")
     last_signal_time = plan.get("last_signal_time")
     if isinstance(last_signal_time, str) and last_signal_time:
@@ -6053,13 +6049,6 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             candidate_stops = [x for x in (stop_loss, min_stop_price, atr_stop_price) if isinstance(x, (int, float))]
             if candidate_stops:
                 stop_loss = float(min(candidate_stops))
-        take_profit = None
-        if entry_price is not None:
-            if stop_loss is not None and entry_price > stop_loss:
-                risk = entry_price - stop_loss
-                take_profit = entry_price + (risk * 2.0)
-            elif atr is not None and atr > 0:
-                take_profit = entry_price + (atr * 2.0)
         last_time_str = entry_idx.strftime("%Y-%m-%d %H:%M") if entry_idx is not None else None
         signal = "WAIT"
         reason = "ยังไม่เกิดจังหวะซื้อหรือขายตาม CDC+StochRSI+VixFix"
@@ -6122,16 +6111,36 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                     candle_stop = _candle_based_risk(df, stop_ref_idx, "SELL", atr, stop_loss, buffer_atr=candle_stop_buffer_atr)
                     if isinstance(candle_stop, (int, float)):
                         stop_loss = float(candle_stop)
-        expected_profit_pct = None
-        if entry_price is not None:
-            ref_exit = take_profit
-            if signal == "SELL" and current_price is not None:
-                ref_exit = current_price
-            if ref_exit is not None and entry_price > 0:
-                expected_profit_pct = ((ref_exit - entry_price) / entry_price) * 100.0
-        running_profit_pct = None
-        if entry_price is not None and current_price is not None and entry_price > 0:
-            running_profit_pct = ((current_price - entry_price) / entry_price) * 100.0
+        trend_bias = "ขาขึ้น" if bool(bull.iloc[-1]) else "ขาลง" if bool(bear.iloc[-1]) else "แกว่งตัว"
+        analysis_points = []
+        if signal == "BUY":
+            if bool(bull.iloc[-1]):
+                analysis_points.append(f"EMA {fast_len}/{slow_len} เรียงตัวฝั่งขาขึ้น และราคายืนเหนือ EMA เร็ว")
+            if pd.notna(k.iloc[-1]) and pd.notna(d.iloc[-1]):
+                if bool(cross_up.iloc[-1]):
+                    analysis_points.append(f"StochRSI ตัดขึ้นใหม่ โดย K/D = {float(k.iloc[-1]):.1f}/{float(d.iloc[-1]):.1f}")
+                else:
+                    analysis_points.append(f"โมเมนตัมยังหนุนฝั่งซื้อ โดย K/D = {float(k.iloc[-1]):.1f}/{float(d.iloc[-1]):.1f}")
+            if not bool(is_market_top.iloc[-1]):
+                analysis_points.append("VixFix ยังไม่เข้าโซน market top จึงยังไม่ใช่จังหวะขายสวน")
+        elif signal == "SELL":
+            if bool(is_market_top.iloc[-1]):
+                analysis_points.append("VixFix เข้าสู่โซนยืดตัวสูง มีโอกาสพักตัวหรือกลับตัวลง")
+            if bool(red.iloc[-1]):
+                analysis_points.append(f"CDC พลิกเป็น RED และราคาปิดต่ำกว่า EMA {fast_len}")
+            elif relaxed_entry_enable and bool(relaxed_sell_condition.iloc[-1]):
+                analysis_points.append(f"EMA {fast_len} ชันลงต่อเนื่องและราคาหลุด EMA เร็ว")
+            if pd.notna(k.iloc[-1]) and pd.notna(d.iloc[-1]):
+                analysis_points.append(f"StochRSI อ่อนแรง โดย K/D = {float(k.iloc[-1]):.1f}/{float(d.iloc[-1]):.1f}")
+        if forecast_dir:
+            if forecast_dir == signal:
+                analysis_points.append(f"Forecast สอดคล้องกับสัญญาณฝั่ง {signal} ({float(forecast_score):.0f}/100)")
+            else:
+                analysis_points.append(f"Forecast ล่าสุดเอนทาง {forecast_dir} ({float(forecast_score):.0f}/100)")
+        if isinstance(bars_since_entry, (int, float)):
+            analysis_points.append(f"สัญญาณเกิดมาแล้ว {int(bars_since_entry)} แท่งบนกรอบ 15m")
+        if detected_pattern and detected_pattern != "None":
+            analysis_points.append(f"มี pattern ยืนยัน: {detected_pattern}")
         conf = 45.0
         if signal == "BUY":
             conf += 25.0
@@ -6152,17 +6161,14 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "setup": "CDC+StochRSI+VixFix 15m",
             "entry_price": entry_price,
             "current_price": current_price,
-            "exit_price": current_price if signal == "SELL" else None,
             "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "expected_profit_pct": expected_profit_pct,
-            "running_profit_pct": running_profit_pct,
             "confidence": conf,
             "last_signal_time": last_time_str,
             "bars_since_entry": bars_since_entry,
             "is_market_top": bool(is_market_top.iloc[-1]) if len(is_market_top) else False,
             "sell_trigger": sell_trigger,
             "trend_color": "GREEN" if bool(green.iloc[-1]) else "RED" if bool(red.iloc[-1]) else "NEUTRAL",
+            "trend_bias": trend_bias,
             "forecast_direction": forecast_dir,
             "forecast_score": forecast_score,
             "forecast_reason": forecast.get("reason"),
@@ -6170,6 +6176,7 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
             "reason": reason,
             "detected_pattern": detected_pattern,
+            "analysis_points": analysis_points,
         }
     except Exception:
         return None
@@ -6749,13 +6756,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
         )
         actionzone_plan = _attach_exit_levels(
             actionzone_plan,
-            entry_keys=["entry_price", "current_price", "price"],
-            stop_keys=["stop_loss"],
-            tp_keys=["take_profit", "exit_price"],
-            context=exit_context,
-        )
-        cdc_vixfix_plan = _attach_exit_levels(
-            cdc_vixfix_plan,
             entry_keys=["entry_price", "current_price", "price"],
             stop_keys=["stop_loss"],
             tp_keys=["take_profit", "exit_price"],

@@ -1290,6 +1290,29 @@ def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None)
     return "\n".join(lines)
 
 
+def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_plan=None, strategy_label=None, selection_score=None):
+    base_message = _build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
+    if not isinstance(base_message, str) or not base_message.strip():
+        return None
+    symbol = normalize_symbol(item.get("symbol") or "")
+    lines = base_message.splitlines()
+    if not lines:
+        return None
+    lines[0] = f"<b>⭐ Daily Top Pick {signal} | {_html_escape(symbol)}</b>"
+    insert_at = 1
+    if len(lines) > 1 and lines[1].startswith("<i>"):
+        insert_at = 2
+    daily_lines = [
+        "<b>🗓️ Daily Scan:</b> หนึ่งในตัวเด่นของวันจาก watchlist",
+    ]
+    if strategy_label:
+        daily_lines.append("<b>🎯 แผนหลัก:</b> " + _html_escape(str(strategy_label)))
+    if isinstance(selection_score, (int, float)):
+        daily_lines.append(f"<b>⭐ คะแนนคัดเลือก:</b> {float(selection_score):.1f}")
+    lines[insert_at:insert_at] = daily_lines
+    return "\n".join(lines)
+
+
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -2228,11 +2251,179 @@ def _build_telegram_candidates(results, min_conf):
     return candidates, stats
 
 
+def _is_daily_best_pick_window():
+    if not bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ENABLED", True)):
+        return False
+    now = get_thai_now()
+    hour = getattr(config, "TELEGRAM_DAILY_BEST_PICK_HOUR", 9)
+    minute = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MINUTE", 0)
+    try:
+        hour = int(hour)
+    except Exception:
+        hour = 9
+    try:
+        minute = int(minute)
+    except Exception:
+        minute = 0
+    if hour < 0 or hour > 23:
+        hour = 9
+    if minute not in (0, 15, 30, 45):
+        minute = 0
+    return now.hour == hour and now.minute == minute
+
+
+def _build_daily_best_pick_candidates(results):
+    min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 55.0)
+    min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_SCORE", 72.0)
+    max_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 3)
+    require_quality = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY", False))
+    allow_cdc = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC", True))
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 55.0
+    try:
+        min_score = float(min_score)
+    except Exception:
+        min_score = 72.0
+    try:
+        max_per_day = int(max_per_day)
+    except Exception:
+        max_per_day = 3
+    if max_per_day < 1:
+        max_per_day = 1
+
+    def iter_candidates(require_min_conf=True):
+        daily_candidates = []
+        for item in results or []:
+            if not isinstance(item, dict) or item.get("error"):
+                continue
+            symbol = normalize_symbol(item.get("symbol") or "")
+            if not symbol:
+                continue
+            top_signal = str(item.get("signal") or "").upper().strip()
+            for signal in ("BUY", "SELL"):
+                primary_plan = _pick_primary_trade_plan(
+                    item,
+                    signal=signal,
+                    require_quality=require_quality,
+                    allow_cdc=allow_cdc,
+                )
+                if not isinstance(primary_plan, dict):
+                    continue
+                best_conf = _get_best_confidence(
+                    item,
+                    signal=signal,
+                    require_quality=require_quality,
+                    allow_cdc=allow_cdc,
+                )
+                if best_conf is None:
+                    best_conf = _plan_confidence_value(primary_plan)
+                if best_conf is None:
+                    continue
+                if require_min_conf and float(best_conf) < float(min_conf):
+                    continue
+                source_floor = max(45.0, min(float(best_conf), float(min_conf)))
+                sources = _collect_alert_sources(
+                    item,
+                    source_floor,
+                    signal=signal,
+                    require_quality=require_quality,
+                    allow_cdc=allow_cdc,
+                )
+                edge = _extract_signal_edge_metrics(primary_plan, signal)
+                strategy_label = _get_primary_plan_source_label(item, primary_plan)
+                score = float(best_conf)
+                if top_signal == signal:
+                    score += 6.0
+                bars_since = _safe_float(
+                    _pick_plan_value(primary_plan, ["bars_since_signal", "bars_since_entry"]),
+                    None,
+                )
+                if isinstance(bars_since, float):
+                    if bars_since <= 0:
+                        score += 8.0
+                    elif bars_since <= 1:
+                        score += 5.0
+                    elif bars_since <= 2:
+                        score += 2.0
+                    elif bars_since >= 6:
+                        score -= 4.0
+                trend_alignment = primary_plan.get("trend_alignment")
+                if isinstance(trend_alignment, bool):
+                    score += 4.0 if trend_alignment else -6.0
+                forecast_dir = str(
+                    primary_plan.get("forecast_direction")
+                    or ((item.get("price_forecast") or {}).get("direction") if isinstance(item.get("price_forecast"), dict) else "")
+                    or ""
+                ).upper().strip()
+                if forecast_dir == signal:
+                    score += 5.0
+                wr = edge.get("win_rate_pct")
+                exp = edge.get("expectancy_rr")
+                trades = edge.get("trades")
+                if isinstance(wr, (int, float)):
+                    score += max(-4.0, min(10.0, (float(wr) - 50.0) * 0.25))
+                if isinstance(exp, (int, float)):
+                    score += max(-4.0, min(8.0, float(exp) * 8.0))
+                if isinstance(trades, (int, float)):
+                    score += max(0.0, min(4.0, float(trades) / 8.0))
+                score += min(6.0, float(len(sources)) * 1.5)
+                message = _build_daily_best_pick_message(
+                    item,
+                    signal,
+                    float(best_conf),
+                    sources,
+                    primary_plan=primary_plan,
+                    strategy_label=strategy_label,
+                    selection_score=score,
+                )
+                if not isinstance(message, str) or not message.strip():
+                    continue
+                daily_candidates.append(
+                    {
+                        "symbol": symbol,
+                        "signal": signal,
+                        "strategy": "DAILY_BEST",
+                        "score": float(score),
+                        "confidence": float(best_conf),
+                        "plan": primary_plan,
+                        "edge_metrics": edge,
+                        "message": message,
+                        "strategy_label": strategy_label,
+                    }
+                )
+        return daily_candidates
+
+    candidates = iter_candidates(require_min_conf=True)
+    if not candidates:
+        candidates = iter_candidates(require_min_conf=False)
+    if not candidates:
+        return []
+    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
+    selected = []
+    seen_symbols = set()
+    for candidate in candidates:
+        symbol = str(candidate.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen_symbols:
+            continue
+        if float(candidate.get("score", 0.0)) < float(min_score):
+            continue
+        selected.append(candidate)
+        seen_symbols.add(symbol)
+        if len(selected) >= max_per_day:
+            break
+    if selected:
+        return selected
+    # Fallback: still send the single strongest daily idea so there is at least one daily directional view.
+    top_candidate = candidates[0]
+    return [top_candidate] if isinstance(top_candidate, dict) else []
+
+
 def _notify_telegram_from_results(results):
     kill, reason = _telegram_kill_switch_state(results)
     if kill:
         logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
-        return 0
     min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
     max_per_symbol = getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1)
@@ -2260,7 +2451,10 @@ def _notify_telegram_from_results(results):
     if cooldown_minutes < 1:
         cooldown_minutes = 1
     dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
+    candidates = []
+    build_stats = {}
+    if not kill:
+        candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
     quality_drop_counts = {}
     if isinstance(build_stats, dict):
         quality_drop_counts = build_stats.get("quality_drop_counts") or {}
@@ -2271,7 +2465,8 @@ def _notify_telegram_from_results(results):
             dynamic_min_conf,
             json.dumps(quality_drop_counts, ensure_ascii=False),
         )
-        return 0
+        if kill and not _is_daily_best_pick_window():
+            return 0
     candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
     sent = 0
     dropped_by_cache = 0
@@ -2302,10 +2497,28 @@ def _notify_telegram_from_results(results):
             _TELEGRAM_ALERT_CACHE.set(cache_key, True, ttl_seconds=cooldown_ttl)
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
+    daily_pick_sent = 0
+    if _is_daily_best_pick_window():
+        daily_candidates = _build_daily_best_pick_candidates(results)
+        for daily_candidate in daily_candidates:
+            if not isinstance(daily_candidate, dict):
+                continue
+            daily_key = f"DAILYBEST|{get_thai_now().strftime('%Y%m%d')}|{daily_candidate.get('symbol')}|{daily_candidate.get('signal')}"
+            if _TELEGRAM_ALERT_CACHE.get(daily_key):
+                continue
+            daily_message = daily_candidate.get("message")
+            if isinstance(daily_message, str) and daily_message.strip() and send_telegram_alert(daily_message):
+                _TELEGRAM_ALERT_CACHE.set(daily_key, True, ttl_seconds=26 * 60 * 60)
+                sent += 1
+                daily_pick_sent += 1
+        else:
+            if not daily_pick_sent:
+                logger.info("Daily Best Pick window active but no directional candidate was sent")
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
+        "Telegram alerts: sent=%s candidates=%s daily_pick=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
         sent,
         len(candidates),
+        daily_pick_sent,
         dropped_by_cache,
         dropped_by_symbol_cap,
         dropped_by_run_cap,

@@ -176,12 +176,16 @@ CDC_VIXFIX_15M_RSI_LENGTH = _env_int("CDC_VIXFIX_15M_RSI_LENGTH", 14)
 CDC_VIXFIX_15M_STOCH_LENGTH = _env_int("CDC_VIXFIX_15M_STOCH_LENGTH", 14)
 CDC_VIXFIX_15M_STOCH_SMOOTH_K = _env_int("CDC_VIXFIX_15M_STOCH_SMOOTH_K", 3)
 CDC_VIXFIX_15M_STOCH_SMOOTH_D = _env_int("CDC_VIXFIX_15M_STOCH_SMOOTH_D", 3)
+CDC_VIXFIX_15M_SMOOTH = _env_int("CDC_VIXFIX_15M_SMOOTH", 1)
 CDC_VIXFIX_15M_STOCH_OVERSOLD = _env_float("CDC_VIXFIX_15M_STOCH_OVERSOLD", 30.0)
+CDC_VIXFIX_15M_STOCH_OVERBOUGHT = _env_float("CDC_VIXFIX_15M_STOCH_OVERBOUGHT", 70.0)
 CDC_VIXFIX_15M_VIX_LOOKBACK = _env_int("CDC_VIXFIX_15M_VIX_LOOKBACK", 22)
 CDC_VIXFIX_15M_VIX_BB_LENGTH = _env_int("CDC_VIXFIX_15M_VIX_BB_LENGTH", 20)
 CDC_VIXFIX_15M_VIX_BB_STD = _env_float("CDC_VIXFIX_15M_VIX_BB_STD", 2.0)
 CDC_VIXFIX_15M_VIX_PERCENTILE_LOOKBACK = _env_int("CDC_VIXFIX_15M_VIX_PERCENTILE_LOOKBACK", 50)
 CDC_VIXFIX_15M_VIX_PERCENTILE_FACTOR = _env_float("CDC_VIXFIX_15M_VIX_PERCENTILE_FACTOR", 0.85)
+CDC_VIXFIX_15M_VIX_LOW_PERCENTILE_FACTOR = _env_float("CDC_VIXFIX_15M_VIX_LOW_PERCENTILE_FACTOR", 1.01)
+CDC_VIXFIX_15M_VIX_SPIKE_LOOKBACK_BARS = _env_int("CDC_VIXFIX_15M_VIX_SPIKE_LOOKBACK_BARS", 3)
 CDC_VIXFIX_15M_ALERT_BARS = _env_int("CDC_VIXFIX_15M_ALERT_BARS", 4)
 CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE = _env_float("CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE", 68.0)
 CDC_VIXFIX_15M_MIN_STOP_PCT = _env_float("CDC_VIXFIX_15M_MIN_STOP_PCT", 1.2)
@@ -191,10 +195,100 @@ CDC_VIXFIX_15M_PATTERN_LOOKBACK_BARS = _env_int("CDC_VIXFIX_15M_PATTERN_LOOKBACK
 CDC_VIXFIX_15M_ENTRY_CONFIRMATION_MODE = _env_str("CDC_VIXFIX_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
 CDC_VIXFIX_15M_USE_CANDLE_STOP = _env_bool("CDC_VIXFIX_15M_USE_CANDLE_STOP", True)
 CDC_VIXFIX_15M_CANDLE_STOP_BUFFER_ATR = _env_float("CDC_VIXFIX_15M_CANDLE_STOP_BUFFER_ATR", 0.15)
-CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE = _env_bool("CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE", True)
+CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE = _env_bool("CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE", False)
 CDC_VIXFIX_15M_RELAXED_STOCH_MAX = _env_float("CDC_VIXFIX_15M_RELAXED_STOCH_MAX", 45.0)
 CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK = _env_int("CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK", 3)
 CDC_VIXFIX_15M_FORECAST_MIN_SCORE = _env_float("CDC_VIXFIX_15M_FORECAST_MIN_SCORE", 60.0)
+CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT = _env_bool("CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT", False)
+CDC_VIXFIX_15M_TAKE_PROFIT_PCT = _env_float("CDC_VIXFIX_15M_TAKE_PROFIT_PCT", 0.0)
+CDC_VIXFIX_15M_MAX_HOLD_BARS = _env_int("CDC_VIXFIX_15M_MAX_HOLD_BARS", 24)
+
+# Precision profiles tuned toward >=60% recent win rate per symbol on 15m replay.
+# Note: these profiles optimize hit rate, not expectancy, so some symbols remain negative expectancy.
+CDC_VIXFIX_15M_SYMBOL_PROFILES = {
+    "BTC-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "DOGE-USD": {
+        "require_pattern": True,
+        "require_ema200_alignment": False,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 65.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 48,
+    },
+    "ETH-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "ADA-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "XRP-USD": {
+        "require_pattern": True,
+        "require_ema200_alignment": False,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 65.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 48,
+    },
+    "BNB-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "SOL-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "NEAR-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 30.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "LINK-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": False,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 25.0,
+        "forecast_min_score": 60.0,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+}
+CDC_VIXFIX_15M_DISABLED_SYMBOLS = {"TRX-USD"}
 
 ORDERBLOCK_15M_PIVOT_LENGTH = _env_int("ORDERBLOCK_15M_PIVOT_LENGTH", 5)
 ORDERBLOCK_15M_MAX_BLOCKS = _env_int("ORDERBLOCK_15M_MAX_BLOCKS", 6)

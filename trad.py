@@ -2257,6 +2257,7 @@ def _is_daily_best_pick_window():
     now = get_thai_now()
     hour = getattr(config, "TELEGRAM_DAILY_BEST_PICK_HOUR", 9)
     minute = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MINUTE", 0)
+    window_minutes = getattr(config, "TELEGRAM_DAILY_BEST_PICK_WINDOW_MINUTES", 15)
     try:
         hour = int(hour)
     except Exception:
@@ -2265,11 +2266,21 @@ def _is_daily_best_pick_window():
         minute = int(minute)
     except Exception:
         minute = 0
+    try:
+        window_minutes = int(window_minutes)
+    except Exception:
+        window_minutes = 15
     if hour < 0 or hour > 23:
         hour = 9
     if minute not in (0, 15, 30, 45):
         minute = 0
-    return now.hour == hour and now.minute == minute
+    if window_minutes < 1:
+        window_minutes = 1
+    if window_minutes > 60:
+        window_minutes = 60
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta_minutes = (now - target).total_seconds() / 60.0
+    return 0.0 <= delta_minutes < float(window_minutes)
 
 
 def _build_daily_best_pick_candidates(results):

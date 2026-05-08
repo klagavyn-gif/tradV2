@@ -1163,6 +1163,63 @@ def _append_pattern_context_lines(lines, pattern):
                 lines.append(f'<a href="{url}">📚 อธิบาย Pattern นี้คืออะไร ({label})</a>')
 
 
+def _resolve_alert_profile_meta(win_rate=None, confidence=None):
+    high_wr_threshold = getattr(config, "TELEGRAM_ALERT_HIGH_WIN_RATE_THRESHOLD", 60.0)
+    high_conf_threshold = getattr(config, "TELEGRAM_ALERT_HIGH_CONFIDENCE_THRESHOLD", 82.0)
+    try:
+        high_wr_threshold = float(high_wr_threshold)
+    except Exception:
+        high_wr_threshold = 60.0
+    try:
+        high_conf_threshold = float(high_conf_threshold)
+    except Exception:
+        high_conf_threshold = 82.0
+    if isinstance(win_rate, (int, float)):
+        wr = float(win_rate)
+        is_high = wr >= high_wr_threshold
+        return {
+            "level": "สูง" if is_high else "ต่ำ",
+            "is_high": bool(is_high),
+            "basis_label": "Win Rate ย้อนหลัง",
+            "basis_value": f"{wr:.1f}%",
+        }
+    if isinstance(confidence, (int, float)):
+        conf = float(confidence)
+        is_high = conf >= high_conf_threshold
+        return {
+            "level": "สูง" if is_high else "ต่ำ",
+            "is_high": bool(is_high),
+            "basis_label": "Confidence ล่าสุด",
+            "basis_value": f"{conf:.0f}%",
+        }
+    return None
+
+
+def _build_alert_profile_lines(win_rate=None, confidence=None):
+    meta = _resolve_alert_profile_meta(win_rate=win_rate, confidence=confidence)
+    if not isinstance(meta, dict):
+        return []
+    if bool(meta.get("is_high")):
+        style_text = "คัดเข้ม เน้นตัวที่สถิติดีกว่า"
+    else:
+        style_text = "เข้าได้ง่ายขึ้น เน้นสัญญาณเชิงรุก"
+    return [
+        f"<b>🏷️ ระดับสัญญาณ:</b> {meta['level']} | {_html_escape(style_text)}",
+        f"<b>📚 ค่าอ้างอิง:</b> {_html_escape(str(meta['basis_label']))} {meta['basis_value']}",
+    ]
+
+
+def _alert_profile_score_adjustment(win_rate=None, confidence=None):
+    meta = _resolve_alert_profile_meta(win_rate=win_rate, confidence=confidence)
+    if not isinstance(meta, dict):
+        return 0.0
+    if bool(meta.get("is_high")):
+        base_bonus = 6.0 if meta.get("basis_label") == "Win Rate ย้อนหลัง" else 3.0
+    else:
+        base_bonus = -2.0
+    return float(base_bonus)
+
+
 def _build_super_signal_message(item, signal, super_meta, primary_plan=None):
     emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
@@ -1178,6 +1235,7 @@ def _build_super_signal_message(item, signal, super_meta, primary_plan=None):
         lines.append(f"<i>{name}</i>")
     lines.append("🏆 <b>ความแม่นยำย้อนหลังสูงพิเศษ (High Accuracy)</b>")
     lines.append("────────────────")
+    lines.extend(_build_alert_profile_lines(win_rate=avg_wr))
     
     price = item.get("price")
     change = item.get("change")
@@ -1259,6 +1317,8 @@ def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None)
             require_quality=_strict_60_mode_enabled(),
             allow_cdc=_strict_60_allow_cdc(),
         )
+    edge_metrics = _extract_signal_edge_metrics(primary_plan, signal) if isinstance(primary_plan, dict) else {}
+    lines.extend(_build_alert_profile_lines(win_rate=edge_metrics.get("win_rate_pct"), confidence=best_conf))
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     _append_pattern_context_lines(lines, pattern)
     if isinstance(primary_plan, dict):
@@ -1351,6 +1411,11 @@ def _build_actionzone_message(item, az_plan):
     conf = az_plan.get("confidence")
     if isinstance(conf, (int, float)):
         lines.append(f"<b>📊 โอกาสสำเร็จ:</b> {float(conf):.0f}%")
+    best = {}
+    optimizer = az_plan.get("optimizer")
+    if isinstance(optimizer, dict) and isinstance(optimizer.get("best"), dict):
+        best = optimizer.get("best") or {}
+    lines.extend(_build_alert_profile_lines(win_rate=best.get("win_rate_pct"), confidence=conf))
     
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
@@ -1364,8 +1429,6 @@ def _build_actionzone_message(item, az_plan):
     if isinstance(avg_range, (int, float)):
         lines.append(f"<b>📈 ความผันผวน (20 แท่ง):</b> {avg_range:.2f}%")
         
-    optimizer = az_plan.get("optimizer")
-    best = optimizer.get("best") if isinstance(optimizer, dict) else None
     if isinstance(best, dict):
         trades = best.get("trades")
         exp_rr = best.get("expectancy_rr")
@@ -1470,6 +1533,8 @@ def _build_cdc_vixfix_message(item, plan):
     conf = _normalize_confidence(plan.get("confidence"))
     if conf is not None:
         lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
+    edge = _extract_signal_edge_metrics(plan, signal)
+    lines.extend(_build_alert_profile_lines(win_rate=edge.get("win_rate_pct"), confidence=conf))
 
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")
@@ -2097,6 +2162,10 @@ def _build_telegram_candidates(results, min_conf):
                         freshness = 2.0
                     trigger = str(cdc_plan.get("sell_trigger") or "").upper().strip()
                     score = float(cdc_conf) + freshness + (6.0 if cdc_signal == "SELL" else 4.0)
+                    score += _alert_profile_score_adjustment(
+                        win_rate=edge.get("win_rate_pct"),
+                        confidence=cdc_conf,
+                    )
                     # Boost SELL signals with high confidence
                     if cdc_signal == "SELL" and cdc_conf >= 85.0:
                         score += 8.0
@@ -2154,6 +2223,10 @@ def _build_telegram_candidates(results, min_conf):
                         wr = edge.get("win_rate_pct")
                         exp = edge.get("expectancy_rr")
                         trades = edge.get("trades")
+                        score += _alert_profile_score_adjustment(
+                            win_rate=wr,
+                            confidence=az_conf,
+                        )
                         if isinstance(wr, (int, float)):
                             score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
                         if isinstance(exp, (int, float)):
@@ -2223,6 +2296,10 @@ def _build_telegram_candidates(results, min_conf):
                     wr = edge.get("win_rate_pct")
                     exp = edge.get("expectancy_rr")
                     trades = edge.get("trades")
+                    score += _alert_profile_score_adjustment(
+                        win_rate=wr,
+                        confidence=best_conf,
+                    )
                     if isinstance(wr, (int, float)):
                         score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
                     if isinstance(exp, (int, float)):

@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import argparse
+import csv
 import json
 import hashlib
 import logging
@@ -158,6 +159,8 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
 )
 
 _HISTORY_STORE_LOCK = threading.Lock()
+_ALERT_HISTORY_LOCK = threading.Lock()
+_TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PRIMARY", "DAILY_BEST")
 
 try:
     _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
@@ -200,6 +203,43 @@ def _parse_symbols_input(raw_symbols, max_symbols=None):
         if len(unique_symbols) >= max_count:
             break
     return unique_symbols
+
+
+def _parse_periods_input(raw_periods, default_periods=None, max_periods=6):
+    defaults = list(default_periods or ["1mo", "3mo", "6mo"])
+    if isinstance(raw_periods, (list, tuple)):
+        raw_tokens = [str(v or "").strip() for v in raw_periods]
+    else:
+        text = str(raw_periods or "").strip()
+        raw_tokens = text.replace("\n", ",").replace(";", ",").split(",") if text else defaults
+    periods = []
+    seen = set()
+    for raw in raw_tokens:
+        period = str(raw or "").strip()
+        if not period or period in seen or period not in VALID_PERIODS:
+            continue
+        seen.add(period)
+        periods.append(period)
+        if len(periods) >= int(max_periods):
+            break
+    return periods if periods else [p for p in defaults if p in VALID_PERIODS][: int(max_periods)]
+
+
+def _parse_strategy_input(raw_strategies):
+    if isinstance(raw_strategies, (list, tuple)):
+        raw_tokens = [str(v or "").strip() for v in raw_strategies]
+    else:
+        text = str(raw_strategies or "").strip()
+        raw_tokens = text.replace("\n", ",").replace(";", ",").split(",") if text else []
+    values = []
+    seen = set()
+    for raw in raw_tokens:
+        strategy = str(raw or "").strip().upper()
+        if not strategy or strategy in seen:
+            continue
+        seen.add(strategy)
+        values.append(strategy)
+    return values
 
 
 def _clean_json_value(v):
@@ -794,6 +834,383 @@ def _extract_signal_edge_metrics(plan, signal):
     return _extract_plan_edge_metrics(plan)
 
 
+def _normalize_edge_metrics_payload(metrics):
+    edge = metrics if isinstance(metrics, dict) else {}
+    win_rate = edge.get("win_rate_pct")
+    expectancy = edge.get("expectancy_rr")
+    trades = edge.get("trades")
+    if not isinstance(win_rate, (int, float)):
+        avg_wr = edge.get("avg_wr")
+        if isinstance(avg_wr, (int, float)):
+            win_rate = float(avg_wr)
+    if not isinstance(expectancy, (int, float)):
+        avg_exp = edge.get("avg_exp")
+        if isinstance(avg_exp, (int, float)):
+            expectancy = float(avg_exp)
+    if not isinstance(trades, (int, float)):
+        avg_trades = edge.get("avg_trades")
+        if isinstance(avg_trades, (int, float)):
+            trades = float(avg_trades)
+    return {
+        "win_rate_pct": float(win_rate) if isinstance(win_rate, (int, float)) and math.isfinite(float(win_rate)) else None,
+        "expectancy_rr": float(expectancy) if isinstance(expectancy, (int, float)) and math.isfinite(float(expectancy)) else None,
+        "trades": float(trades) if isinstance(trades, (int, float)) and math.isfinite(float(trades)) else None,
+    }
+
+
+def _candidate_edge_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    edge = candidate.get("edge_metrics")
+    normalized = _normalize_edge_metrics_payload(edge)
+    if all(isinstance(v, (int, float)) for v in normalized.values()):
+        return normalized
+    plan = candidate.get("plan")
+    signal = str(candidate.get("signal") or "").upper()
+    if isinstance(plan, dict):
+        plan_metrics = _extract_signal_edge_metrics(plan, signal)
+        merged = dict(plan_metrics) if isinstance(plan_metrics, dict) else {}
+        if isinstance(edge, dict):
+            merged.update(edge)
+        normalized = _normalize_edge_metrics_payload(merged)
+    if not any(isinstance(v, (int, float)) for v in normalized.values()):
+        fallback = _candidate_summary_fallback_metrics(candidate)
+        merged = dict(fallback) if isinstance(fallback, dict) else {}
+        if isinstance(edge, dict):
+            merged.update(edge)
+        normalized = _normalize_edge_metrics_payload(merged)
+    return normalized
+
+
+def _summary_pick_numeric(payload, keys):
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            return float(value)
+    return None
+
+
+def _summary_strategy_edge_metrics(plan, signal=None):
+    metrics = _normalize_edge_metrics_payload(_extract_signal_edge_metrics(plan, signal))
+    if not isinstance(plan, dict):
+        return metrics
+    win_rate = metrics.get("win_rate_pct")
+    trades = metrics.get("trades")
+    expectancy = metrics.get("expectancy_rr")
+    if not isinstance(win_rate, (int, float)):
+        win_rate = _summary_pick_numeric(plan, ("predicted_win_prob", "confidence"))
+    if not isinstance(trades, (int, float)):
+        trades = _summary_pick_numeric(plan, ("historical_trades", "valid_trades", "trades"))
+    if not isinstance(expectancy, (int, float)):
+        expectancy = _summary_pick_numeric(plan, ("historical_avg_rr", "avg_rr", "expectancy_rr"))
+    return _normalize_edge_metrics_payload(
+        {
+            "win_rate_pct": win_rate,
+            "expectancy_rr": expectancy,
+            "trades": trades,
+        }
+    )
+
+
+def _summary_edge_observation(metrics, confidence=None, symbol=None, signal=None):
+    normalized = _normalize_edge_metrics_payload(metrics)
+    return {
+        "symbol": normalize_symbol(symbol or ""),
+        "signal": str(signal or "").upper().strip() or None,
+        "win_rate_pct": normalized.get("win_rate_pct"),
+        "expectancy_rr": normalized.get("expectancy_rr"),
+        "trades": normalized.get("trades"),
+        "confidence": float(confidence) if isinstance(confidence, (int, float)) and math.isfinite(float(confidence)) else None,
+    }
+
+
+def _aggregate_summary_observations(observations):
+    total_wr_weight = 0.0
+    total_wr_value = 0.0
+    total_exp_weight = 0.0
+    total_exp_value = 0.0
+    total_trades = 0.0
+    measured = 0
+    symbols = set()
+    signals = Counter()
+    for row in observations or []:
+        if not isinstance(row, dict):
+            continue
+        symbol = normalize_symbol(row.get("symbol") or "")
+        signal = str(row.get("signal") or "").upper().strip()
+        if symbol:
+            symbols.add(symbol)
+        if signal:
+            signals[signal] += 1
+        wr = row.get("win_rate_pct")
+        exp = row.get("expectancy_rr")
+        trades = row.get("trades")
+        conf = row.get("confidence")
+        if isinstance(trades, (int, float)) and math.isfinite(float(trades)) and float(trades) > 0:
+            weight = float(trades)
+            total_trades += weight
+        elif isinstance(conf, (int, float)) and math.isfinite(float(conf)) and float(conf) > 0:
+            weight = max(1.0, float(conf) / 20.0)
+        else:
+            weight = 1.0
+        has_metric = False
+        if isinstance(wr, (int, float)) and math.isfinite(float(wr)):
+            total_wr_value += float(wr) * weight
+            total_wr_weight += weight
+            has_metric = True
+        if isinstance(exp, (int, float)) and math.isfinite(float(exp)):
+            total_exp_value += float(exp) * weight
+            total_exp_weight += weight
+            has_metric = True
+        if has_metric:
+            measured += 1
+    return {
+        "measured": int(measured),
+        "estimated_win_rate_pct": (total_wr_value / total_wr_weight) if total_wr_weight > 0 else None,
+        "average_expectancy_rr": (total_exp_value / total_exp_weight) if total_exp_weight > 0 else None,
+        "total_historical_trades": int(total_trades) if total_trades > 0 else 0,
+        "observed_symbols": len(symbols),
+        "signals": dict(signals),
+    }
+
+
+def _signal_metric_plan_candidates(item, signal, require_quality=False, allow_cdc=True):
+    rows = []
+    plan_rows = [
+        ("SHORTTERM", item.get("short_term_15m"), True),
+        ("SNIPER", item.get("sniper_15m"), True),
+        ("QUANTUM", item.get("quantum_15m"), True),
+        ("EMA", item.get("ema_cross_15m"), True),
+        ("AZ", item.get("actionzone_15m"), True),
+        ("CDC", item.get("cdc_vixfix_15m"), allow_cdc),
+        ("REVERSAL", item.get("crypto_reversal_15m"), True),
+    ]
+    for _, plan, enabled in plan_rows:
+        if not enabled or not isinstance(plan, dict):
+            continue
+        direction = _plan_trade_direction(plan)
+        if signal in ("BUY", "SELL") and direction != signal:
+            continue
+        if require_quality and direction in ("BUY", "SELL") and not _passes_entry_quality_gate(plan, direction):
+            continue
+        conf = _plan_confidence_value(plan)
+        rows.append(
+            _summary_edge_observation(
+                _summary_strategy_edge_metrics(plan, signal=signal),
+                confidence=conf,
+                symbol=item.get("symbol"),
+                signal=direction,
+            )
+        )
+    return rows
+
+
+def _best_summary_signal(item):
+    top_signal = str((item or {}).get("signal") or "").upper().strip()
+    if top_signal in ("BUY", "SELL"):
+        return top_signal
+    buy_conf = _get_best_confidence(item, signal="BUY", require_quality=False, allow_cdc=True)
+    sell_conf = _get_best_confidence(item, signal="SELL", require_quality=False, allow_cdc=True)
+    buy_conf = float(buy_conf) if isinstance(buy_conf, (int, float)) else -1.0
+    sell_conf = float(sell_conf) if isinstance(sell_conf, (int, float)) else -1.0
+    return "BUY" if buy_conf >= sell_conf else "SELL"
+
+
+def _build_strategy_summary_observations(item, min_conf=None):
+    if not isinstance(item, dict) or item.get("error"):
+        return {}
+    symbol = normalize_symbol(item.get("symbol") or "")
+    if not symbol:
+        return {}
+    signal_hint = _best_summary_signal(item)
+    allow_cdc = True
+    summary = {}
+
+    # SS15: aggregate confluence plans for the stronger side even if strict super-signal gate does not pass.
+    ss_rows = _signal_metric_plan_candidates(item, signal_hint, require_quality=False, allow_cdc=allow_cdc)
+    if not ss_rows:
+        alternate = "SELL" if signal_hint == "BUY" else "BUY"
+        ss_rows = _signal_metric_plan_candidates(item, alternate, require_quality=False, allow_cdc=allow_cdc)
+    if ss_rows:
+        best_obs = _aggregate_summary_observations(ss_rows)
+        summary["SS15"] = [
+            _summary_edge_observation(
+                {
+                    "win_rate_pct": best_obs.get("estimated_win_rate_pct"),
+                    "expectancy_rr": best_obs.get("average_expectancy_rr"),
+                    "trades": best_obs.get("total_historical_trades") or len(ss_rows),
+                },
+                confidence=_get_best_confidence(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc),
+                symbol=symbol,
+                signal=signal_hint,
+            )
+        ]
+
+    # AW15: use blended metrics; if no passed payload, blend whatever candidate rows are available.
+    aw_report = _build_all_weather_report_entry(item, min_conf=min_conf)
+    if isinstance(aw_report, dict):
+        aw_blend = aw_report.get("blend") or {}
+        if not any(isinstance(aw_blend.get(k), (int, float)) for k in ("win_rate_pct", "expectancy_rr", "trades")):
+            aw_candidates = aw_report.get("candidates") or []
+            if aw_candidates:
+                aw_blend = _all_weather_blended_metrics(aw_candidates[: max(1, min(3, len(aw_candidates)))])
+        summary["AW15"] = [
+            _summary_edge_observation(
+                aw_blend,
+                confidence=aw_report.get("final_confidence"),
+                symbol=symbol,
+                signal=aw_report.get("selected_side") or aw_report.get("signal"),
+            )
+        ]
+
+    cdc_plan = item.get("cdc_vixfix_15m")
+    if isinstance(cdc_plan, dict):
+        cdc_signal = _plan_trade_direction(cdc_plan)
+        summary["CDCVIX15"] = [
+            _summary_edge_observation(
+                _summary_strategy_edge_metrics(cdc_plan, signal=cdc_signal),
+                confidence=_plan_confidence_value(cdc_plan),
+                symbol=symbol,
+                signal=cdc_signal,
+            )
+        ]
+
+    az_plan = item.get("actionzone_15m")
+    if isinstance(az_plan, dict):
+        az_signal = _plan_trade_direction(az_plan)
+        summary["AZ15"] = [
+            _summary_edge_observation(
+                _summary_strategy_edge_metrics(az_plan, signal=az_signal),
+                confidence=_plan_confidence_value(az_plan),
+                symbol=symbol,
+                signal=az_signal,
+            )
+        ]
+
+    primary_plan = _pick_primary_trade_plan(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc)
+    primary_obs = None
+    if isinstance(primary_plan, dict):
+        primary_obs = _summary_edge_observation(
+            _summary_strategy_edge_metrics(primary_plan, signal=signal_hint),
+            confidence=_get_best_confidence(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc),
+            symbol=symbol,
+            signal=signal_hint,
+        )
+        if not any(isinstance(primary_obs.get(k), (int, float)) for k in ("win_rate_pct", "expectancy_rr", "trades")):
+            source_rows = _signal_metric_plan_candidates(item, signal_hint, require_quality=False, allow_cdc=allow_cdc)
+            agg = _aggregate_summary_observations(source_rows)
+            primary_obs = _summary_edge_observation(
+                {
+                    "win_rate_pct": agg.get("estimated_win_rate_pct"),
+                    "expectancy_rr": agg.get("average_expectancy_rr"),
+                    "trades": agg.get("total_historical_trades") or len(source_rows),
+                },
+                confidence=_get_best_confidence(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc),
+                symbol=symbol,
+                signal=signal_hint,
+            )
+    if isinstance(primary_obs, dict):
+        summary["PRIMARY"] = [primary_obs]
+        summary["DAILY_BEST"] = [dict(primary_obs)]
+
+    return summary
+
+
+def _candidate_summary_fallback_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    item = candidate.get("item")
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    signal = str(candidate.get("signal") or "").strip().upper()
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    rows = _build_strategy_summary_observations(item)
+    observations = rows.get(strategy) if isinstance(rows, dict) else None
+    if not isinstance(observations, list):
+        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    matched = []
+    for row in observations:
+        if not isinstance(row, dict):
+            continue
+        row_symbol = normalize_symbol(row.get("symbol") or "")
+        row_signal = str(row.get("signal") or "").strip().upper()
+        if symbol and row_symbol and row_symbol != symbol:
+            continue
+        if signal in ("BUY", "SELL") and row_signal in ("BUY", "SELL") and row_signal != signal:
+            continue
+        matched.append(row)
+    agg = _aggregate_summary_observations(matched or observations)
+    return {
+        "win_rate_pct": agg.get("estimated_win_rate_pct"),
+        "expectancy_rr": agg.get("average_expectancy_rr"),
+        "trades": agg.get("total_historical_trades"),
+    }
+
+
+def _build_strategy_backtest_summary(results, min_conf=None):
+    summary_map = {name: [] for name in _TELEGRAM_REPORT_STRATEGY_ORDER}
+    for item in results or []:
+        rows = _build_strategy_summary_observations(item, min_conf=min_conf)
+        for strategy, observations in (rows or {}).items():
+            if strategy not in summary_map:
+                summary_map[strategy] = []
+            for row in observations or []:
+                if isinstance(row, dict):
+                    summary_map[strategy].append(row)
+    final = {}
+    for strategy, observations in summary_map.items():
+        agg = _aggregate_summary_observations(observations)
+        final[strategy] = {
+            "alerts": 0,
+            "measured": int(agg.get("measured") or 0),
+            "estimated_win_rate_pct": agg.get("estimated_win_rate_pct"),
+            "average_expectancy_rr": agg.get("average_expectancy_rr"),
+            "total_historical_trades": int(agg.get("total_historical_trades") or 0),
+            "observed_symbols": int(agg.get("observed_symbols") or 0),
+            "signals": agg.get("signals") or {},
+        }
+    return final
+
+
+def _evaluate_candidate_backtest_gate(candidate):
+    if not isinstance(candidate, dict):
+        return False, "missing_candidate", {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    signal = str(candidate.get("signal") or "").upper()
+    if signal not in ("BUY", "SELL"):
+        return False, "non_directional_candidate", {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    require_edge = bool(getattr(config, "TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS", True))
+    min_wr = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE", 58.0)
+    min_trades = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_TRADES", 8)
+    min_exp = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_EXPECTANCY_RR", 0.05)
+    try:
+        min_wr = float(min_wr)
+    except Exception:
+        min_wr = 58.0
+    try:
+        min_trades = int(min_trades)
+    except Exception:
+        min_trades = 8
+    try:
+        min_exp = float(min_exp)
+    except Exception:
+        min_exp = 0.05
+    metrics = _candidate_edge_metrics(candidate)
+    wr = metrics.get("win_rate_pct")
+    exp = metrics.get("expectancy_rr")
+    trades = metrics.get("trades")
+    has_edge = any(isinstance(v, (int, float)) for v in (wr, exp, trades))
+    if require_edge and not has_edge:
+        return False, "candidate_missing_edge_metrics", metrics
+    if not isinstance(trades, (int, float)) or float(trades) < float(min_trades):
+        return False, "candidate_trades_below_min", metrics
+    if not isinstance(wr, (int, float)) or float(wr) < float(min_wr):
+        return False, "candidate_win_rate_below_min", metrics
+    if not isinstance(exp, (int, float)) or float(exp) < float(min_exp):
+        return False, "candidate_expectancy_below_min", metrics
+    return True, "pass", metrics
+
+
 def _extract_walkforward_metrics(plan, optimizer_key="optimizer"):
     if not isinstance(plan, dict):
         return {}
@@ -982,6 +1399,7 @@ def _evaluate_super_signal(item, signal):
     confirmed_strategies = []
     total_wr = 0.0
     total_exp = 0.0
+    total_trades = 0.0
     count = 0
     
     for name, plan, enabled in strategies:
@@ -1010,6 +1428,7 @@ def _evaluate_super_signal(item, signal):
             total_wr += wr
             if isinstance(exp, (int, float)):
                 total_exp += exp
+            total_trades += float(trades)
             count += 1
 
     # Quality Gate 1: Confluence
@@ -1052,6 +1471,7 @@ def _evaluate_super_signal(item, signal):
     return True, "pass", {
         "avg_wr": avg_wr,
         "avg_exp": avg_exp,
+        "avg_trades": (total_trades / count) if count > 0 else 0.0,
         "confluence": confirmed_strategies,
         "count": count
     }
@@ -1220,6 +1640,524 @@ def _alert_profile_score_adjustment(win_rate=None, confidence=None):
     return float(base_bonus)
 
 
+_ALL_WEATHER_REGIME_WEIGHTS = {
+    "TREND": {
+        "ActionZone": 1.35,
+        "EMACross": 1.28,
+        "CDCVixFix": 0.82,
+        "CryptoReversal": 0.90,
+        "ShortTerm": 1.00,
+        "Sniper": 1.02,
+        "Quantum": 0.95,
+    },
+    "RANGE": {
+        "ActionZone": 0.92,
+        "EMACross": 0.84,
+        "CDCVixFix": 1.28,
+        "CryptoReversal": 1.20,
+        "ShortTerm": 1.10,
+        "Sniper": 1.08,
+        "Quantum": 1.02,
+    },
+    "HIGH_VOL": {
+        "ActionZone": 1.00,
+        "EMACross": 0.80,
+        "CDCVixFix": 1.30,
+        "CryptoReversal": 1.25,
+        "ShortTerm": 0.95,
+        "Sniper": 0.92,
+        "Quantum": 0.90,
+    },
+}
+
+
+def _all_weather_clip(value, low, high):
+    try:
+        value = float(value)
+    except Exception:
+        return float(low)
+    return float(max(float(low), min(float(high), value)))
+
+
+def _all_weather_regime_weight(label, regime):
+    weights = _ALL_WEATHER_REGIME_WEIGHTS.get(str(regime or "").upper(), {})
+    try:
+        return float(weights.get(str(label or "").strip(), 1.0))
+    except Exception:
+        return 1.0
+
+
+def _all_weather_market_regime(item):
+    vol_samples = []
+    for plan, key in (
+        (item.get("actionzone_15m"), "avg_range_pct"),
+        (item.get("actionzone_15m"), "atr_pct"),
+        (item.get("crypto_reversal_15m"), "atr_pct"),
+    ):
+        if not isinstance(plan, dict):
+            continue
+        value = plan.get(key)
+        if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0:
+            vol_samples.append(float(value))
+    change_pct = item.get("change")
+    if isinstance(change_pct, (int, float)) and math.isfinite(float(change_pct)):
+        vol_samples.append(abs(float(change_pct)))
+    volatility_pct = 0.0
+    if vol_samples:
+        vol_samples.sort()
+        volatility_pct = float(vol_samples[len(vol_samples) // 2])
+
+    trend_score = 0.0
+    az_plan = item.get("actionzone_15m")
+    if isinstance(az_plan, dict):
+        if bool(az_plan.get("trend_alignment", False)):
+            trend_score += 0.60
+        adx = az_plan.get("adx")
+        if isinstance(adx, (int, float)) and math.isfinite(float(adx)):
+            adx = float(adx)
+            if adx >= 30.0:
+                trend_score += 1.00
+            elif adx >= 24.0:
+                trend_score += 0.80
+            elif adx >= 18.0:
+                trend_score += 0.50
+        strength = str(az_plan.get("trend_strength") or "").upper()
+        if strength == "STRONG":
+            trend_score += 0.50
+        elif strength == "MODERATE":
+            trend_score += 0.25
+    ema_plan = item.get("ema_cross_15m")
+    if isinstance(ema_plan, dict):
+        direction = _plan_trade_direction(ema_plan)
+        if direction in ("BUY", "SELL"):
+            trend_score += 0.25
+        bars_since_cross = ema_plan.get("bars_since_cross")
+        if isinstance(bars_since_cross, (int, float)) and float(bars_since_cross) <= 2:
+            trend_score += 0.20
+
+    high_vol_threshold = getattr(config, "ALL_WEATHER_15M_HIGH_VOL_THRESHOLD", 2.2)
+    trend_threshold = getattr(config, "ALL_WEATHER_15M_TREND_THRESHOLD", 1.5)
+    try:
+        high_vol_threshold = float(high_vol_threshold)
+    except Exception:
+        high_vol_threshold = 2.2
+    try:
+        trend_threshold = float(trend_threshold)
+    except Exception:
+        trend_threshold = 1.5
+
+    regime = "RANGE"
+    if volatility_pct >= high_vol_threshold:
+        regime = "HIGH_VOL"
+    elif trend_score >= trend_threshold:
+        regime = "TREND"
+    return {
+        "regime": regime,
+        "volatility_pct": float(volatility_pct),
+        "trend_score": float(trend_score),
+    }
+
+
+def _all_weather_freshness_bonus(bars_since_signal):
+    if not isinstance(bars_since_signal, (int, float)) or not math.isfinite(float(bars_since_signal)):
+        return 0.0
+    bars = float(bars_since_signal)
+    if bars <= 0:
+        return 4.0
+    if bars <= 2:
+        return 2.0
+    if bars > 6:
+        return -3.0
+    return 0.0
+
+
+def _all_weather_metrics_bonus(win_rate, expectancy, trades):
+    bonus_wr = 0.0
+    bonus_exp = 0.0
+    bonus_trades = 0.0
+    if isinstance(win_rate, (int, float)) and math.isfinite(float(win_rate)):
+        bonus_wr = _all_weather_clip((float(win_rate) - 50.0) * 0.25, -6.0, 10.0)
+    if isinstance(expectancy, (int, float)) and math.isfinite(float(expectancy)):
+        bonus_exp = _all_weather_clip(float(expectancy) * 8.0, -6.0, 8.0)
+    if isinstance(trades, (int, float)) and math.isfinite(float(trades)):
+        bonus_trades = _all_weather_clip(float(trades) / 6.0, 0.0, 6.0)
+    return float(bonus_wr + bonus_exp + bonus_trades)
+
+
+def _all_weather_plan_candidates(item, regime):
+    plans = [
+        ("ActionZone", item.get("actionzone_15m")),
+        ("EMACross", item.get("ema_cross_15m")),
+        ("CDCVixFix", item.get("cdc_vixfix_15m")),
+        ("CryptoReversal", item.get("crypto_reversal_15m")),
+        ("ShortTerm", item.get("short_term_15m")),
+        ("Sniper", item.get("sniper_15m")),
+        ("Quantum", item.get("quantum_15m")),
+    ]
+    candidates = []
+    for label, plan in plans:
+        if not isinstance(plan, dict):
+            continue
+        direction = _plan_trade_direction(plan)
+        if direction not in ("BUY", "SELL") or not _is_entry_signal(plan, direction):
+            continue
+        confidence = _plan_confidence_value(plan)
+        if not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
+            continue
+        gate_ok, _, edge = _evaluate_entry_quality_gate(plan, direction)
+        if not gate_ok:
+            continue
+        bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
+        win_rate = edge.get("win_rate_pct")
+        expectancy = edge.get("expectancy_rr")
+        trades = edge.get("trades")
+        metrics_bonus = _all_weather_metrics_bonus(win_rate, expectancy, trades)
+        freshness_bonus = _all_weather_freshness_bonus(bars_since)
+        regime_weight = _all_weather_regime_weight(label, regime)
+        score = float(confidence) + metrics_bonus + freshness_bonus + ((float(regime_weight) - 1.0) * 16.0)
+        candidates.append(
+            {
+                "label": label,
+                "plan": plan,
+                "signal": direction,
+                "confidence": float(confidence),
+                "win_rate_pct": float(win_rate) if isinstance(win_rate, (int, float)) else None,
+                "expectancy_rr": float(expectancy) if isinstance(expectancy, (int, float)) else None,
+                "trades": float(trades) if isinstance(trades, (int, float)) else None,
+                "bars_since_signal": float(bars_since) if isinstance(bars_since, (int, float)) else None,
+                "regime_weight": float(regime_weight),
+                "metrics_bonus": float(metrics_bonus),
+                "freshness_bonus": float(freshness_bonus),
+                "score": float(score),
+            }
+        )
+    candidates.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
+    return candidates
+
+
+def _all_weather_blended_metrics(rows):
+    weighted_wr = 0.0
+    weighted_exp = 0.0
+    total_alpha = 0.0
+    trade_sum = 0.0
+    measured = 0
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        alpha = max(0.1, float(row.get("confidence", 0.0)) / 100.0)
+        wr = row.get("win_rate_pct")
+        exp = row.get("expectancy_rr")
+        trades = row.get("trades")
+        if isinstance(wr, (int, float)) and math.isfinite(float(wr)):
+            weighted_wr += alpha * float(wr)
+            total_alpha += alpha
+        if isinstance(exp, (int, float)) and math.isfinite(float(exp)):
+            weighted_exp += alpha * float(exp)
+        if isinstance(trades, (int, float)) and math.isfinite(float(trades)):
+            trade_sum += float(trades)
+            measured += 1
+    if total_alpha <= 0:
+        wr_blend = None
+        exp_blend = None
+    else:
+        wr_blend = weighted_wr / total_alpha
+        exp_blend = weighted_exp / total_alpha
+    trades_blend = int(round(trade_sum / measured)) if measured > 0 else 0
+    return {
+        "win_rate_pct": wr_blend,
+        "expectancy_rr": exp_blend,
+        "trades": trades_blend,
+        "measured_count": measured,
+    }
+
+
+def _build_all_weather_report_entry(item, min_conf=None):
+    symbol = normalize_symbol(item.get("symbol") or "") if isinstance(item, dict) else ""
+    report = {
+        "symbol": symbol,
+        "status": "unknown",
+        "enabled": bool(getattr(config, "ALL_WEATHER_15M_ENABLED", True)),
+        "signal": "WAIT",
+        "passed": False,
+        "regime": None,
+        "volatility_pct": None,
+        "trend_score": None,
+        "input_min_confidence": None,
+        "required_confidence": None,
+        "final_confidence": None,
+        "delta": None,
+        "top_k": None,
+        "min_confluence": None,
+        "top_buy_score": None,
+        "top_sell_score": None,
+        "side_gap": None,
+        "selected_side": None,
+        "selected_sources": [],
+        "primary_source": None,
+        "blend": {},
+        "candidate_pool_count": 0,
+        "candidates": [],
+        "cache_key": None,
+    }
+    if not report["enabled"]:
+        report["status"] = "disabled"
+        return report
+    if min_conf is None:
+        min_conf = getattr(config, "ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE", 69.0)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 69.0
+    report["input_min_confidence"] = float(min_conf)
+
+    regime_meta = _all_weather_market_regime(item)
+    regime = regime_meta.get("regime") or "RANGE"
+    report["regime"] = regime
+    report["volatility_pct"] = float(regime_meta.get("volatility_pct") or 0.0)
+    report["trend_score"] = float(regime_meta.get("trend_score") or 0.0)
+
+    candidates = _all_weather_plan_candidates(item, regime)
+    report["candidate_pool_count"] = len(candidates)
+    report["candidates"] = [
+        {
+            "label": str(row.get("label") or ""),
+            "signal": str(row.get("signal") or ""),
+            "confidence": float(row.get("confidence", 0.0)),
+            "score": float(row.get("score", 0.0)),
+            "regime_weight": float(row.get("regime_weight", 1.0)),
+            "metrics_bonus": float(row.get("metrics_bonus", 0.0)),
+            "freshness_bonus": float(row.get("freshness_bonus", 0.0)),
+            "win_rate_pct": float(row.get("win_rate_pct")) if isinstance(row.get("win_rate_pct"), (int, float)) else None,
+            "expectancy_rr": float(row.get("expectancy_rr")) if isinstance(row.get("expectancy_rr"), (int, float)) else None,
+            "trades": int(row.get("trades")) if isinstance(row.get("trades"), (int, float)) else None,
+            "bars_since_signal": float(row.get("bars_since_signal")) if isinstance(row.get("bars_since_signal"), (int, float)) else None,
+        }
+        for row in candidates
+    ]
+    if not candidates:
+        report["status"] = "no_actionable_subplans"
+        return report
+
+    buy_rows = [row for row in candidates if row.get("signal") == "BUY"]
+    sell_rows = [row for row in candidates if row.get("signal") == "SELL"]
+    top_buy = buy_rows[0] if buy_rows else None
+    top_sell = sell_rows[0] if sell_rows else None
+
+    delta = getattr(config, "ALL_WEATHER_15M_DELTA", 3.0)
+    top_k = getattr(config, "ALL_WEATHER_15M_TOP_K", 2)
+    min_confluence = getattr(config, "ALL_WEATHER_15M_MIN_CONFLUENCE", 2)
+    try:
+        delta = float(delta)
+    except Exception:
+        delta = 3.0
+    try:
+        top_k = max(1, int(top_k))
+    except Exception:
+        top_k = 2
+    try:
+        min_confluence = max(1, int(min_confluence))
+    except Exception:
+        min_confluence = 2
+    report["delta"] = float(delta)
+    report["top_k"] = int(top_k)
+    report["min_confluence"] = int(min_confluence)
+    report["top_buy_score"] = float(top_buy.get("score", 0.0)) if top_buy else None
+    report["top_sell_score"] = float(top_sell.get("score", 0.0)) if top_sell else None
+
+    side = None
+    side_gap = 0.0
+    if top_buy and (not top_sell or float(top_buy["score"]) >= float(top_sell["score"]) + float(delta)):
+        side = "BUY"
+        side_gap = float(top_buy["score"]) - float(top_sell["score"]) if top_sell else float(top_buy["score"])
+    elif top_sell and (not top_buy or float(top_sell["score"]) >= float(top_buy["score"]) + float(delta)):
+        side = "SELL"
+        side_gap = float(top_sell["score"]) - float(top_buy["score"]) if top_buy else float(top_sell["score"])
+    report["selected_side"] = side
+    report["side_gap"] = float(side_gap)
+    if side not in ("BUY", "SELL"):
+        report["status"] = "side_not_clear"
+        return report
+
+    selected_rows = [row for row in candidates if row.get("signal") == side][:top_k]
+    source_labels = [str(row.get("label") or "") for row in selected_rows if str(row.get("label") or "").strip()]
+    report["selected_sources"] = source_labels
+    report["primary_source"] = source_labels[0] if source_labels else None
+    if len(selected_rows) < min_confluence:
+        report["status"] = "min_confluence_not_met"
+        return report
+
+    blend = _all_weather_blended_metrics(selected_rows)
+    report["blend"] = {
+        "win_rate_pct": float(blend.get("win_rate_pct")) if isinstance(blend.get("win_rate_pct"), (int, float)) else None,
+        "expectancy_rr": float(blend.get("expectancy_rr")) if isinstance(blend.get("expectancy_rr"), (int, float)) else None,
+        "trades": int(blend.get("trades")) if isinstance(blend.get("trades"), (int, float)) else 0,
+        "measured_count": int(blend.get("measured_count") or 0),
+    }
+    require_backtest_pass = bool(getattr(config, "ALL_WEATHER_15M_REQUIRE_BACKTEST_PASS", True))
+    min_valid_trades = getattr(config, "ALL_WEATHER_15M_MIN_VALID_TRADES", 6)
+    min_valid_wr = getattr(config, "ALL_WEATHER_15M_MIN_VALID_WIN_RATE", 56.0)
+    min_valid_exp = getattr(config, "ALL_WEATHER_15M_MIN_VALID_EXPECTANCY", 0.03)
+    aw_min_conf = getattr(config, "ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE", 69.0)
+    try:
+        min_valid_trades = int(min_valid_trades)
+    except Exception:
+        min_valid_trades = 6
+    try:
+        min_valid_wr = float(min_valid_wr)
+    except Exception:
+        min_valid_wr = 56.0
+    try:
+        min_valid_exp = float(min_valid_exp)
+    except Exception:
+        min_valid_exp = 0.03
+    try:
+        aw_min_conf = float(aw_min_conf)
+    except Exception:
+        aw_min_conf = 69.0
+    required_conf = max(float(min_conf), float(aw_min_conf))
+    report["required_confidence"] = float(required_conf)
+
+    if require_backtest_pass:
+        if int(blend.get("measured_count") or 0) <= 0:
+            report["status"] = "backtest_metrics_missing"
+            return report
+        if int(blend.get("trades") or 0) < int(min_valid_trades):
+            report["status"] = "backtest_trades_below_min"
+            return report
+        wr_blend = blend.get("win_rate_pct")
+        if isinstance(wr_blend, (int, float)) and float(wr_blend) < float(min_valid_wr):
+            report["status"] = "backtest_win_rate_below_min"
+            return report
+        exp_blend = blend.get("expectancy_rr")
+        if isinstance(exp_blend, (int, float)) and float(exp_blend) < float(min_valid_exp):
+            report["status"] = "backtest_expectancy_below_min"
+            return report
+
+    selected_top = selected_rows[0]
+    wr_blend = blend.get("win_rate_pct")
+    conf_wr = 0.0
+    if isinstance(wr_blend, (int, float)) and math.isfinite(float(wr_blend)):
+        conf_wr = _all_weather_clip((float(wr_blend) - 50.0) * 0.20, 0.0, 8.0)
+    final_conf = _all_weather_clip(
+        float(selected_top.get("confidence", 0.0)) + min(12.0, 3.0 * len(selected_rows)) + conf_wr,
+        0.0,
+        98.0,
+    )
+    report["final_confidence"] = float(final_conf)
+    if final_conf < required_conf:
+        report["status"] = "confidence_below_min"
+        return report
+
+    primary_plan = selected_top.get("plan")
+    last_signal_key = ""
+    if isinstance(primary_plan, dict):
+        last_signal_key = str(primary_plan.get("last_signal_time") or "").strip()
+    if not last_signal_key:
+        last_signal_key = "|".join(source_labels) or get_thai_now().strftime("%Y%m%d%H")
+    report["status"] = "pass"
+    report["signal"] = side
+    report["passed"] = True
+    report["score"] = float(final_conf) + min(8.0, len(selected_rows) * 2.0) + min(10.0, max(0.0, float(side_gap)))
+    report["cache_key"] = f"AW15|{symbol}|{side}|{regime}|{last_signal_key}"
+    report["signal_payload"] = {
+        "signal": side,
+        "confidence": float(final_conf),
+        "score": float(report["score"]),
+        "primary_plan": primary_plan,
+        "sources": source_labels,
+        "selected_rows": selected_rows,
+        "regime": regime,
+        "volatility_pct": float(regime_meta.get("volatility_pct") or 0.0),
+        "trend_score": float(regime_meta.get("trend_score") or 0.0),
+        "side_gap": float(side_gap),
+        "top_buy_score": report["top_buy_score"],
+        "top_sell_score": report["top_sell_score"],
+        "blend": blend,
+        "cache_key": report["cache_key"],
+    }
+    return report
+
+
+def _build_all_weather_signal(item, min_conf):
+    report = _build_all_weather_report_entry(item, min_conf=min_conf)
+    payload = report.get("signal_payload") if isinstance(report, dict) else None
+    if isinstance(payload, dict) and bool(report.get("passed")):
+        return payload, {"status": "pass"}
+    meta = {
+        "status": str(report.get("status") or "filtered") if isinstance(report, dict) else "filtered",
+        "side": report.get("selected_side") if isinstance(report, dict) else None,
+        "confidence": report.get("final_confidence") if isinstance(report, dict) else None,
+    }
+    return None, meta
+
+
+def _build_all_weather_message(item, aw_signal):
+    if not isinstance(aw_signal, dict):
+        return None
+    signal = str(aw_signal.get("signal") or "").upper()
+    if signal not in ("BUY", "SELL"):
+        return None
+    base_message = _build_telegram_message(
+        item,
+        signal,
+        aw_signal.get("confidence"),
+        aw_signal.get("sources") or [],
+        primary_plan=aw_signal.get("primary_plan"),
+    )
+    if not isinstance(base_message, str) or not base_message.strip():
+        return None
+    symbol = normalize_symbol(item.get("symbol") or "")
+    lines = base_message.splitlines()
+    if not lines:
+        return None
+    lines[0] = f"<b>🌦️ All-Weather {signal} | {_html_escape(symbol)}</b>"
+    insert_at = 1
+    if len(lines) > 1 and lines[1].startswith("<i>"):
+        insert_at = 2
+    regime = str(aw_signal.get("regime") or "RANGE").upper()
+    volatility_pct = aw_signal.get("volatility_pct")
+    trend_score = aw_signal.get("trend_score")
+    side_gap = aw_signal.get("side_gap")
+    top_buy_score = aw_signal.get("top_buy_score")
+    top_sell_score = aw_signal.get("top_sell_score")
+    blend = aw_signal.get("blend") or {}
+    selected_rows = aw_signal.get("selected_rows") or []
+    confluence_labels = [str(row.get("label") or "") for row in selected_rows if isinstance(row, dict)]
+    extra_lines = [f"<b>🧠 Market Regime:</b> {regime}"]
+    regime_stats = []
+    if isinstance(volatility_pct, (int, float)):
+        regime_stats.append(f"Vol {float(volatility_pct):.2f}%")
+    if isinstance(trend_score, (int, float)):
+        regime_stats.append(f"Trend Score {float(trend_score):.2f}")
+    if regime_stats:
+        extra_lines[-1] += " | " + " | ".join(regime_stats)
+    if confluence_labels:
+        extra_lines.append("<b>🤝 Confluence:</b> " + ", ".join([_html_escape(s) for s in confluence_labels]))
+    side_stats = []
+    if isinstance(top_buy_score, (int, float)):
+        side_stats.append(f"BUY {float(top_buy_score):.1f}")
+    if isinstance(top_sell_score, (int, float)):
+        side_stats.append(f"SELL {float(top_sell_score):.1f}")
+    if isinstance(side_gap, (int, float)):
+        side_stats.append(f"Gap {float(side_gap):.1f}")
+    if side_stats:
+        extra_lines.append("<b>⚖️ Side Selection:</b> " + " | ".join(side_stats))
+    blend_stats = []
+    wr_blend = blend.get("win_rate_pct")
+    exp_blend = blend.get("expectancy_rr")
+    trades_blend = blend.get("trades")
+    if isinstance(wr_blend, (int, float)):
+        blend_stats.append(f"WR {float(wr_blend):.1f}%")
+    if isinstance(exp_blend, (int, float)):
+        blend_stats.append(f"ExpRR {float(exp_blend):.2f}")
+    if isinstance(trades_blend, (int, float)) and int(trades_blend) > 0:
+        blend_stats.append(f"Trades {int(trades_blend)}")
+    if blend_stats:
+        extra_lines.append("<b>🧪 Blended Edge:</b> " + " | ".join(blend_stats))
+    lines[insert_at:insert_at] = extra_lines
+    return "\n".join(lines)
+
+
 def _build_super_signal_message(item, signal, super_meta, primary_plan=None):
     emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
@@ -1350,7 +2288,7 @@ def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None)
     return "\n".join(lines)
 
 
-def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_plan=None, strategy_label=None, selection_score=None):
+def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_plan=None, strategy_label=None, selection_score=None, mode_label=None):
     base_message = _build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
     if not isinstance(base_message, str) or not base_message.strip():
         return None
@@ -1365,6 +2303,8 @@ def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_pla
     daily_lines = [
         "<b>🗓️ Daily Scan:</b> หนึ่งในตัวเด่นของวันจาก watchlist",
     ]
+    if mode_label:
+        daily_lines.append("<b>🧭 โหมด:</b> " + _html_escape(str(mode_label)))
     if strategy_label:
         daily_lines.append("<b>🎯 แผนหลัก:</b> " + _html_escape(str(strategy_label)))
     if isinstance(selection_score, (int, float)):
@@ -1500,7 +2440,7 @@ def _build_actionzone_message(item, az_plan):
     return "\n".join(lines)
 
 
-def _build_cdc_vixfix_message(item, plan):
+def _build_cdc_vixfix_message(item, plan, mode_label=None):
     signal = str(plan.get("signal") or "").upper()
     if signal not in ("BUY", "SELL"):
         return None
@@ -1512,6 +2452,8 @@ def _build_cdc_vixfix_message(item, plan):
     lines = [f"<b>{emoji} CDC+VixFix 15m {signal} | {_html_escape(symbol)}</b>"]
     if name:
         lines.append(f"<i>{name}</i>")
+    if mode_label:
+        lines.append("<b>🧭 โหมด:</b> " + _html_escape(str(mode_label)))
     lines.append("────────────────")
     
     entry_text = _format_price_value(plan.get("entry_price"))
@@ -1839,7 +2781,7 @@ def _build_alert_backtest_summary(results, min_conf=None):
             "total_historical_trades": 0,
             "dynamic_min_confidence": None,
             "alerts": [],
-            "by_strategy": {},
+            "by_strategy": {name: {"alerts": 0, "measured": 0, "estimated_win_rate_pct": None, "average_expectancy_rr": None, "total_historical_trades": 0, "observed_symbols": 0, "signals": {}} for name in _TELEGRAM_REPORT_STRATEGY_ORDER},
         }
     if min_conf is None:
         min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
@@ -1849,6 +2791,7 @@ def _build_alert_backtest_summary(results, min_conf=None):
         min_conf = 75.0
     dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
     candidates, _ = _build_telegram_candidates(results, dynamic_min_conf)
+    raw_strategy_summary = _build_strategy_backtest_summary(results, min_conf=dynamic_min_conf)
     alerts = []
     weighted_wr_sum = 0.0
     weighted_exp_sum = 0.0
@@ -1905,15 +2848,25 @@ def _build_alert_backtest_summary(results, min_conf=None):
             if isinstance(exp, (int, float)):
                 weighted_exp_sum += float(exp) * weight
                 bucket["weighted_exp_sum"] += float(exp) * weight
-    by_strategy_summary = {}
+    by_strategy_summary = dict(raw_strategy_summary)
     for strategy, bucket in by_strategy.items():
         weight = float(bucket.get("weight") or 0.0)
-        by_strategy_summary[strategy] = {
-            "alerts": int(bucket.get("alerts") or 0),
-            "measured": int(bucket.get("measured") or 0),
-            "estimated_win_rate_pct": (bucket["weighted_wr_sum"] / weight) if weight > 0 else None,
-            "average_expectancy_rr": (bucket["weighted_exp_sum"] / weight) if weight > 0 else None,
-        }
+        row = dict(by_strategy_summary.get(strategy) or {})
+        row["alerts"] = int(bucket.get("alerts") or 0)
+        candidate_measured = int(bucket.get("measured") or 0)
+        if candidate_measured > 0:
+            row["measured"] = candidate_measured
+            row["estimated_win_rate_pct"] = (bucket["weighted_wr_sum"] / weight) if weight > 0 else None
+            row["average_expectancy_rr"] = (bucket["weighted_exp_sum"] / weight) if weight > 0 else None
+            row["total_historical_trades"] = int(weight) if weight > 0 else int(row.get("total_historical_trades") or 0)
+        else:
+            row.setdefault("measured", 0)
+            row.setdefault("estimated_win_rate_pct", None)
+            row.setdefault("average_expectancy_rr", None)
+            row.setdefault("total_historical_trades", 0)
+        row.setdefault("observed_symbols", 0)
+        row.setdefault("signals", {})
+        by_strategy_summary[strategy] = row
     return {
         "candidate_count": len(candidates),
         "measured_count": measured_count,
@@ -1924,6 +2877,240 @@ def _build_alert_backtest_summary(results, min_conf=None):
         "dynamic_min_confidence": float(dynamic_min_conf),
         "alerts": alerts,
         "by_strategy": by_strategy_summary,
+    }
+
+
+def _build_all_weather_summary(results, min_conf=None):
+    returned = results if isinstance(results, list) else []
+    if not returned:
+        return {
+            "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M"),
+            "required_confidence": None,
+            "dynamic_telegram_min_confidence": None,
+            "valid_symbols": 0,
+            "error_symbols": 0,
+            "ready_symbols": 0,
+            "readiness_rate_pct": 0.0,
+            "deploy_ready": False,
+            "by_status": {},
+            "by_regime": {},
+            "by_signal": {},
+            "by_primary_source": {},
+            "average_final_confidence": None,
+            "per_symbol": [],
+        }
+    telegram_min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 72.0)
+    try:
+        telegram_min_conf = float(telegram_min_conf)
+    except Exception:
+        telegram_min_conf = 72.0
+    dynamic_telegram_min = _telegram_dynamic_conf_threshold(telegram_min_conf, returned)
+    aw_floor = getattr(config, "ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE", 69.0)
+    try:
+        aw_floor = float(aw_floor)
+    except Exception:
+        aw_floor = 69.0
+    if min_conf is None:
+        min_conf = max(float(dynamic_telegram_min), float(aw_floor))
+    else:
+        try:
+            min_conf = float(min_conf)
+        except Exception:
+            min_conf = max(float(dynamic_telegram_min), float(aw_floor))
+    min_symbol_ready_rate = getattr(config, "ALL_WEATHER_15M_MIN_SYMBOL_READY_RATE", 35.0)
+    try:
+        min_symbol_ready_rate = float(min_symbol_ready_rate)
+    except Exception:
+        min_symbol_ready_rate = 35.0
+
+    by_status = Counter()
+    by_regime = Counter()
+    by_signal = Counter()
+    by_primary_source = Counter()
+    per_symbol = []
+    valid_symbols = 0
+    error_symbols = 0
+    ready_symbols = 0
+    conf_sum = 0.0
+    conf_count = 0
+    for item in returned:
+        if not isinstance(item, dict):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        if item.get("error"):
+            error_symbols += 1
+            per_symbol.append(
+                {
+                    "symbol": symbol,
+                    "name": str(item.get("name") or "").strip(),
+                    "status": "error",
+                    "error": str(item.get("error") or "").strip(),
+                    "signal": "WAIT",
+                    "passed": False,
+                }
+            )
+            continue
+        valid_symbols += 1
+        report = _build_all_weather_report_entry(item, min_conf=min_conf)
+        status = str(report.get("status") or "unknown")
+        regime = str(report.get("regime") or "UNKNOWN")
+        signal = str(report.get("signal") or "WAIT")
+        by_status[status] += 1
+        by_regime[regime] += 1
+        by_signal[signal] += 1
+        primary_source = str(report.get("primary_source") or "").strip()
+        if primary_source:
+            by_primary_source[primary_source] += 1
+        final_conf = report.get("final_confidence")
+        if isinstance(final_conf, (int, float)) and math.isfinite(float(final_conf)):
+            conf_sum += float(final_conf)
+            conf_count += 1
+        if bool(report.get("passed")):
+            ready_symbols += 1
+        blend = report.get("blend") or {}
+        per_symbol.append(
+            {
+                "symbol": symbol,
+                "name": str(item.get("name") or "").strip(),
+                "price": float(item.get("price")) if isinstance(item.get("price"), (int, float)) else None,
+                "change": float(item.get("change")) if isinstance(item.get("change"), (int, float)) else None,
+                "status": status,
+                "signal": signal,
+                "passed": bool(report.get("passed")),
+                "regime": report.get("regime"),
+                "primary_source": report.get("primary_source"),
+                "selected_sources": report.get("selected_sources") or [],
+                "final_confidence": float(final_conf) if isinstance(final_conf, (int, float)) else None,
+                "required_confidence": float(report.get("required_confidence")) if isinstance(report.get("required_confidence"), (int, float)) else None,
+                "top_buy_score": float(report.get("top_buy_score")) if isinstance(report.get("top_buy_score"), (int, float)) else None,
+                "top_sell_score": float(report.get("top_sell_score")) if isinstance(report.get("top_sell_score"), (int, float)) else None,
+                "side_gap": float(report.get("side_gap")) if isinstance(report.get("side_gap"), (int, float)) else None,
+                "volatility_pct": float(report.get("volatility_pct")) if isinstance(report.get("volatility_pct"), (int, float)) else None,
+                "trend_score": float(report.get("trend_score")) if isinstance(report.get("trend_score"), (int, float)) else None,
+                "candidate_pool_count": int(report.get("candidate_pool_count") or 0),
+                "blend": {
+                    "win_rate_pct": float(blend.get("win_rate_pct")) if isinstance(blend.get("win_rate_pct"), (int, float)) else None,
+                    "expectancy_rr": float(blend.get("expectancy_rr")) if isinstance(blend.get("expectancy_rr"), (int, float)) else None,
+                    "trades": int(blend.get("trades")) if isinstance(blend.get("trades"), (int, float)) else 0,
+                    "measured_count": int(blend.get("measured_count") or 0),
+                },
+                "candidates": report.get("candidates") or [],
+            }
+        )
+    per_symbol.sort(
+        key=lambda row: (
+            1 if bool(row.get("passed")) else 0,
+            float(row.get("final_confidence") or 0.0),
+            float(row.get("side_gap") or 0.0),
+            str(row.get("symbol") or ""),
+        ),
+        reverse=True,
+    )
+    readiness_rate = (float(ready_symbols) / float(valid_symbols) * 100.0) if valid_symbols > 0 else 0.0
+    return {
+        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M"),
+        "required_confidence": float(min_conf),
+        "dynamic_telegram_min_confidence": float(dynamic_telegram_min),
+        "valid_symbols": int(valid_symbols),
+        "error_symbols": int(error_symbols),
+        "ready_symbols": int(ready_symbols),
+        "readiness_rate_pct": float(readiness_rate),
+        "min_symbol_ready_rate_pct": float(min_symbol_ready_rate),
+        "deploy_ready": bool(readiness_rate >= float(min_symbol_ready_rate)),
+        "by_status": dict(by_status),
+        "by_regime": dict(by_regime),
+        "by_signal": dict(by_signal),
+        "by_primary_source": dict(by_primary_source),
+        "average_final_confidence": (conf_sum / conf_count) if conf_count > 0 else None,
+        "per_symbol": per_symbol,
+    }
+
+
+def _build_all_weather_readiness(period_reports):
+    reports = period_reports if isinstance(period_reports, dict) else {}
+    min_period_passes = getattr(config, "ALL_WEATHER_15M_MIN_PERIOD_PASSES", 2)
+    min_symbol_ready_rate = getattr(config, "ALL_WEATHER_15M_MIN_SYMBOL_READY_RATE", 35.0)
+    try:
+        min_period_passes = max(1, int(min_period_passes))
+    except Exception:
+        min_period_passes = 2
+    try:
+        min_symbol_ready_rate = float(min_symbol_ready_rate)
+    except Exception:
+        min_symbol_ready_rate = 35.0
+    symbol_map = {}
+    period_count = 0
+    for period, report in reports.items():
+        if not isinstance(report, dict):
+            continue
+        period_count += 1
+        for row in report.get("per_symbol") or []:
+            if not isinstance(row, dict):
+                continue
+            symbol = normalize_symbol(row.get("symbol") or "")
+            if not symbol:
+                continue
+            bucket = symbol_map.setdefault(
+                symbol,
+                {
+                    "symbol": symbol,
+                    "name": str(row.get("name") or "").strip(),
+                    "pass_count": 0,
+                    "periods_passed": [],
+                    "signals_by_period": {},
+                    "status_by_period": {},
+                    "best_confidence": None,
+                },
+            )
+            passed = bool(row.get("passed"))
+            bucket["signals_by_period"][period] = str(row.get("signal") or "WAIT")
+            bucket["status_by_period"][period] = str(row.get("status") or "unknown")
+            conf = row.get("final_confidence")
+            if isinstance(conf, (int, float)) and (
+                bucket["best_confidence"] is None or float(conf) > float(bucket["best_confidence"])
+            ):
+                bucket["best_confidence"] = float(conf)
+            if passed:
+                bucket["pass_count"] += 1
+                bucket["periods_passed"].append(period)
+    per_symbol = []
+    ready_symbols = 0
+    for symbol, bucket in symbol_map.items():
+        ready = int(bucket["pass_count"]) >= int(min_period_passes)
+        if ready:
+            ready_symbols += 1
+        per_symbol.append(
+            {
+                "symbol": symbol,
+                "name": bucket.get("name"),
+                "pass_count": int(bucket.get("pass_count") or 0),
+                "periods_passed": bucket.get("periods_passed") or [],
+                "signals_by_period": bucket.get("signals_by_period") or {},
+                "status_by_period": bucket.get("status_by_period") or {},
+                "best_confidence": float(bucket.get("best_confidence")) if isinstance(bucket.get("best_confidence"), (int, float)) else None,
+                "ready": bool(ready),
+            }
+        )
+    per_symbol.sort(
+        key=lambda row: (
+            1 if bool(row.get("ready")) else 0,
+            int(row.get("pass_count") or 0),
+            float(row.get("best_confidence") or 0.0),
+            str(row.get("symbol") or ""),
+        ),
+        reverse=True,
+    )
+    total_symbols = len(per_symbol)
+    readiness_rate = (float(ready_symbols) / float(total_symbols) * 100.0) if total_symbols > 0 else 0.0
+    return {
+        "evaluated_periods": int(period_count),
+        "min_period_passes": int(min_period_passes),
+        "min_symbol_ready_rate_pct": float(min_symbol_ready_rate),
+        "ready_symbols": int(ready_symbols),
+        "total_symbols": int(total_symbols),
+        "readiness_rate_pct": float(readiness_rate),
+        "deploy_ready": bool(readiness_rate >= float(min_symbol_ready_rate)),
+        "per_symbol": per_symbol,
     }
 
 
@@ -2137,10 +3324,30 @@ def _build_telegram_candidates(results, min_conf):
                         "score": score,
                         "confidence": float(ss_meta.get("avg_wr", 0)),
                         "plan": ss_plan,
+                        "item": item,
                         "edge_metrics": ss_meta,
                         "message": ss_message,
                         "cache_key": f"SS15|{symbol}|{sig}|{get_thai_now().strftime('%Y%m%d%H')}", # Hourly cache
                     })
+
+        aw_signal, aw_meta = _build_all_weather_signal(item, min_conf)
+        if isinstance(aw_signal, dict):
+            aw_message = _build_all_weather_message(item, aw_signal)
+            if aw_message:
+                candidates.append({
+                    "symbol": symbol,
+                    "strategy": "AW15",
+                    "signal": aw_signal.get("signal"),
+                    "score": float(aw_signal.get("score", 0.0)),
+                    "confidence": float(aw_signal.get("confidence", 0.0)),
+                    "plan": aw_signal.get("primary_plan"),
+                    "item": item,
+                    "edge_metrics": aw_signal.get("blend") or {},
+                    "message": aw_message,
+                    "cache_key": str(aw_signal.get("cache_key") or f"AW15|{symbol}|{get_thai_now().strftime('%Y%m%d%H')}"),
+                })
+        elif isinstance(aw_meta, dict):
+            quality_drop_counts[f"all_weather_{aw_meta.get('status') or 'filtered'}"] += 1
 
         cdc_plan = item.get("cdc_vixfix_15m")
         if isinstance(cdc_plan, dict):
@@ -2177,6 +3384,7 @@ def _build_telegram_candidates(results, min_conf):
                         "score": float(score),
                         "confidence": float(cdc_conf),
                         "plan": cdc_plan,
+                        "item": item,
                         "edge_metrics": edge,
                         "message": cdc_message,
                         "cache_key": f"CDCVIX15|{symbol}|{cdc_signal}|{context_key}",
@@ -2247,6 +3455,7 @@ def _build_telegram_candidates(results, min_conf):
                             "score": float(score),
                             "confidence": float(az_conf),
                             "plan": az_plan,
+                            "item": item,
                             "edge_metrics": edge,
                             "message": az_message,
                             "cache_key": f"AZ15|{symbol}|{az_signal}|{context_key}",
@@ -2318,14 +3527,23 @@ def _build_telegram_candidates(results, min_conf):
                         "score": float(score),
                         "confidence": float(best_conf),
                         "plan": primary_plan,
+                        "item": item,
                         "edge_metrics": edge,
                         "message": message,
                         "cache_key": f"PRIMARY|{symbol}|{signal}|{context_key}",
                     })
+    filtered_candidates = []
+    for candidate in candidates:
+        gate_ok, gate_reason, edge_metrics = _evaluate_candidate_backtest_gate(candidate)
+        if not gate_ok:
+            quality_drop_counts[gate_reason] += 1
+            continue
+        candidate["edge_metrics"] = edge_metrics
+        filtered_candidates.append(candidate)
     stats = {
         "quality_drop_counts": dict(quality_drop_counts),
     }
-    return candidates, stats
+    return filtered_candidates, stats
 
 
 def _is_daily_best_pick_window():
@@ -2361,11 +3579,24 @@ def _is_daily_best_pick_window():
 
 
 def _build_daily_best_pick_candidates(results):
-    min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 55.0)
-    min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_SCORE", 72.0)
-    max_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 3)
-    require_quality = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY", False))
-    allow_cdc = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC", True))
+    min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
+    min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_SCORE", 74.0)
+    max_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 1)
+    require_quality = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY", True))
+    allow_cdc = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC", False))
+    relaxed_enable = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_ENABLE", True))
+    relaxed_min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_CONFIDENCE", 57.0)
+    relaxed_min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_SCORE", 68.0)
+    relaxed_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE", 55.0)
+    relaxed_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES", 4)
+    relaxed_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR", 0.0)
+    baseline_enable = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_ENABLE", True))
+    baseline_min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_CONFIDENCE", 54.0)
+    baseline_min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_SCORE", 60.0)
+    baseline_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_WIN_RATE", 52.0)
+    baseline_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_TRADES", 2)
+    baseline_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_EXPECTANCY_RR", -0.02)
+    baseline_target_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_TARGET_PER_DAY", 1)
     try:
         min_conf = float(min_conf)
     except Exception:
@@ -2378,114 +3609,272 @@ def _build_daily_best_pick_candidates(results):
         max_per_day = int(max_per_day)
     except Exception:
         max_per_day = 3
+    try:
+        relaxed_min_conf = float(relaxed_min_conf)
+    except Exception:
+        relaxed_min_conf = 57.0
+    try:
+        relaxed_min_score = float(relaxed_min_score)
+    except Exception:
+        relaxed_min_score = 68.0
+    try:
+        relaxed_min_wr = float(relaxed_min_wr)
+    except Exception:
+        relaxed_min_wr = 55.0
+    try:
+        relaxed_min_trades = int(relaxed_min_trades)
+    except Exception:
+        relaxed_min_trades = 4
+    try:
+        relaxed_min_exp = float(relaxed_min_exp)
+    except Exception:
+        relaxed_min_exp = 0.0
+    try:
+        baseline_min_conf = float(baseline_min_conf)
+    except Exception:
+        baseline_min_conf = 54.0
+    try:
+        baseline_min_score = float(baseline_min_score)
+    except Exception:
+        baseline_min_score = 60.0
+    try:
+        baseline_min_wr = float(baseline_min_wr)
+    except Exception:
+        baseline_min_wr = 52.0
+    try:
+        baseline_min_trades = int(baseline_min_trades)
+    except Exception:
+        baseline_min_trades = 2
+    try:
+        baseline_min_exp = float(baseline_min_exp)
+    except Exception:
+        baseline_min_exp = -0.02
+    try:
+        baseline_target_per_day = int(baseline_target_per_day)
+    except Exception:
+        baseline_target_per_day = 1
     if max_per_day < 1:
         max_per_day = 1
+    if baseline_target_per_day < 0:
+        baseline_target_per_day = 0
 
-    def iter_candidates(require_min_conf=True):
-        daily_candidates = []
-        for item in results or []:
-            if not isinstance(item, dict) or item.get("error"):
-                continue
-            symbol = normalize_symbol(item.get("symbol") or "")
-            if not symbol:
-                continue
-            top_signal = str(item.get("signal") or "").upper().strip()
-            for signal in ("BUY", "SELL"):
+    candidates = []
+    relaxed_candidates = []
+    baseline_candidates = []
+    for item in results or []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        if not symbol:
+            continue
+        top_signal = str(item.get("signal") or "").upper().strip()
+        for signal in ("BUY", "SELL"):
+            active_require_quality = require_quality
+            primary_plan = _pick_primary_trade_plan(
+                item,
+                signal=signal,
+                require_quality=active_require_quality,
+                allow_cdc=allow_cdc,
+            )
+            if not isinstance(primary_plan, dict) and relaxed_enable:
+                active_require_quality = False
                 primary_plan = _pick_primary_trade_plan(
                     item,
                     signal=signal,
-                    require_quality=require_quality,
+                    require_quality=False,
                     allow_cdc=allow_cdc,
                 )
-                if not isinstance(primary_plan, dict):
-                    continue
-                best_conf = _get_best_confidence(
-                    item,
-                    signal=signal,
-                    require_quality=require_quality,
-                    allow_cdc=allow_cdc,
-                )
-                if best_conf is None:
-                    best_conf = _plan_confidence_value(primary_plan)
-                if best_conf is None:
-                    continue
-                if require_min_conf and float(best_conf) < float(min_conf):
-                    continue
-                source_floor = max(45.0, min(float(best_conf), float(min_conf)))
-                sources = _collect_alert_sources(
-                    item,
-                    source_floor,
-                    signal=signal,
-                    require_quality=require_quality,
-                    allow_cdc=allow_cdc,
-                )
-                edge = _extract_signal_edge_metrics(primary_plan, signal)
-                strategy_label = _get_primary_plan_source_label(item, primary_plan)
-                score = float(best_conf)
-                if top_signal == signal:
-                    score += 6.0
-                bars_since = _safe_float(
-                    _pick_plan_value(primary_plan, ["bars_since_signal", "bars_since_entry"]),
-                    None,
-                )
-                if isinstance(bars_since, float):
-                    if bars_since <= 0:
-                        score += 8.0
-                    elif bars_since <= 1:
-                        score += 5.0
-                    elif bars_since <= 2:
-                        score += 2.0
-                    elif bars_since >= 6:
-                        score -= 4.0
-                trend_alignment = primary_plan.get("trend_alignment")
-                if isinstance(trend_alignment, bool):
-                    score += 4.0 if trend_alignment else -6.0
-                forecast_dir = str(
-                    primary_plan.get("forecast_direction")
-                    or ((item.get("price_forecast") or {}).get("direction") if isinstance(item.get("price_forecast"), dict) else "")
-                    or ""
-                ).upper().strip()
-                if forecast_dir == signal:
+            if not isinstance(primary_plan, dict):
+                continue
+            best_conf = _get_best_confidence(
+                item,
+                signal=signal,
+                require_quality=active_require_quality,
+                allow_cdc=allow_cdc,
+            )
+            if best_conf is None:
+                best_conf = _plan_confidence_value(primary_plan)
+            if best_conf is None or float(best_conf) < float(min(relaxed_min_conf, baseline_min_conf)):
+                continue
+            source_floor = max(45.0, min(float(best_conf), float(min_conf)))
+            sources = _collect_alert_sources(
+                item,
+                source_floor,
+                signal=signal,
+                require_quality=active_require_quality,
+                allow_cdc=allow_cdc,
+            )
+            edge = _extract_signal_edge_metrics(primary_plan, signal)
+            strategy_label = _get_primary_plan_source_label(item, primary_plan)
+            score = float(best_conf)
+            if top_signal == signal:
+                score += 6.0
+            bars_since = _safe_float(
+                _pick_plan_value(primary_plan, ["bars_since_signal", "bars_since_entry"]),
+                None,
+            )
+            if isinstance(bars_since, float):
+                if bars_since <= 0:
+                    score += 8.0
+                elif bars_since <= 1:
                     score += 5.0
-                wr = edge.get("win_rate_pct")
-                exp = edge.get("expectancy_rr")
-                trades = edge.get("trades")
-                if isinstance(wr, (int, float)):
-                    score += max(-4.0, min(10.0, (float(wr) - 50.0) * 0.25))
-                if isinstance(exp, (int, float)):
-                    score += max(-4.0, min(8.0, float(exp) * 8.0))
-                if isinstance(trades, (int, float)):
-                    score += max(0.0, min(4.0, float(trades) / 8.0))
-                score += min(6.0, float(len(sources)) * 1.5)
-                message = _build_daily_best_pick_message(
-                    item,
-                    signal,
-                    float(best_conf),
-                    sources,
-                    primary_plan=primary_plan,
-                    strategy_label=strategy_label,
-                    selection_score=score,
-                )
-                if not isinstance(message, str) or not message.strip():
-                    continue
-                daily_candidates.append(
-                    {
-                        "symbol": symbol,
-                        "signal": signal,
-                        "strategy": "DAILY_BEST",
-                        "score": float(score),
-                        "confidence": float(best_conf),
-                        "plan": primary_plan,
-                        "edge_metrics": edge,
-                        "message": message,
-                        "strategy_label": strategy_label,
-                    }
-                )
-        return daily_candidates
-
-    candidates = iter_candidates(require_min_conf=True)
+                elif bars_since <= 2:
+                    score += 2.0
+                elif bars_since >= 6:
+                    score -= 4.0
+            trend_alignment = primary_plan.get("trend_alignment")
+            if isinstance(trend_alignment, bool):
+                score += 4.0 if trend_alignment else -6.0
+            forecast_dir = str(
+                primary_plan.get("forecast_direction")
+                or ((item.get("price_forecast") or {}).get("direction") if isinstance(item.get("price_forecast"), dict) else "")
+                or ""
+            ).upper().strip()
+            if forecast_dir == signal:
+                score += 5.0
+            wr = edge.get("win_rate_pct")
+            exp = edge.get("expectancy_rr")
+            trades = edge.get("trades")
+            if isinstance(wr, (int, float)):
+                score += max(-4.0, min(10.0, (float(wr) - 50.0) * 0.25))
+            if isinstance(exp, (int, float)):
+                score += max(-4.0, min(8.0, float(exp) * 8.0))
+            if isinstance(trades, (int, float)):
+                score += max(0.0, min(4.0, float(trades) / 8.0))
+            score += min(6.0, float(len(sources)) * 1.5)
+            message = _build_daily_best_pick_message(
+                item,
+                signal,
+                float(best_conf),
+                sources,
+                primary_plan=primary_plan,
+                strategy_label=strategy_label,
+                selection_score=score,
+                mode_label="Strict Daily Pick",
+            )
+            if not isinstance(message, str) or not message.strip():
+                continue
+            candidate = {
+                "symbol": symbol,
+                "signal": signal,
+                "strategy": "DAILY_BEST",
+                "score": float(score),
+                "confidence": float(best_conf),
+                "plan": primary_plan,
+                "item": item,
+                "edge_metrics": edge,
+                "message": message,
+                "strategy_label": strategy_label,
+            }
+            gate_ok, _, normalized_edge = _evaluate_candidate_backtest_gate(candidate)
+            if gate_ok and float(best_conf) >= float(min_conf):
+                candidate["edge_metrics"] = normalized_edge
+                candidates.append(candidate)
+                continue
+            if not relaxed_enable:
+                continue
+            relaxed_edge = normalized_edge if isinstance(normalized_edge, dict) else _candidate_edge_metrics(candidate)
+            relaxed_wr = relaxed_edge.get("win_rate_pct")
+            relaxed_exp = relaxed_edge.get("expectancy_rr")
+            relaxed_trades = relaxed_edge.get("trades")
+            baseline_sources = sources[:]
+            if not baseline_sources and strategy_label:
+                baseline_sources = [str(strategy_label)]
+            if baseline_enable:
+                baseline_ok = True
+                if float(score) < float(baseline_min_score):
+                    baseline_ok = False
+                if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(baseline_min_wr):
+                    baseline_ok = False
+                if float(baseline_min_trades) > 0:
+                    baseline_trade_ok = isinstance(relaxed_trades, (int, float)) and float(relaxed_trades) >= float(baseline_min_trades)
+                    if not baseline_trade_ok:
+                        # Allow baseline mode to use strong score/win-rate even when trade-count metadata is missing.
+                        baseline_trade_ok = (
+                            isinstance(relaxed_wr, (int, float))
+                            and float(relaxed_wr) >= max(float(baseline_min_wr) + 4.0, 56.0)
+                            and float(best_conf) >= max(float(baseline_min_conf) + 4.0, 58.0)
+                            and float(score) >= float(baseline_min_score) + 3.0
+                        )
+                    if not baseline_trade_ok:
+                        baseline_ok = False
+                if isinstance(relaxed_exp, (int, float)) and float(relaxed_exp) < float(baseline_min_exp):
+                    baseline_ok = False
+                if float(best_conf) < float(baseline_min_conf):
+                    baseline_ok = False
+                if baseline_ok:
+                    baseline_message = _build_daily_best_pick_message(
+                        item,
+                        signal,
+                        float(best_conf),
+                        baseline_sources,
+                        primary_plan=primary_plan,
+                        strategy_label=strategy_label,
+                        selection_score=score,
+                        mode_label="Baseline Trend Pick",
+                    )
+                    if isinstance(baseline_message, str) and baseline_message.strip():
+                        baseline_candidate = dict(candidate)
+                        baseline_candidate["message"] = baseline_message
+                        baseline_candidate["edge_metrics"] = relaxed_edge
+                        baseline_candidate["score"] = float(score)
+                        baseline_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Baseline Trend").strip(" |")
+                        baseline_candidate["cache_key"] = f"DAILYBESTBASE|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}"
+                        baseline_candidate["daily_best_mode"] = "baseline"
+                        baseline_candidates.append(baseline_candidate)
+            if float(score) < float(relaxed_min_score):
+                continue
+            if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(relaxed_min_wr):
+                continue
+            if not isinstance(relaxed_trades, (int, float)) or float(relaxed_trades) < float(relaxed_min_trades):
+                continue
+            if isinstance(relaxed_exp, (int, float)) and float(relaxed_exp) < float(relaxed_min_exp):
+                continue
+            relaxed_sources = sources[:]
+            if not relaxed_sources and strategy_label:
+                relaxed_sources = [str(strategy_label)]
+            relaxed_message = _build_daily_best_pick_message(
+                item,
+                signal,
+                float(best_conf),
+                relaxed_sources,
+                primary_plan=primary_plan,
+                strategy_label=strategy_label,
+                selection_score=score,
+                mode_label="Trend Pick",
+            )
+            if not isinstance(relaxed_message, str) or not relaxed_message.strip():
+                continue
+            relaxed_candidate = dict(candidate)
+            relaxed_candidate["message"] = relaxed_message
+            relaxed_candidate["edge_metrics"] = relaxed_edge
+            relaxed_candidate["score"] = float(score)
+            relaxed_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Trend Pick").strip(" |")
+            relaxed_candidate["cache_key"] = f"DAILYBESTRELAX|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}"
+            relaxed_candidate["daily_best_mode"] = "relaxed"
+            relaxed_candidates.append(relaxed_candidate)
     if not candidates:
-        candidates = iter_candidates(require_min_conf=False)
+        candidates = relaxed_candidates
+    elif relaxed_enable:
+        used_symbols = {normalize_symbol(row.get("symbol") or "") for row in candidates if isinstance(row, dict)}
+        for row in relaxed_candidates:
+            sym = normalize_symbol(row.get("symbol") or "")
+            if not sym or sym in used_symbols:
+                continue
+            candidates.append(row)
+    if baseline_enable and baseline_candidates:
+        used_symbols = {normalize_symbol(row.get("symbol") or "") for row in candidates if isinstance(row, dict)}
+        baseline_candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
+        baseline_added = 0
+        for row in baseline_candidates:
+            if baseline_target_per_day > 0 and baseline_added >= baseline_target_per_day:
+                break
+            sym = normalize_symbol(row.get("symbol") or "")
+            if not sym or sym in used_symbols:
+                continue
+            candidates.append(row)
+            used_symbols.add(sym)
+            baseline_added += 1
     if not candidates:
         return []
     candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
@@ -2495,17 +3884,216 @@ def _build_daily_best_pick_candidates(results):
         symbol = str(candidate.get("symbol") or "").strip().upper()
         if not symbol or symbol in seen_symbols:
             continue
-        if float(candidate.get("score", 0.0)) < float(min_score):
+        candidate_mode = str(candidate.get("daily_best_mode") or "strict").strip().lower()
+        if candidate_mode == "baseline":
+            candidate_min_score = float(baseline_min_score)
+        elif candidate_mode == "relaxed":
+            candidate_min_score = float(relaxed_min_score)
+        else:
+            candidate_min_score = float(min_score)
+        if float(candidate.get("score", 0.0)) < candidate_min_score:
             continue
         selected.append(candidate)
         seen_symbols.add(symbol)
         if len(selected) >= max_per_day:
             break
-    if selected:
-        return selected
-    # Fallback: still send the single strongest daily idea so there is at least one daily directional view.
-    top_candidate = candidates[0]
-    return [top_candidate] if isinstance(top_candidate, dict) else []
+    return selected
+
+
+def _build_cdc_daily_trend_candidates(results, existing_candidates=None, min_conf=None):
+    enabled = bool(getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_ENABLE", True))
+    if not enabled:
+        return []
+    max_per_day = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MAX_PER_DAY", 1)
+    min_confidence = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_CONFIDENCE", 56.0)
+    min_win_rate = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_WIN_RATE", 54.0)
+    min_score = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_SCORE", 61.0)
+    try:
+        max_per_day = max(1, int(max_per_day))
+    except Exception:
+        max_per_day = 1
+    try:
+        min_confidence = float(min_confidence)
+    except Exception:
+        min_confidence = 56.0
+    try:
+        min_win_rate = float(min_win_rate)
+    except Exception:
+        min_win_rate = 54.0
+    try:
+        min_score = float(min_score)
+    except Exception:
+        min_score = 61.0
+    if isinstance(existing_candidates, list):
+        for row in existing_candidates:
+            if isinstance(row, dict) and str(row.get("strategy") or "").upper() == "CDCVIX15":
+                return []
+    candidates = []
+    for item in results or []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = normalize_symbol(item.get("symbol") or "")
+        cdc_plan = item.get("cdc_vixfix_15m")
+        if not symbol or not isinstance(cdc_plan, dict):
+            continue
+        signal = _plan_trade_direction(cdc_plan)
+        if signal not in ("BUY", "SELL"):
+            continue
+        confidence = _plan_confidence_value(cdc_plan)
+        if not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence):
+            continue
+        candidate = {
+            "symbol": symbol,
+            "strategy": "CDCVIX15",
+            "signal": signal,
+            "plan": cdc_plan,
+            "item": item,
+            "confidence": float(confidence),
+        }
+        edge = _candidate_edge_metrics(candidate)
+        win_rate = edge.get("win_rate_pct")
+        expectancy = edge.get("expectancy_rr")
+        trades = edge.get("trades")
+        if not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate):
+            continue
+        score = float(confidence)
+        forecast_dir = str(cdc_plan.get("forecast_direction") or "").upper().strip()
+        if forecast_dir == signal:
+            score += 5.0
+        trigger = str(cdc_plan.get("sell_trigger") or cdc_plan.get("exit_trigger") or "").upper().strip()
+        if trigger:
+            score += 3.0
+        if isinstance(win_rate, (int, float)):
+            score += max(-3.0, min(8.0, (float(win_rate) - 50.0) * 0.25))
+        if isinstance(expectancy, (int, float)):
+            score += max(-3.0, min(6.0, float(expectancy) * 8.0))
+        if isinstance(trades, (int, float)):
+            score += max(0.0, min(4.0, float(trades) / 6.0))
+        if float(score) < float(min_score):
+            continue
+        message = _build_cdc_vixfix_message(item, cdc_plan, mode_label="Daily Trend")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        candidate.update(
+            {
+                "score": float(score),
+                "edge_metrics": edge,
+                "message": message,
+                "cache_key": f"CDCVIX15DAILY|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}",
+                "cdc_mode": "daily_trend",
+            }
+        )
+        candidates.append(candidate)
+    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
+    selected = []
+    seen_symbols = set()
+    for candidate in candidates:
+        symbol = normalize_symbol(candidate.get("symbol") or "")
+        if not symbol or symbol in seen_symbols:
+            continue
+        selected.append(candidate)
+        seen_symbols.add(symbol)
+        if len(selected) >= max_per_day:
+            break
+    return selected
+
+
+def _build_daily_summary_message(results, existing_candidates=None, min_conf=None):
+    enabled = bool(getattr(config, "TELEGRAM_DAILY_SUMMARY_ENABLED", True))
+    if not enabled:
+        return None
+    top_n = getattr(config, "TELEGRAM_DAILY_SUMMARY_TOP_N", 3)
+    try:
+        top_n = max(1, int(top_n))
+    except Exception:
+        top_n = 3
+    if not isinstance(min_conf, (int, float)):
+        min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 58.0
+    ranked = []
+    if isinstance(existing_candidates, list):
+        ranked.extend([row for row in existing_candidates if isinstance(row, dict)])
+    if not ranked:
+        ranked, _ = _build_telegram_candidates(results or [], min_conf)
+    ranked = [row for row in ranked if isinstance(row, dict)]
+    ranked.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
+    unique_ranked = []
+    seen_symbols = set()
+    for row in ranked:
+        symbol = normalize_symbol(row.get("symbol") or "")
+        if not symbol or symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        unique_ranked.append(row)
+        if len(unique_ranked) >= top_n:
+            break
+    now_text = get_thai_now().strftime("%Y-%m-%d %H:%M")
+    lines = [
+        "<b>🗓️ Daily Telegram Summary</b>",
+        f"⏱️ <b>เวลา:</b> {now_text}",
+    ]
+    if unique_ranked:
+        wr_values = []
+        exp_values = []
+        trades_values = []
+        lines.append("📌 <b>Top backtest-qualified setups วันนี้:</b>")
+        for idx, row in enumerate(unique_ranked, start=1):
+            metrics = _candidate_edge_metrics(row)
+            wr = metrics.get("win_rate_pct")
+            exp = metrics.get("expectancy_rr")
+            trades = metrics.get("trades")
+            if isinstance(wr, (int, float)):
+                wr_values.append(float(wr))
+            if isinstance(exp, (int, float)):
+                exp_values.append(float(exp))
+            if isinstance(trades, (int, float)):
+                trades_values.append(float(trades))
+            lines.append(
+                f"{idx}. <b>{_html_escape(str(row.get('strategy') or 'ALERT'))}</b> | "
+                f"{_html_escape(str(row.get('signal') or 'WAIT'))} | "
+                f"{_html_escape(normalize_symbol(row.get('symbol') or '') or '-')}"
+            )
+            lines.append(
+                "   "
+                + f"Conf {float(row.get('confidence', 0.0)):.0f}%"
+                + f" | WR {float(wr):.1f}%"
+                + f" | ExpRR {float(exp):.2f}"
+                + f" | Trades {int(round(float(trades)))}"
+            )
+        lines.append("✅ ส่งเฉพาะสัญญาณที่มี backtest metrics ครบตามเกณฑ์")
+        return {
+            "strategy": "DAILY_SUMMARY",
+            "signal": "INFO",
+            "score": float(sum(wr_values) / len(wr_values)) if wr_values else 0.0,
+            "confidence": float(sum(wr_values) / len(wr_values)) if wr_values else 0.0,
+            "edge_metrics": {
+                "win_rate_pct": float(sum(wr_values) / len(wr_values)) if wr_values else None,
+                "expectancy_rr": float(sum(exp_values) / len(exp_values)) if exp_values else None,
+                "trades": float(sum(trades_values) / len(trades_values)) if trades_values else None,
+            },
+            "message": "\n".join(lines),
+            "cache_key": f"DAILYSUMMARY|{get_thai_now().strftime('%Y%m%d')}",
+        }
+    lines.append("🛑 <b>วันนี้ยังไม่มี setup ที่ผ่าน backtest gate สำหรับส่งเข้าเทรด</b>")
+    lines.append("✅ ระบบงดส่ง directional alert เพื่อคุมคุณภาพและรักษาอัตราชนะ")
+    lines.append(
+        "📏 เกณฑ์ขั้นต่ำ: "
+        + f"WR >= {float(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE', 58.0)):.1f}%"
+        + f" | ExpRR >= {float(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_EXPECTANCY_RR', 0.05)):.2f}"
+        + f" | Trades >= {int(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_HIST_TRADES', 8))}"
+    )
+    return {
+        "strategy": "DAILY_SUMMARY",
+        "signal": "INFO",
+        "score": 0.0,
+        "confidence": 0.0,
+        "edge_metrics": {},
+        "message": "\n".join(lines),
+        "cache_key": f"DAILYSUMMARY|{get_thai_now().strftime('%Y%m%d')}",
+    }
 
 
 def _notify_telegram_from_results(results):
@@ -2543,6 +4131,9 @@ def _notify_telegram_from_results(results):
     build_stats = {}
     if not kill:
         candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
+        cdc_daily_candidates = _build_cdc_daily_trend_candidates(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
+        if cdc_daily_candidates:
+            candidates.extend([row for row in cdc_daily_candidates if isinstance(row, dict)])
     quality_drop_counts = {}
     if isinstance(build_stats, dict):
         quality_drop_counts = build_stats.get("quality_drop_counts") or {}
@@ -2554,6 +4145,21 @@ def _notify_telegram_from_results(results):
             json.dumps(quality_drop_counts, ensure_ascii=False),
         )
         if kill and not _is_daily_best_pick_window():
+            _record_telegram_run_report(
+                results=results,
+                kill=kill,
+                kill_reason=reason,
+                min_conf=min_conf,
+                dynamic_min_conf=dynamic_min_conf,
+                candidates=candidates,
+                sent_candidates=[],
+                daily_pick_sent=0,
+                daily_summary_sent=0,
+                dropped_by_cache=0,
+                dropped_by_symbol_cap=0,
+                dropped_by_run_cap=0,
+                quality_drop_counts=quality_drop_counts,
+            )
             return 0
     candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
     sent = 0
@@ -2562,6 +4168,7 @@ def _notify_telegram_from_results(results):
     dropped_by_run_cap = 0
     per_symbol_sent = {}
     cooldown_ttl = max(60, int(cooldown_minutes * 60))
+    sent_candidates = []
     for candidate in candidates:
         if sent >= max_per_run:
             dropped_by_run_cap += 1
@@ -2585,7 +4192,10 @@ def _notify_telegram_from_results(results):
             _TELEGRAM_ALERT_CACHE.set(cache_key, True, ttl_seconds=cooldown_ttl)
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
+            sent_candidates.append(candidate)
+            _record_telegram_alert_history(candidate, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=False)
     daily_pick_sent = 0
+    daily_summary_sent = 0
     if _is_daily_best_pick_window():
         daily_candidates = _build_daily_best_pick_candidates(results)
         for daily_candidate in daily_candidates:
@@ -2599,14 +4209,34 @@ def _notify_telegram_from_results(results):
                 _TELEGRAM_ALERT_CACHE.set(daily_key, True, ttl_seconds=26 * 60 * 60)
                 sent += 1
                 daily_pick_sent += 1
+                sent_candidates.append(daily_candidate)
+                _record_telegram_alert_history(daily_candidate, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=True)
         else:
             if not daily_pick_sent:
-                logger.info("Daily Best Pick window active but no directional candidate was sent")
+                daily_summary = _build_daily_summary_message(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
+                daily_message = daily_summary.get("message") if isinstance(daily_summary, dict) else None
+                daily_key = daily_summary.get("cache_key") if isinstance(daily_summary, dict) else None
+                if (
+                    isinstance(daily_summary, dict)
+                    and isinstance(daily_key, str)
+                    and daily_key.strip()
+                    and not _TELEGRAM_ALERT_CACHE.get(daily_key)
+                    and isinstance(daily_message, str)
+                    and daily_message.strip()
+                    and send_telegram_alert(daily_message)
+                ):
+                    _TELEGRAM_ALERT_CACHE.set(daily_key, True, ttl_seconds=26 * 60 * 60)
+                    sent += 1
+                    daily_summary_sent = 1
+                    _record_telegram_alert_history(daily_summary, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=False)
+                elif not daily_summary_sent:
+                    logger.info("Daily Best Pick window active but no directional candidate or summary was sent")
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s daily_pick=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
+        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
         sent,
         len(candidates),
         daily_pick_sent,
+        daily_summary_sent,
         dropped_by_cache,
         dropped_by_symbol_cap,
         dropped_by_run_cap,
@@ -2616,9 +4246,25 @@ def _notify_telegram_from_results(results):
     )
     
     # Track win rate metrics for sent alerts
-    if sent > 0:
-        _track_alert_performance(candidates, sent)
-    
+    if sent_candidates:
+        _track_alert_performance(sent_candidates, len(sent_candidates))
+
+    _record_telegram_run_report(
+        results=results,
+        kill=kill,
+        kill_reason=reason,
+        min_conf=min_conf,
+        dynamic_min_conf=dynamic_min_conf,
+        candidates=candidates,
+        sent_candidates=sent_candidates,
+        daily_pick_sent=daily_pick_sent,
+        daily_summary_sent=daily_summary_sent,
+        dropped_by_cache=dropped_by_cache,
+        dropped_by_symbol_cap=dropped_by_symbol_cap,
+        dropped_by_run_cap=dropped_by_run_cap,
+        quality_drop_counts=quality_drop_counts,
+    )
+
     return sent
 
 
@@ -2798,6 +4444,574 @@ def _history_store_merge(existing_df, new_df, symbol=None):
     if keep_rows > 0 and len(merged) > keep_rows:
         merged = merged.tail(keep_rows).copy()
     return merged
+
+
+def _alert_history_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_HISTORY_ENABLED", True))
+
+
+def _alert_history_dir():
+    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".data", "telegram_alerts")
+    os.makedirs(base_dir, exist_ok=True)
+    return base_dir
+
+
+def _alert_history_file_path():
+    return os.path.join(_alert_history_dir(), "alert_history.jsonl")
+
+
+def _alert_history_csv_path():
+    return os.path.join(_alert_history_dir(), "alert_history.csv")
+
+
+def _alert_run_report_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_RUN_REPORT_ENABLED", True))
+
+
+def _alert_run_report_file_path():
+    return os.path.join(_alert_history_dir(), "latest_run.json")
+
+
+def _alert_run_report_log_path():
+    return os.path.join(_alert_history_dir(), "run_reports.jsonl")
+
+
+def _alert_history_export_csv_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_HISTORY_EXPORT_CSV", True))
+
+
+def _alert_history_csv_fieldnames():
+    return [
+        "timestamp",
+        "strategy",
+        "symbol",
+        "signal",
+        "confidence",
+        "score",
+        "daily_pick",
+        "source_label",
+        "strategy_label",
+        "entry_price",
+        "stop_loss",
+        "take_profit",
+        "risk_reward",
+        "detected_pattern",
+        "forecast_direction",
+        "plan_reason",
+        "min_confidence",
+        "dynamic_min_confidence",
+        "backtest_win_rate_pct",
+        "backtest_expectancy_rr",
+        "backtest_trades",
+        "cache_key",
+        "message_plain",
+    ]
+
+
+def _sync_alert_history_csv_locked():
+    if not _alert_history_export_csv_enabled():
+        return
+    jsonl_path = _alert_history_file_path()
+    csv_path = _alert_history_csv_path()
+    rows = []
+    if os.path.exists(jsonl_path):
+        try:
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = str(raw_line or "").strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(row, dict):
+                        rows.append(row)
+        except Exception:
+            return
+    fieldnames = _alert_history_csv_fieldnames()
+    try:
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({key: row.get(key) for key in fieldnames})
+    except Exception:
+        return
+
+
+def _candidate_message_preview(candidate):
+    message = str((candidate or {}).get("message_plain") or (candidate or {}).get("message") or "").strip()
+    if not message:
+        return None
+    message = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", message)).strip()
+    if len(message) > 220:
+        message = message[:217].rstrip() + "..."
+    return message
+
+
+def _candidate_ops_snapshot(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    plan = candidate.get("plan")
+    entry_price = _pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
+    stop_loss = _pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
+    take_profit = _pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
+    snapshot = _candidate_backtest_snapshot(candidate)
+    return {
+        "strategy": str(candidate.get("strategy") or "UNKNOWN").strip().upper(),
+        "symbol": normalize_symbol(candidate.get("symbol") or ""),
+        "signal": str(candidate.get("signal") or "").strip().upper(),
+        "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
+        "score": float(candidate.get("score")) if isinstance(candidate.get("score"), (int, float)) else None,
+        "source_label": _get_plan_label(plan, None) if isinstance(plan, dict) else None,
+        "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
+        "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
+        "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
+        "risk_reward": float(plan.get("risk_reward")) if isinstance(plan, dict) and isinstance(plan.get("risk_reward"), (int, float)) else None,
+        "detected_pattern": str(plan.get("detected_pattern") or "").strip() if isinstance(plan, dict) else None,
+        "forecast_direction": str(
+            plan.get("forecast_direction")
+            or (((candidate.get("item") or {}).get("price_forecast") or {}).get("direction") if isinstance(candidate.get("item"), dict) else "")
+            or ""
+        ).strip().upper() or None,
+        "plan_reason": str(plan.get("reason") or "").strip() if isinstance(plan, dict) else None,
+        "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
+        "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
+        "backtest_trades": snapshot.get("trades"),
+        "message_preview": _candidate_message_preview(candidate),
+    }
+
+
+def _record_telegram_run_report(
+    results,
+    kill,
+    kill_reason,
+    min_conf,
+    dynamic_min_conf,
+    candidates,
+    sent_candidates,
+    daily_pick_sent,
+    daily_summary_sent,
+    dropped_by_cache,
+    dropped_by_symbol_cap,
+    dropped_by_run_cap,
+    quality_drop_counts,
+):
+    if not _alert_run_report_enabled():
+        return
+    top_n = getattr(config, "TELEGRAM_ALERT_RUN_REPORT_TOP_CANDIDATES", 5)
+    max_rows = getattr(config, "TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS", 500)
+    try:
+        top_n = max(1, int(top_n))
+    except Exception:
+        top_n = 5
+    try:
+        max_rows = int(max_rows)
+    except Exception:
+        max_rows = 500
+    valid_results = [row for row in (results or []) if isinstance(row, dict) and not row.get("error")]
+    by_symbol_signal = Counter()
+    for row in valid_results:
+        symbol = normalize_symbol(row.get("symbol") or "")
+        signal = str(row.get("signal") or "").strip().upper() or "UNKNOWN"
+        if symbol:
+            by_symbol_signal[f"{symbol}|{signal}"] += 1
+    report = {
+        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "result_count": len(results or []),
+        "valid_symbol_count": len(valid_results),
+        "kill_switch_active": bool(kill),
+        "kill_switch_reason": str(kill_reason or "") if kill else None,
+        "min_confidence": float(min_conf) if isinstance(min_conf, (int, float)) else None,
+        "dynamic_min_confidence": float(dynamic_min_conf) if isinstance(dynamic_min_conf, (int, float)) else None,
+        "candidate_count": len(candidates or []),
+        "sent_count": len(sent_candidates or []),
+        "daily_pick_sent": int(daily_pick_sent or 0),
+        "daily_summary_sent": int(daily_summary_sent or 0),
+        "dropped_by_cache": int(dropped_by_cache or 0),
+        "dropped_by_symbol_cap": int(dropped_by_symbol_cap or 0),
+        "dropped_by_run_cap": int(dropped_by_run_cap or 0),
+        "quality_drop_counts": dict(quality_drop_counts or {}),
+        "symbol_signal_mix": dict(by_symbol_signal),
+        "top_candidates": [_candidate_ops_snapshot(row) for row in (candidates or [])[:top_n]],
+        "sent_candidates": [_candidate_ops_snapshot(row) for row in (sent_candidates or [])],
+    }
+    latest_path = _alert_run_report_file_path()
+    log_path = _alert_run_report_log_path()
+    try:
+        with _ALERT_HISTORY_LOCK:
+            _sync_alert_history_csv_locked()
+            with open(latest_path, "w", encoding="utf-8") as f:
+                json.dump(report, f, ensure_ascii=False, indent=2)
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(report, ensure_ascii=False) + "\n")
+            _alert_history_trim_locked(log_path, max_rows=max_rows)
+    except Exception:
+        return
+
+
+def _read_latest_telegram_run_report():
+    path = _alert_run_report_file_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _alert_history_trim_locked(path, max_rows):
+    try:
+        max_rows = int(max_rows)
+    except Exception:
+        max_rows = 0
+    if max_rows < 1 or not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        if len(lines) <= max_rows:
+            return
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(lines[-max_rows:])
+    except Exception:
+        return
+
+
+def _candidate_backtest_snapshot(candidate):
+    if not isinstance(candidate, dict):
+        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    return _candidate_edge_metrics(candidate)
+
+
+def _record_telegram_alert_history(candidate, min_conf=None, dynamic_min_conf=None, daily_pick=False):
+    if not _alert_history_enabled() or not isinstance(candidate, dict):
+        return
+    message = str(candidate.get("message") or "").strip()
+    if not message:
+        return
+    snapshot = _candidate_backtest_snapshot(candidate)
+    plan = candidate.get("plan")
+    entry_price = _pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
+    stop_loss = _pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
+    take_profit = _pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
+    entry = {
+        "timestamp": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "strategy": str(candidate.get("strategy") or "UNKNOWN").strip().upper(),
+        "symbol": normalize_symbol(candidate.get("symbol") or ""),
+        "signal": str(candidate.get("signal") or "").strip().upper(),
+        "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
+        "score": float(candidate.get("score")) if isinstance(candidate.get("score"), (int, float)) else None,
+        "daily_pick": bool(daily_pick),
+        "message": message,
+        "message_plain": re.sub(r"<[^>]+>", "", message).strip(),
+        "cache_key": str(candidate.get("cache_key") or "").strip(),
+        "min_confidence": float(min_conf) if isinstance(min_conf, (int, float)) else None,
+        "dynamic_min_confidence": float(dynamic_min_conf) if isinstance(dynamic_min_conf, (int, float)) else None,
+        "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
+        "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
+        "backtest_trades": snapshot.get("trades"),
+        "strategy_label": str(candidate.get("strategy_label") or "").strip() or None,
+        "source_label": _get_plan_label(plan, None) if isinstance(plan, dict) else None,
+        "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
+        "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
+        "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
+        "risk_reward": float(plan.get("risk_reward")) if isinstance(plan, dict) and isinstance(plan.get("risk_reward"), (int, float)) else None,
+        "detected_pattern": str(plan.get("detected_pattern") or "").strip() if isinstance(plan, dict) else None,
+        "forecast_direction": str(plan.get("forecast_direction") or "").strip().upper() if isinstance(plan, dict) and str(plan.get("forecast_direction") or "").strip() else None,
+        "plan_reason": str(plan.get("reason") or "").strip() if isinstance(plan, dict) else None,
+    }
+    path = _alert_history_file_path()
+    max_rows = getattr(config, "TELEGRAM_ALERT_HISTORY_MAX_ROWS", 5000)
+    try:
+        max_rows = int(max_rows)
+    except Exception:
+        max_rows = 5000
+    try:
+        with _ALERT_HISTORY_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            _alert_history_trim_locked(path, max_rows=max_rows)
+            _sync_alert_history_csv_locked()
+    except Exception:
+        return
+
+
+def _read_telegram_alert_history(days=None, strategies=None, symbols=None):
+    path = _alert_history_file_path()
+    if not os.path.exists(path):
+        return []
+    strategy_filter = {str(v or "").strip().upper() for v in (strategies or []) if str(v or "").strip()}
+    symbol_filter = {normalize_symbol(v) for v in (symbols or []) if normalize_symbol(v)}
+    cutoff = None
+    if isinstance(days, (int, float)) and float(days) > 0:
+        cutoff = get_thai_now() - timedelta(days=float(days))
+    entries = []
+    try:
+        with _ALERT_HISTORY_LOCK:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+    except Exception:
+        return []
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        strategy = str(row.get("strategy") or "").strip().upper()
+        symbol = normalize_symbol(row.get("symbol") or "")
+        if strategy_filter and strategy not in strategy_filter:
+            continue
+        if symbol_filter and symbol not in symbol_filter:
+            continue
+        ts_text = str(row.get("timestamp") or "").strip()
+        ts_value = None
+        if ts_text:
+            try:
+                ts_value = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                ts_value = None
+        if cutoff is not None and isinstance(ts_value, datetime) and ts_value < cutoff:
+            continue
+        row["_timestamp_obj"] = ts_value
+        row["strategy"] = strategy
+        row["symbol"] = symbol
+        entries.append(row)
+    entries.sort(key=lambda row: row.get("_timestamp_obj") or datetime.min, reverse=True)
+    return entries
+
+
+def _build_telegram_alert_report(days=30, strategies=None, symbols=None, limit_examples_per_strategy=1):
+    entries = _read_telegram_alert_history(days=days, strategies=strategies, symbols=symbols)
+    try:
+        days_value = float(days) if days is not None else None
+    except Exception:
+        days_value = None
+    try:
+        limit_examples_per_strategy = max(1, int(limit_examples_per_strategy))
+    except Exception:
+        limit_examples_per_strategy = 1
+    if not entries:
+        table = []
+        for strategy in _TELEGRAM_REPORT_STRATEGY_ORDER:
+            table.append(
+                {
+                    "strategy": strategy,
+                    "alert_count": 0,
+                    "share_pct": 0.0,
+                    "unique_symbols": 0,
+                    "avg_confidence": None,
+                    "avg_backtest_win_rate_pct": None,
+                    "avg_backtest_expectancy_rr": None,
+                    "avg_backtest_trades": None,
+                    "signals": {},
+                    "latest_alert_at": None,
+                    "examples": [],
+                }
+            )
+        return {
+            "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+            "window_days": days_value,
+            "total_alerts": 0,
+            "alerts_per_day_avg": 0.0 if isinstance(days_value, (int, float)) and days_value > 0 else None,
+            "unique_symbols": 0,
+            "count_by_strategy": {},
+            "table": table,
+            "examples_by_strategy": {},
+        }
+
+    by_strategy = {}
+    unique_symbols = set()
+    for entry in entries:
+        strategy = str(entry.get("strategy") or "UNKNOWN").strip().upper()
+        symbol = normalize_symbol(entry.get("symbol") or "")
+        unique_symbols.add(symbol)
+        bucket = by_strategy.setdefault(
+            strategy,
+            {
+                "count": 0,
+                "confidence_sum": 0.0,
+                "confidence_count": 0,
+                "wr_sum": 0.0,
+                "wr_count": 0,
+                "exp_sum": 0.0,
+                "exp_count": 0,
+                "trades_sum": 0.0,
+                "trades_count": 0,
+                "signals": Counter(),
+                "symbols": set(),
+                "latest_alert_at": None,
+                "examples": [],
+            },
+        )
+        bucket["count"] += 1
+        bucket["signals"][str(entry.get("signal") or "WAIT")] += 1
+        if symbol:
+            bucket["symbols"].add(symbol)
+        ts_text = str(entry.get("timestamp") or "").strip() or None
+        if bucket["latest_alert_at"] is None and ts_text:
+            bucket["latest_alert_at"] = ts_text
+        confidence = entry.get("confidence")
+        if isinstance(confidence, (int, float)):
+            bucket["confidence_sum"] += float(confidence)
+            bucket["confidence_count"] += 1
+        win_rate = entry.get("backtest_win_rate_pct")
+        if isinstance(win_rate, (int, float)):
+            bucket["wr_sum"] += float(win_rate)
+            bucket["wr_count"] += 1
+        expectancy = entry.get("backtest_expectancy_rr")
+        if isinstance(expectancy, (int, float)):
+            bucket["exp_sum"] += float(expectancy)
+            bucket["exp_count"] += 1
+        trades = entry.get("backtest_trades")
+        if isinstance(trades, (int, float)):
+            bucket["trades_sum"] += float(trades)
+            bucket["trades_count"] += 1
+        if len(bucket["examples"]) < limit_examples_per_strategy:
+            bucket["examples"].append(
+                {
+                    "timestamp": ts_text,
+                    "symbol": symbol,
+                    "signal": str(entry.get("signal") or "WAIT"),
+                    "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+                    "message": str(entry.get("message") or ""),
+                    "message_plain": str(entry.get("message_plain") or ""),
+                }
+            )
+
+    total_alerts = len(entries)
+    count_by_strategy = {strategy: int(bucket["count"]) for strategy, bucket in by_strategy.items()}
+    ordered_keys = list(_TELEGRAM_REPORT_STRATEGY_ORDER) + sorted(
+        [key for key in by_strategy.keys() if key not in _TELEGRAM_REPORT_STRATEGY_ORDER]
+    )
+    table = []
+    examples_by_strategy = {}
+    for strategy in ordered_keys:
+        bucket = by_strategy.get(strategy)
+        if not bucket:
+            table.append(
+                {
+                    "strategy": strategy,
+                    "alert_count": 0,
+                    "share_pct": 0.0,
+                    "unique_symbols": 0,
+                    "avg_confidence": None,
+                    "avg_backtest_win_rate_pct": None,
+                    "avg_backtest_expectancy_rr": None,
+                    "avg_backtest_trades": None,
+                    "signals": {},
+                    "latest_alert_at": None,
+                    "examples": [],
+                }
+            )
+            continue
+        avg_conf = (bucket["confidence_sum"] / bucket["confidence_count"]) if bucket["confidence_count"] > 0 else None
+        avg_wr = (bucket["wr_sum"] / bucket["wr_count"]) if bucket["wr_count"] > 0 else None
+        avg_exp = (bucket["exp_sum"] / bucket["exp_count"]) if bucket["exp_count"] > 0 else None
+        avg_trades = (bucket["trades_sum"] / bucket["trades_count"]) if bucket["trades_count"] > 0 else None
+        row = {
+            "strategy": strategy,
+            "alert_count": int(bucket["count"]),
+            "share_pct": (float(bucket["count"]) / float(total_alerts) * 100.0) if total_alerts > 0 else 0.0,
+            "unique_symbols": len(bucket["symbols"]),
+            "avg_confidence": avg_conf,
+            "avg_backtest_win_rate_pct": avg_wr,
+            "avg_backtest_expectancy_rr": avg_exp,
+            "avg_backtest_trades": avg_trades,
+            "signals": dict(bucket["signals"]),
+            "latest_alert_at": bucket["latest_alert_at"],
+            "examples": bucket["examples"],
+        }
+        table.append(row)
+        examples_by_strategy[strategy] = bucket["examples"]
+    alerts_per_day_avg = None
+    if isinstance(days_value, (int, float)) and days_value > 0:
+        alerts_per_day_avg = float(total_alerts) / float(days_value)
+    return {
+        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "window_days": days_value,
+        "total_alerts": int(total_alerts),
+        "alerts_per_day_avg": alerts_per_day_avg,
+        "unique_symbols": len([s for s in unique_symbols if s]),
+        "count_by_strategy": count_by_strategy,
+        "table": table,
+        "examples_by_strategy": examples_by_strategy,
+    }
+
+
+def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1):
+    try:
+        limit_examples_per_strategy = max(1, int(limit_examples_per_strategy))
+    except Exception:
+        limit_examples_per_strategy = 1
+    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 72.0)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 72.0
+    kill, reason = _telegram_kill_switch_state(results)
+    dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
+    candidates = []
+    build_stats = {}
+    if not kill:
+        candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
+    daily_candidates = _build_daily_best_pick_candidates(results)
+    for row in daily_candidates:
+        if isinstance(row, dict):
+            row = row.setdefault("cache_key", f"PREVIEW|{row.get('strategy')}|{row.get('symbol')}|{row.get('signal')}")
+    combined = [row for row in candidates if isinstance(row, dict)] + [row for row in daily_candidates if isinstance(row, dict)]
+    combined.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
+    by_strategy = Counter()
+    examples_by_strategy = {}
+    for candidate in combined:
+        strategy = str(candidate.get("strategy") or "UNKNOWN").strip().upper()
+        by_strategy[strategy] += 1
+        bucket = examples_by_strategy.setdefault(strategy, [])
+        if len(bucket) >= limit_examples_per_strategy:
+            continue
+        snapshot = _candidate_backtest_snapshot(candidate)
+        bucket.append(
+            {
+                "symbol": normalize_symbol(candidate.get("symbol") or ""),
+                "signal": str(candidate.get("signal") or "").strip().upper(),
+                "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
+                "message": str(candidate.get("message") or ""),
+                "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
+                "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
+                "backtest_trades": snapshot.get("trades"),
+            }
+        )
+    table = []
+    ordered_keys = list(_TELEGRAM_REPORT_STRATEGY_ORDER) + sorted([k for k in by_strategy.keys() if k not in _TELEGRAM_REPORT_STRATEGY_ORDER])
+    for strategy in ordered_keys:
+        table.append(
+            {
+                "strategy": strategy,
+                "candidate_count": int(by_strategy.get(strategy, 0)),
+                "examples": examples_by_strategy.get(strategy, []),
+            }
+        )
+    quality_drop_counts = build_stats.get("quality_drop_counts") if isinstance(build_stats, dict) else {}
+    return {
+        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "kill_switch_active": bool(kill),
+        "kill_switch_reason": str(reason or "") if kill else None,
+        "min_confidence": float(min_conf),
+        "dynamic_min_confidence": float(dynamic_min_conf),
+        "candidate_count": len(combined),
+        "count_by_strategy": dict(by_strategy),
+        "quality_drop_counts": quality_drop_counts or {},
+        "table": table,
+        "examples_by_strategy": examples_by_strategy,
+    }
 
 
 def _period_to_timedelta(period):
@@ -7161,6 +9375,24 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             ema_plan=ema_cross_plan,
             cdc_plan=cdc_vixfix_plan,
         )
+        all_weather_report = _build_all_weather_report_entry(
+            {
+                "symbol": symbol,
+                "name": info["name"],
+                "price": float(latest["Close"]) if pd.notna(latest["Close"]) else None,
+                "change": float(((latest["Close"] - latest["Open"]) / latest["Open"]) * 100) if pd.notna(latest["Close"]) and pd.notna(latest["Open"]) else None,
+                "short_term_15m": short_term_plan,
+                "sniper_15m": sniper_plan,
+                "quantum_15m": quantum_plan,
+                "crypto_reversal_15m": crypto_reversal_plan,
+                "ema_cross_15m": ema_cross_plan,
+                "actionzone_15m": actionzone_plan,
+                "cdc_vixfix_15m": cdc_vixfix_plan,
+            }
+        )
+        if isinstance(all_weather_report, dict):
+            all_weather_report = dict(all_weather_report)
+            all_weather_report.pop("signal_payload", None)
         result = {
             "symbol": symbol,
             "name": info["name"],
@@ -7187,6 +9419,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             "macd": float(latest["MACD"]) if pd.notna(latest["MACD"]) else None,
             "prediction": prediction,
             "price_forecast": price_forecast,
+            "all_weather_15m": all_weather_report,
         }
         result["ui_summary"] = _build_ui_result_summary(result)
         return result
@@ -7363,9 +9596,18 @@ def _build_analysis_summary(results, requested_symbols=None, period=None):
 def index():
     return render_template('index.html')
 
+
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify(_build_health_snapshot())
+
+
+def _analyze_symbols_batch(symbols, period, include_chart_data=False):
+    symbols = list(symbols or [])
+    if len(symbols) == 1:
+        return [analyze_single_symbol(symbols[0], period, include_chart_data=include_chart_data)]
+    return list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period), repeat(include_chart_data)))
+
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
@@ -7384,16 +9626,14 @@ def analyze():
     if len(all_symbols) > _MAX_SYMBOLS_PER_REQUEST:
         return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
 
-    if len(symbols) == 1:
-        results = [analyze_single_symbol(symbols[0], period, include_chart_data=include_chart_data)]
-    else:
-        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period), repeat(include_chart_data)))
+    results = _analyze_symbols_batch(symbols, period, include_chart_data=include_chart_data)
     notify = bool(data.get("notify_telegram"))
     if notify:
         _notify_telegram_from_results(results)
 
     alert_backtest = _build_alert_backtest_summary(results)
     backtest_rules = _build_backtest_rulebook(results)
+    all_weather = _build_all_weather_summary(results)
     cleaned = [_clean_json_value(r) for r in results]
     meta = {
         "request": {
@@ -7404,10 +9644,129 @@ def analyze():
         },
         "summary": _build_analysis_summary(results, requested_symbols=len(symbols), period=period),
         "telegram_alerts": alert_backtest,
+        "all_weather": all_weather,
         "backtest_rules": backtest_rules,
         "health": _build_health_snapshot(),
     }
     return jsonify({'results': cleaned, 'meta': _clean_json_value(meta)})
+
+
+@app.route('/report/telegram-alerts', methods=['GET', 'POST'])
+def report_telegram_alerts():
+    if request.method == 'POST':
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict):
+            return jsonify({'error': 'Invalid request body'}), 400
+    else:
+        data = dict(request.args)
+    days = data.get("days", 30)
+    try:
+        days = float(days)
+    except Exception:
+        days = 30.0
+    if days <= 0:
+        days = 30.0
+    limit_examples = data.get("limit_examples_per_strategy", 1)
+    try:
+        limit_examples = max(1, int(limit_examples))
+    except Exception:
+        limit_examples = 1
+    strategies = _parse_strategy_input(data.get("strategies"))
+    raw_symbols = data.get("symbols", "")
+    symbols = _parse_symbols_input(raw_symbols, max_symbols=10000) if raw_symbols else []
+    include_presets = bool(data.get("include_presets", True))
+    include_live_preview = bool(data.get("include_live_preview", False))
+    include_latest_run = bool(data.get("include_latest_run", True))
+    report = _build_telegram_alert_report(
+        days=days,
+        strategies=strategies or None,
+        symbols=symbols or None,
+        limit_examples_per_strategy=limit_examples,
+    )
+    payload = {
+        "request": {
+            "days": days,
+            "strategies": strategies,
+            "symbols": symbols,
+            "limit_examples_per_strategy": limit_examples,
+            "include_presets": include_presets,
+            "include_live_preview": include_live_preview,
+            "include_latest_run": include_latest_run,
+        },
+        "report": report,
+        "health": _build_health_snapshot(),
+        "files": {
+            "alert_history_jsonl": _alert_history_file_path(),
+            "alert_history_csv": _alert_history_csv_path() if _alert_history_export_csv_enabled() else None,
+            "latest_run_json": _alert_run_report_file_path() if _alert_run_report_enabled() else None,
+            "run_reports_jsonl": _alert_run_report_log_path() if _alert_run_report_enabled() else None,
+        },
+    }
+    if include_latest_run:
+        payload["latest_run"] = _read_latest_telegram_run_report()
+    if include_presets:
+        payload["presets"] = {
+            "1d": _build_telegram_alert_report(
+                days=1,
+                strategies=strategies or None,
+                symbols=symbols or None,
+                limit_examples_per_strategy=limit_examples,
+            ),
+            "30d": _build_telegram_alert_report(
+                days=30,
+                strategies=strategies or None,
+                symbols=symbols or None,
+                limit_examples_per_strategy=limit_examples,
+            ),
+        }
+    if include_live_preview and symbols:
+        period = data.get("period", "15m")
+        if period not in VALID_PERIODS:
+            return jsonify({'error': 'Invalid period'}), 400
+        preview_symbols = symbols[:_MAX_SYMBOLS_PER_REQUEST]
+        preview_results = _analyze_symbols_batch(preview_symbols, period, include_chart_data=False)
+        payload["live_preview"] = {
+            "period": period,
+            "symbols": preview_symbols,
+            "report": _build_telegram_alert_live_preview(
+                preview_results,
+                limit_examples_per_strategy=limit_examples,
+            ),
+        }
+    return jsonify(_clean_json_value(payload))
+
+
+@app.route('/report/all-weather', methods=['POST'])
+def report_all_weather():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'error': 'Invalid request body'}), 400
+    raw_symbols = data.get('symbols', '')
+    all_symbols = _parse_symbols_input(raw_symbols, max_symbols=10000)
+    symbols = all_symbols[:_MAX_SYMBOLS_PER_REQUEST]
+    periods = _parse_periods_input(data.get('periods'), default_periods=["1mo", "3mo", "6mo"], max_periods=6)
+    if not all_symbols:
+        return jsonify({'error': 'No symbols provided'}), 400
+    if len(all_symbols) > _MAX_SYMBOLS_PER_REQUEST:
+        return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
+    if not periods:
+        return jsonify({'error': 'No valid periods provided'}), 400
+
+    period_reports = {}
+    for period in periods:
+        results = _analyze_symbols_batch(symbols, period, include_chart_data=False)
+        period_reports[period] = _build_all_weather_summary(results)
+    readiness = _build_all_weather_readiness(period_reports)
+    payload = {
+        "request": {
+            "symbols": symbols,
+            "periods": periods,
+        },
+        "readiness": readiness,
+        "period_reports": period_reports,
+        "health": _build_health_snapshot(),
+    }
+    return jsonify(_clean_json_value(payload))
 
 def _run_once(symbols, period, notify_telegram):
     uniq = _parse_symbols_input(symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
@@ -7415,14 +9774,12 @@ def _run_once(symbols, period, notify_telegram):
         return 2
     if period not in VALID_PERIODS:
         return 2
-    if len(uniq) == 1:
-        results = [analyze_single_symbol(uniq[0], period, include_chart_data=False)]
-    else:
-        results = list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, uniq, repeat(period), repeat(False)))
+    results = _analyze_symbols_batch(uniq, period, include_chart_data=False)
     if notify_telegram:
         _notify_telegram_from_results(results)
     alert_backtest = _build_alert_backtest_summary(results)
     backtest_rules = _build_backtest_rulebook(results)
+    all_weather = _build_all_weather_summary(results)
     payload = {
         "results": [_clean_json_value(r) for r in results],
         "meta": _clean_json_value(
@@ -7435,6 +9792,7 @@ def _run_once(symbols, period, notify_telegram):
                 },
                 "summary": _build_analysis_summary(results, requested_symbols=len(uniq), period=period),
                 "telegram_alerts": alert_backtest,
+                "all_weather": all_weather,
                 "backtest_rules": backtest_rules,
                 "health": _build_health_snapshot(),
             }

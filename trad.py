@@ -8463,6 +8463,7 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
     if period not in VALID_PERIODS:
         return 2
     results = _analyze_symbols_batch(uniq, period, include_chart_data=False)
+    live_preview = _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1)
     if notify_telegram:
         _notify_telegram_from_results(results)
     alert_backtest = _build_alert_backtest_summary(results)
@@ -8470,7 +8471,6 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
     all_weather = _build_all_weather_summary(results)
     health_snapshot = _build_health_snapshot()
     latest_run = _read_latest_telegram_run_report()
-    live_preview = _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1)
     verify_request = {
         "symbols": uniq,
         "period": period,

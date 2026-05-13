@@ -22,6 +22,59 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from curl_cffi import requests as curl_requests
 import config
+from alerts.daily import (
+    build_cdc_daily_trend_candidates as _alerts_build_cdc_daily_trend_candidates,
+    build_daily_best_pick_candidates as _alerts_build_daily_best_pick_candidates,
+    is_daily_best_pick_window as _alerts_is_daily_best_pick_window,
+)
+from alerts.messages import (
+    build_all_weather_message as _alerts_build_all_weather_message,
+    build_daily_best_pick_message as _alerts_build_daily_best_pick_message,
+    build_price_action_message as _alerts_build_price_action_message,
+    build_super_signal_message as _alerts_build_super_signal_message,
+    build_telegram_message as _alerts_build_telegram_message,
+)
+from alerts.pipeline import (
+    build_telegram_candidates as _alerts_pipeline_build_telegram_candidates,
+    notify_telegram_from_results as _alerts_pipeline_notify_telegram_from_results,
+)
+from alerts.reporting import (
+    alert_history_csv_fieldnames as _alerts_reporting_alert_history_csv_fieldnames,
+    alert_history_trim_locked as _alerts_reporting_alert_history_trim_locked,
+    build_telegram_alert_live_preview as _alerts_reporting_build_telegram_alert_live_preview,
+    build_telegram_alert_report as _alerts_reporting_build_telegram_alert_report,
+    candidate_backtest_snapshot as _alerts_reporting_candidate_backtest_snapshot,
+    candidate_message_preview as _alerts_reporting_candidate_message_preview,
+    candidate_ops_snapshot as _alerts_reporting_candidate_ops_snapshot,
+    read_latest_telegram_run_report as _alerts_reporting_read_latest_telegram_run_report,
+    read_telegram_alert_history as _alerts_reporting_read_telegram_alert_history,
+    record_telegram_alert_history as _alerts_reporting_record_telegram_alert_history,
+    record_telegram_run_report as _alerts_reporting_record_telegram_run_report,
+    sync_alert_history_csv_locked as _alerts_reporting_sync_alert_history_csv_locked,
+    write_verify_output as _alerts_reporting_write_verify_output,
+)
+from data_layer.yahoo import (
+    build_source_health_snapshot as _data_build_source_health_snapshot,
+    chart_interval as _data_chart_interval,
+    clear_yf_runtime_cache as _data_clear_yf_runtime_cache,
+    configure_yf_tz_cache as _data_configure_yf_tz_cache,
+    create_curl_session as _data_create_curl_session,
+    fetch_yahoo_chart_history as _data_fetch_yahoo_chart_history,
+    get_http_verify_setting as _data_get_http_verify_setting,
+    get_thread_curl_session as _data_get_thread_curl_session,
+    get_yf_history as _data_get_yf_history,
+    is_yf_auth_error as _data_is_yf_auth_error,
+    normalize_df_index as _data_normalize_df_index,
+    normalize_price_columns as _data_normalize_price_columns,
+    period_to_timedelta as _data_period_to_timedelta,
+    prefer_chart_api as _data_prefer_chart_api,
+    project_yf_cache_dir as _data_project_yf_cache_dir,
+    record_source_health_event as _data_record_source_health_event,
+    remote_history_period as _data_remote_history_period,
+    set_thread_curl_session as _data_set_thread_curl_session,
+    slice_history_by_period as _data_slice_history_by_period,
+)
+from strategies.price_action import build_price_action_plan as _strategies_build_price_action_plan
 try:
     import requests as http_requests
 except Exception:
@@ -37,67 +90,19 @@ _YF_TZ_CACHE_READY = False
 
 
 def _project_yf_cache_dir():
-    try:
-        return os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yf_cache")
-    except Exception:
-        return ""
+    return _data_project_yf_cache_dir(__file__)
 
 
 def _configure_yf_tz_cache(force_temp=False):
-    global _YF_TZ_CACHE_READY
-    if _YF_TZ_CACHE_READY and not force_temp:
-        return
-    with _YF_TZ_CACHE_LOCK:
-        if _YF_TZ_CACHE_READY and not force_temp:
-            return
-        candidates = []
-        if not force_temp:
-            try:
-                project_cache = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".yf_cache")
-                candidates.append(project_cache)
-            except Exception:
-                pass
-        candidates.append(os.path.join(tempfile.gettempdir(), "trad_yf_cache"))
-        for cache_dir in candidates:
-            try:
-                os.makedirs(cache_dir, exist_ok=True)
-                yf.set_tz_cache_location(cache_dir)
-                _YF_TZ_CACHE_READY = True
-                return
-            except Exception:
-                continue
-        _YF_TZ_CACHE_READY = True
+    return _data_configure_yf_tz_cache(__file__, force_temp=force_temp)
 
 
 def _clear_yf_runtime_cache(clear_tz_cache=False):
-    cache_dir = _project_yf_cache_dir()
-    patterns = ["cookies.db", "cookies.db-shm", "cookies.db-wal"]
-    if clear_tz_cache:
-        patterns.extend(["tkr-tz.db", "tkr-tz.db-shm", "tkr-tz.db-wal"])
-    for filename in patterns:
-        if not cache_dir:
-            continue
-        path = os.path.join(cache_dir, filename)
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            continue
-    _THREAD_LOCAL.curl_session = None
-    if clear_tz_cache:
-        global _YF_TZ_CACHE_READY
-        _YF_TZ_CACHE_READY = False
+    return _data_clear_yf_runtime_cache(__file__, clear_tz_cache=clear_tz_cache)
 
 
 def _is_yf_auth_error(message):
-    msg = str(message or "").lower()
-    return (
-        "invalid crumb" in msg
-        or '"code":"unauthorized"' in msg
-        or "code\":\"unauthorized\"" in msg
-        or "http error 401" in msg
-        or "unauthorized" in msg and "finance" in msg
-    )
+    return _data_is_yf_auth_error(message)
 
 # Helper to get current Thai time (naive)
 def get_thai_now():
@@ -160,7 +165,7 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
 
 _HISTORY_STORE_LOCK = threading.Lock()
 _ALERT_HISTORY_LOCK = threading.Lock()
-_TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PRIMARY", "DAILY_BEST")
+_TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "PRIMARY", "DAILY_BEST")
 
 try:
     _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
@@ -976,6 +981,45 @@ def _aggregate_summary_observations(observations):
     }
 
 
+def _price_action_proxy_metrics(item, signal):
+    signal = str(signal or "").upper().strip()
+    if signal not in ("BUY", "SELL") or not isinstance(item, dict):
+        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None, "source_count": 0, "source_labels": []}
+    rows = []
+    labels = []
+    plan_rows = [
+        ("ActionZone 15m", item.get("actionzone_15m")),
+        ("EMA Cross 15m", item.get("ema_cross_15m")),
+        ("CDC+VixFix 15m", item.get("cdc_vixfix_15m")),
+        ("Crypto Reversal 15m", item.get("crypto_reversal_15m")),
+        ("ShortTerm 15m", item.get("short_term_15m")),
+        ("Sniper 15m", item.get("sniper_15m")),
+        ("Quantum 15m", item.get("quantum_15m")),
+    ]
+    for label, plan in plan_rows:
+        if not isinstance(plan, dict):
+            continue
+        if _plan_trade_direction(plan) != signal:
+            continue
+        obs = _summary_edge_observation(
+            _summary_strategy_edge_metrics(plan, signal=signal),
+            confidence=_plan_confidence_value(plan),
+            symbol=item.get("symbol"),
+            signal=signal,
+        )
+        if any(isinstance(obs.get(key), (int, float)) for key in ("win_rate_pct", "expectancy_rr", "trades")):
+            rows.append(obs)
+            labels.append(label)
+    agg = _aggregate_summary_observations(rows)
+    return {
+        "win_rate_pct": agg.get("estimated_win_rate_pct"),
+        "expectancy_rr": agg.get("average_expectancy_rr"),
+        "trades": agg.get("total_historical_trades"),
+        "source_count": len(rows),
+        "source_labels": labels[:4],
+    }
+
+
 def _signal_metric_plan_candidates(item, signal, require_quality=False, allow_cdc=True):
     rows = []
     plan_rows = [
@@ -1086,6 +1130,18 @@ def _build_strategy_summary_observations(item, min_conf=None):
                 confidence=_plan_confidence_value(az_plan),
                 symbol=symbol,
                 signal=az_signal,
+            )
+        ]
+
+    pa_plan = item.get("price_action_15m")
+    if isinstance(pa_plan, dict):
+        pa_signal = _plan_trade_direction(pa_plan)
+        summary["PA15"] = [
+            _summary_edge_observation(
+                _summary_strategy_edge_metrics(pa_plan, signal=pa_signal),
+                confidence=_plan_confidence_value(pa_plan),
+                symbol=symbol,
+                signal=pa_signal,
             )
         ]
 
@@ -1583,61 +1639,176 @@ def _append_pattern_context_lines(lines, pattern):
                 lines.append(f'<a href="{url}">📚 อธิบาย Pattern นี้คืออะไร ({label})</a>')
 
 
-def _resolve_alert_profile_meta(win_rate=None, confidence=None):
-    high_wr_threshold = getattr(config, "TELEGRAM_ALERT_HIGH_WIN_RATE_THRESHOLD", 60.0)
-    high_conf_threshold = getattr(config, "TELEGRAM_ALERT_HIGH_CONFIDENCE_THRESHOLD", 82.0)
-    try:
-        high_wr_threshold = float(high_wr_threshold)
-    except Exception:
-        high_wr_threshold = 60.0
-    try:
-        high_conf_threshold = float(high_conf_threshold)
-    except Exception:
-        high_conf_threshold = 82.0
-    if isinstance(win_rate, (int, float)):
-        wr = float(win_rate)
-        is_high = wr >= high_wr_threshold
-        return {
-            "level": "สูง" if is_high else "ต่ำ",
-            "is_high": bool(is_high),
-            "basis_label": "Win Rate ย้อนหลัง",
-            "basis_value": f"{wr:.1f}%",
-        }
-    if isinstance(confidence, (int, float)):
-        conf = float(confidence)
-        is_high = conf >= high_conf_threshold
-        return {
-            "level": "สูง" if is_high else "ต่ำ",
-            "is_high": bool(is_high),
-            "basis_label": "Confidence ล่าสุด",
-            "basis_value": f"{conf:.0f}%",
-        }
+def _alert_profile_metric_points(value, floor, ceiling, weight):
+    if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return 0.0, 0.0
+    floor = float(floor)
+    ceiling = float(ceiling)
+    if ceiling <= floor:
+        ceiling = floor + 1.0
+    normalized = (float(value) - floor) / (ceiling - floor)
+    normalized = max(0.0, min(1.0, normalized))
+    return normalized * float(weight), float(weight)
+
+
+def _alert_mode_usage_hint(mode_label=None):
+    mode_text = str(mode_label or "").strip().lower()
+    if not mode_text:
+        return None
+    if "baseline" in mode_text:
+        return "ใช้หาเทรนด์เด่นของวัน แล้วรอเข้าเมื่อราคาไม่ไล่ห่างจากจุดเข้า"
+    if "daily trend" in mode_text:
+        return "ใช้กำหนด bias ของวัน แล้วรอระบบหลักยืนยันก่อนเข้าไม้จริง"
+    if "trend pick" in mode_text or "relaxed" in mode_text:
+        return "เข้าได้เมื่อ 1H, Forecast และราคาใกล้จุดเข้าไปทางเดียวกัน"
     return None
 
 
-def _build_alert_profile_lines(win_rate=None, confidence=None):
-    meta = _resolve_alert_profile_meta(win_rate=win_rate, confidence=confidence)
+def _resolve_alert_profile_meta(win_rate=None, confidence=None, expectancy=None, trades=None, mode_label=None):
+    wr_points, wr_weight = _alert_profile_metric_points(win_rate, 48.0, 66.0, 40.0)
+    conf_points, conf_weight = _alert_profile_metric_points(confidence, 55.0, 90.0, 30.0)
+    exp_points, exp_weight = _alert_profile_metric_points(expectancy, -0.05, 0.12, 20.0)
+    trade_points, trade_weight = _alert_profile_metric_points(trades, 0.0, 10.0, 10.0)
+    total_weight = wr_weight + conf_weight + exp_weight + trade_weight
+    if total_weight <= 0:
+        return None
+
+    composite_score = ((wr_points + conf_points + exp_points + trade_points) / total_weight) * 100.0
+    wr = float(win_rate) if isinstance(win_rate, (int, float)) and math.isfinite(float(win_rate)) else None
+    conf = float(confidence) if isinstance(confidence, (int, float)) and math.isfinite(float(confidence)) else None
+
+    if composite_score >= 85.0 and ((wr is not None and wr >= 62.0) or (conf is not None and conf >= 82.0)):
+        tier = "A"
+        title = "Precision Setup"
+        style_text = "คัดเข้ม เน้นไม้ที่สถิติและโครงสร้างพร้อมสุด"
+        action_text = "เข้าได้ตามแผนหลัก แต่ยังต้องเคารพ SL และจังหวะเข้า"
+    elif composite_score >= 70.0 and ((wr is not None and wr >= 56.0) or (conf is not None and conf >= 72.0)):
+        tier = "B"
+        title = "Strong Setup"
+        style_text = "คุณภาพดี ใช้งานจริงได้ต่อเนื่อง และยังคงความถี่เฉลี่ย"
+        action_text = "เข้าได้ แต่ควรลดขนาดไม้ลงเล็กน้อยหากราคาเริ่มไล่ห่าง"
+    elif composite_score >= 55.0:
+        tier = "C"
+        title = "Standard Setup"
+        style_text = "สมดุลระหว่างความถี่กับคุณภาพ เหมาะเป็นสัญญาณใช้งานประจำ"
+        action_text = "เข้าเมื่อเทรนด์ 1H, Forecast และ pattern ไม่ขัดกัน"
+    else:
+        tier = "D"
+        title = "Watchlist Setup"
+        style_text = "เน้นใช้หา bias หรือเฝ้ารอ ไม่เหมาะไล่เข้าเต็มแผน"
+        action_text = "ใช้ดูทิศทางก่อน รอแท่งยืนยันหรือระบบหลักตามซ้ำ"
+
+    mode_hint = _alert_mode_usage_hint(mode_label=mode_label)
+    if mode_hint:
+        action_text = mode_hint
+
+    basis_label = None
+    basis_value = None
+    if wr is not None:
+        basis_label = "Win Rate ย้อนหลัง"
+        basis_value = f"{wr:.1f}%"
+    elif conf is not None:
+        basis_label = "Confidence ล่าสุด"
+        basis_value = f"{conf:.0f}%"
+    elif isinstance(expectancy, (int, float)) and math.isfinite(float(expectancy)):
+        basis_label = "Expectancy RR"
+        basis_value = f"{float(expectancy):.2f}"
+
+    decision_parts = []
+    if wr is not None:
+        decision_parts.append(f"WR {wr:.1f}%")
+    if conf is not None:
+        decision_parts.append(f"Conf {conf:.0f}%")
+    if isinstance(expectancy, (int, float)) and math.isfinite(float(expectancy)):
+        decision_parts.append(f"ExpRR {float(expectancy):.2f}")
+    if isinstance(trades, (int, float)) and math.isfinite(float(trades)) and float(trades) > 0:
+        decision_parts.append(f"Trades {int(float(trades))}")
+
+    return {
+        "level": tier,
+        "tier": tier,
+        "is_high": tier in ("A", "B"),
+        "title": title,
+        "style_text": style_text,
+        "action_text": action_text,
+        "basis_label": basis_label,
+        "basis_value": basis_value,
+        "decision_parts": decision_parts,
+        "composite_score": round(float(composite_score), 1),
+    }
+
+
+def _build_alert_profile_lines(win_rate=None, confidence=None, expectancy=None, trades=None, mode_label=None):
+    meta = _resolve_alert_profile_meta(
+        win_rate=win_rate,
+        confidence=confidence,
+        expectancy=expectancy,
+        trades=trades,
+        mode_label=mode_label,
+    )
     if not isinstance(meta, dict):
         return []
-    if bool(meta.get("is_high")):
-        style_text = "คัดเข้ม เน้นตัวที่สถิติดีกว่า"
-    else:
-        style_text = "เข้าได้ง่ายขึ้น เน้นสัญญาณเชิงรุก"
-    return [
-        f"<b>🏷️ ระดับสัญญาณ:</b> {meta['level']} | {_html_escape(style_text)}",
-        f"<b>📚 ค่าอ้างอิง:</b> {_html_escape(str(meta['basis_label']))} {meta['basis_value']}",
+    lines = [
+        f"<b>🏷️ ระดับสัญญาณ:</b> {meta['tier']} | {_html_escape(str(meta['title']))}",
+        f"<b>🧠 วิธีใช้:</b> {_html_escape(str(meta['action_text']))}",
+        f"<b>🧪 โปรไฟล์:</b> {_html_escape(str(meta['style_text']))}",
     ]
+    if meta.get("basis_label") and meta.get("basis_value"):
+        lines.append(f"<b>📚 ค่าอ้างอิง:</b> {_html_escape(str(meta['basis_label']))} {meta['basis_value']}")
+    if meta.get("decision_parts"):
+        lines.append("<b>✅ ใช้ตัดสินใจ:</b> " + " | ".join([_html_escape(str(part)) for part in meta["decision_parts"]]))
+    return lines
 
 
-def _alert_profile_score_adjustment(win_rate=None, confidence=None):
-    meta = _resolve_alert_profile_meta(win_rate=win_rate, confidence=confidence)
+def _alert_profile_score_adjustment(win_rate=None, confidence=None, expectancy=None, trades=None, mode_label=None):
+    meta = _resolve_alert_profile_meta(
+        win_rate=win_rate,
+        confidence=confidence,
+        expectancy=expectancy,
+        trades=trades,
+        mode_label=mode_label,
+    )
     if not isinstance(meta, dict):
         return 0.0
-    if bool(meta.get("is_high")):
-        base_bonus = 6.0 if meta.get("basis_label") == "Win Rate ย้อนหลัง" else 3.0
-    else:
-        base_bonus = -2.0
-    return float(base_bonus)
+    tier = str(meta.get("tier") or "D").upper()
+    if tier == "A":
+        return 7.0
+    if tier == "B":
+        return 3.5
+    if tier == "C":
+        return 1.0
+    return -2.0
+
+
+def _candidate_mode_label(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    if strategy == "DAILY_BEST":
+        mode = str(candidate.get("daily_best_mode") or "").strip().lower()
+        if mode == "baseline":
+            return "Baseline Trend Pick"
+        if mode == "relaxed":
+            return "Trend Pick"
+        return "Strict Pick"
+    if strategy == "CDCVIX15":
+        mode = str(candidate.get("cdc_mode") or "").strip().lower()
+        if mode == "daily_trend":
+            return "Daily Trend"
+    return None
+
+
+def _candidate_alert_profile(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    edge = _candidate_edge_metrics(candidate)
+    return _resolve_alert_profile_meta(
+        win_rate=edge.get("win_rate_pct"),
+        confidence=candidate.get("confidence"),
+        expectancy=edge.get("expectancy_rr"),
+        trades=edge.get("trades"),
+        mode_label=_candidate_mode_label(candidate),
+    )
 
 
 _ALL_WEATHER_REGIME_WEIGHTS = {
@@ -2091,226 +2262,82 @@ def _build_all_weather_signal(item, min_conf):
     return None, meta
 
 
+def _message_module_helpers():
+    return {
+        "normalize_symbol": normalize_symbol,
+        "html_escape": _html_escape,
+        "format_price_value": _format_price_value,
+        "pick_primary_trade_plan": _pick_primary_trade_plan,
+        "strict_60_mode_enabled": _strict_60_mode_enabled,
+        "strict_60_allow_cdc": _strict_60_allow_cdc,
+        "extract_signal_edge_metrics": _extract_signal_edge_metrics,
+        "build_alert_profile_lines": _build_alert_profile_lines,
+        "append_pattern_context_lines": _append_pattern_context_lines,
+        "build_stop_context_lines": _build_stop_context_lines,
+        "get_plan_label": _get_plan_label,
+        "format_exit_levels_lines": _format_exit_levels_lines,
+        "format_price_forecast_lines": _format_price_forecast_lines,
+        "alert_mode_usage_hint": _alert_mode_usage_hint,
+        "plan_confidence_value": _plan_confidence_value,
+        "pick_plan_value": _pick_plan_value,
+    }
+
+
 def _build_all_weather_message(item, aw_signal):
-    if not isinstance(aw_signal, dict):
-        return None
-    signal = str(aw_signal.get("signal") or "").upper()
-    if signal not in ("BUY", "SELL"):
-        return None
-    base_message = _build_telegram_message(
+    return _alerts_build_all_weather_message(
         item,
-        signal,
-        aw_signal.get("confidence"),
-        aw_signal.get("sources") or [],
-        primary_plan=aw_signal.get("primary_plan"),
+        aw_signal,
+        helpers={**_message_module_helpers(), "build_telegram_message": _build_telegram_message},
+        get_now=get_thai_now,
     )
-    if not isinstance(base_message, str) or not base_message.strip():
-        return None
-    symbol = normalize_symbol(item.get("symbol") or "")
-    lines = base_message.splitlines()
-    if not lines:
-        return None
-    lines[0] = f"<b>🌦️ All-Weather {signal} | {_html_escape(symbol)}</b>"
-    insert_at = 1
-    if len(lines) > 1 and lines[1].startswith("<i>"):
-        insert_at = 2
-    regime = str(aw_signal.get("regime") or "RANGE").upper()
-    volatility_pct = aw_signal.get("volatility_pct")
-    trend_score = aw_signal.get("trend_score")
-    side_gap = aw_signal.get("side_gap")
-    top_buy_score = aw_signal.get("top_buy_score")
-    top_sell_score = aw_signal.get("top_sell_score")
-    blend = aw_signal.get("blend") or {}
-    selected_rows = aw_signal.get("selected_rows") or []
-    confluence_labels = [str(row.get("label") or "") for row in selected_rows if isinstance(row, dict)]
-    extra_lines = [f"<b>🧠 Market Regime:</b> {regime}"]
-    regime_stats = []
-    if isinstance(volatility_pct, (int, float)):
-        regime_stats.append(f"Vol {float(volatility_pct):.2f}%")
-    if isinstance(trend_score, (int, float)):
-        regime_stats.append(f"Trend Score {float(trend_score):.2f}")
-    if regime_stats:
-        extra_lines[-1] += " | " + " | ".join(regime_stats)
-    if confluence_labels:
-        extra_lines.append("<b>🤝 Confluence:</b> " + ", ".join([_html_escape(s) for s in confluence_labels]))
-    side_stats = []
-    if isinstance(top_buy_score, (int, float)):
-        side_stats.append(f"BUY {float(top_buy_score):.1f}")
-    if isinstance(top_sell_score, (int, float)):
-        side_stats.append(f"SELL {float(top_sell_score):.1f}")
-    if isinstance(side_gap, (int, float)):
-        side_stats.append(f"Gap {float(side_gap):.1f}")
-    if side_stats:
-        extra_lines.append("<b>⚖️ Side Selection:</b> " + " | ".join(side_stats))
-    blend_stats = []
-    wr_blend = blend.get("win_rate_pct")
-    exp_blend = blend.get("expectancy_rr")
-    trades_blend = blend.get("trades")
-    if isinstance(wr_blend, (int, float)):
-        blend_stats.append(f"WR {float(wr_blend):.1f}%")
-    if isinstance(exp_blend, (int, float)):
-        blend_stats.append(f"ExpRR {float(exp_blend):.2f}")
-    if isinstance(trades_blend, (int, float)) and int(trades_blend) > 0:
-        blend_stats.append(f"Trades {int(trades_blend)}")
-    if blend_stats:
-        extra_lines.append("<b>🧪 Blended Edge:</b> " + " | ".join(blend_stats))
-    lines[insert_at:insert_at] = extra_lines
-    return "\n".join(lines)
 
 
 def _build_super_signal_message(item, signal, super_meta, primary_plan=None):
-    emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
-    symbol = normalize_symbol(item.get("symbol") or "")
-    name = _html_escape(str(item.get("name") or "").strip())
-    
-    tv_symbol = symbol.replace("-", "")
-    avg_wr = super_meta.get("avg_wr", 0)
-    avg_exp = super_meta.get("avg_exp", 0)
-    confluence = super_meta.get("confluence", [])
-    
-    lines = [f"<b>{emoji} SUPER SIGNAL {signal} | {_html_escape(symbol)}</b>"]
-    if name:
-        lines.append(f"<i>{name}</i>")
-    lines.append("🏆 <b>ความแม่นยำย้อนหลังสูงพิเศษ (High Accuracy)</b>")
-    lines.append("────────────────")
-    lines.extend(_build_alert_profile_lines(win_rate=avg_wr))
-    
-    price = item.get("price")
-    change = item.get("change")
-    price_text = _format_price_value(price)
-    if price_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        lines.append(f"<b>ราคาปัจจุบัน:</b> {price_text}{change_str}")
-
-    lines.append(f"<b>📊 Win Rate เฉลี่ย:</b> {avg_wr:.1f}%")
-    lines.append(f"<b>📈 คาดการณ์กำไร (ExpRR):</b> {avg_exp:.2f}")
-    lines.append(f"<b>🤝 Confluence:</b> " + ", ".join(confluence))
-    
-    if not isinstance(primary_plan, dict):
-        primary_plan = _pick_primary_trade_plan(
-            item,
-            signal=signal,
-            require_quality=_strict_60_mode_enabled(),
-            allow_cdc=_strict_60_allow_cdc(),
-        )
-    pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
-    if pattern and pattern != "None":
-        lines.append(f"<b>🕯️ Confirmation Pattern:</b> {_html_escape(pattern)}")
-
-    if isinstance(primary_plan, dict):
-        stop_lines = _build_stop_context_lines(
-            item,
-            primary_plan,
-            signal=signal,
-            source_label="Super Signal Ensemble",
-        )
-        if stop_lines:
-            lines.append("────────────────")
-            lines.extend(stop_lines)
-            
-        exit_lines = _format_exit_levels_lines(primary_plan)
-        if exit_lines:
-            if not stop_lines:
-                lines.append("────────────────")
-            lines.extend([_html_escape(line) for line in exit_lines])
-            
-    lines.append("────────────────")
-    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 วิเคราะห์กราฟบน TradingView</a>")
-    
-    return "\n".join(lines)
+    return _alerts_build_super_signal_message(
+        item,
+        signal,
+        super_meta,
+        primary_plan=primary_plan,
+        helpers=_message_module_helpers(),
+        get_now=get_thai_now,
+    )
 
 
-def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None):
-    emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
-    symbol = normalize_symbol(item.get("symbol") or "")
-    name = _html_escape(str(item.get("name") or "").strip())
-    
-    tv_symbol = symbol.replace("-", "")
-    
-    lines = [f"<b>{emoji} สัญญาณหลัก {signal} | {_html_escape(symbol)}</b>"]
-    if name:
-        lines.append(f"<i>{name}</i>")
-    lines.append("────────────────")
-    
-    price = item.get("price")
-    change = item.get("change")
-    price_text = _format_price_value(price)
-    if price_text:
-        if isinstance(change, (int, float)):
-            lines.append(f"<b>ราคา:</b> {price_text} ({change:+.2f}%)")
-        else:
-            lines.append(f"<b>ราคา:</b> {price_text}")
-            
-    if best_conf is not None:
-        lines.append(f"<b>ความมั่นใจ:</b> {best_conf:.0f}%")
-        
-    if sources:
-        lines.append(f"<b>แหล่งสัญญาณ:</b> " + ", ".join([_html_escape(s) for s in sources]))
-        
-    if not isinstance(primary_plan, dict):
-        primary_plan = _pick_primary_trade_plan(
-            item,
-            signal=signal,
-            require_quality=_strict_60_mode_enabled(),
-            allow_cdc=_strict_60_allow_cdc(),
-        )
-    edge_metrics = _extract_signal_edge_metrics(primary_plan, signal) if isinstance(primary_plan, dict) else {}
-    lines.extend(_build_alert_profile_lines(win_rate=edge_metrics.get("win_rate_pct"), confidence=best_conf))
-    pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
-    _append_pattern_context_lines(lines, pattern)
-    if isinstance(primary_plan, dict):
-        stop_lines = _build_stop_context_lines(
-            item,
-            primary_plan,
-            signal=signal,
-            source_label=_get_plan_label(primary_plan, item),
-        )
-        if stop_lines:
-            lines.append("────────────────")
-            lines.extend(stop_lines)
-            
-        exit_lines = _format_exit_levels_lines(primary_plan)
-        if exit_lines:
-            if not stop_lines:
-                lines.append("────────────────")
-            lines.extend([_html_escape(line) for line in exit_lines])
-            
-    forecast_lines = _format_price_forecast_lines(item.get("price_forecast"))
-    if forecast_lines:
-        lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in forecast_lines])
-        
-    lines.append("────────────────")
-    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
-    
-    return "\n".join(lines)
+def _build_telegram_message(item, signal, best_conf, sources, primary_plan=None, mode_label=None):
+    return _alerts_build_telegram_message(
+        item,
+        signal,
+        best_conf,
+        sources,
+        primary_plan=primary_plan,
+        mode_label=mode_label,
+        helpers=_message_module_helpers(),
+        get_now=get_thai_now,
+    )
 
 
 def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_plan=None, strategy_label=None, selection_score=None, mode_label=None):
-    base_message = _build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
-    if not isinstance(base_message, str) or not base_message.strip():
-        return None
-    symbol = normalize_symbol(item.get("symbol") or "")
-    lines = base_message.splitlines()
-    if not lines:
-        return None
-    lines[0] = f"<b>⭐ Daily Top Pick {signal} | {_html_escape(symbol)}</b>"
-    insert_at = 1
-    if len(lines) > 1 and lines[1].startswith("<i>"):
-        insert_at = 2
-    daily_lines = [
-        "<b>🗓️ Daily Scan:</b> หนึ่งในตัวเด่นของวันจาก watchlist",
-    ]
-    if mode_label:
-        daily_lines.append("<b>🧭 โหมด:</b> " + _html_escape(str(mode_label)))
-    if strategy_label:
-        daily_lines.append("<b>🎯 แผนหลัก:</b> " + _html_escape(str(strategy_label)))
-    if isinstance(selection_score, (int, float)):
-        daily_lines.append(f"<b>⭐ คะแนนคัดเลือก:</b> {float(selection_score):.1f}")
-    lines[insert_at:insert_at] = daily_lines
-    return "\n".join(lines)
+    return _alerts_build_daily_best_pick_message(
+        item,
+        signal,
+        best_conf,
+        sources,
+        primary_plan=primary_plan,
+        strategy_label=strategy_label,
+        selection_score=selection_score,
+        mode_label=mode_label,
+        helpers={**_message_module_helpers(), "build_telegram_message": _build_telegram_message},
+        get_now=get_thai_now,
+    )
+
+
+def _build_price_action_message(item, plan):
+    return _alerts_build_price_action_message(
+        item,
+        plan,
+        helpers=_message_module_helpers(),
+        get_now=get_thai_now,
+    )
 
 
 def _build_actionzone_message(item, az_plan):
@@ -2355,7 +2382,14 @@ def _build_actionzone_message(item, az_plan):
     optimizer = az_plan.get("optimizer")
     if isinstance(optimizer, dict) and isinstance(optimizer.get("best"), dict):
         best = optimizer.get("best") or {}
-    lines.extend(_build_alert_profile_lines(win_rate=best.get("win_rate_pct"), confidence=conf))
+    lines.extend(
+        _build_alert_profile_lines(
+            win_rate=best.get("win_rate_pct"),
+            confidence=conf,
+            expectancy=best.get("expectancy_rr"),
+            trades=best.get("trades"),
+        )
+    )
     
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
@@ -2476,7 +2510,15 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
     if conf is not None:
         lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
     edge = _extract_signal_edge_metrics(plan, signal)
-    lines.extend(_build_alert_profile_lines(win_rate=edge.get("win_rate_pct"), confidence=conf))
+    lines.extend(
+        _build_alert_profile_lines(
+            win_rate=edge.get("win_rate_pct"),
+            confidence=conf,
+            expectancy=edge.get("expectancy_rr"),
+            trades=edge.get("trades"),
+            mode_label=mode_label,
+        )
+    )
 
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")
@@ -3291,711 +3333,98 @@ def _build_backtest_rulebook(results):
 
 
 def _build_telegram_candidates(results, min_conf):
-    candidates = []
-    quality_drop_counts = Counter()
-    precision60 = _actionzone_precision60_profile()
-    strict_60 = _strict_60_mode_enabled()
-    allow_cdc = _strict_60_allow_cdc()
-    for item in results:
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
-        if not symbol:
-            continue
+    return _alerts_pipeline_build_telegram_candidates(
+        results,
+        min_conf,
+        config=config,
+        helpers=_pipeline_module_helpers(),
+        get_now=get_thai_now,
+    )
 
-        # 0. Check for Super Signal (Highest Priority)
-        for sig in ("BUY", "SELL"):
-            ss_ok, ss_reason, ss_meta = _evaluate_super_signal(item, sig)
-            if ss_ok:
-                ss_plan = _pick_primary_trade_plan(
-                    item,
-                    signal=sig,
-                    require_quality=strict_60,
-                    allow_cdc=allow_cdc,
-                )
-                ss_message = _build_super_signal_message(item, sig, ss_meta, primary_plan=ss_plan)
-                if ss_message:
-                    # Give Super Signal a very high score to ensure it's sent first
-                    score = 1000.0 + (float(ss_meta.get("avg_wr", 0)) * 2.0)
-                    candidates.append({
-                        "symbol": symbol,
-                        "strategy": "SS15",
-                        "signal": sig,
-                        "score": score,
-                        "confidence": float(ss_meta.get("avg_wr", 0)),
-                        "plan": ss_plan,
-                        "item": item,
-                        "edge_metrics": ss_meta,
-                        "message": ss_message,
-                        "cache_key": f"SS15|{symbol}|{sig}|{get_thai_now().strftime('%Y%m%d%H')}", # Hourly cache
-                    })
 
-        aw_signal, aw_meta = _build_all_weather_signal(item, min_conf)
-        if isinstance(aw_signal, dict):
-            aw_message = _build_all_weather_message(item, aw_signal)
-            if aw_message:
-                candidates.append({
-                    "symbol": symbol,
-                    "strategy": "AW15",
-                    "signal": aw_signal.get("signal"),
-                    "score": float(aw_signal.get("score", 0.0)),
-                    "confidence": float(aw_signal.get("confidence", 0.0)),
-                    "plan": aw_signal.get("primary_plan"),
-                    "item": item,
-                    "edge_metrics": aw_signal.get("blend") or {},
-                    "message": aw_message,
-                    "cache_key": str(aw_signal.get("cache_key") or f"AW15|{symbol}|{get_thai_now().strftime('%Y%m%d%H')}"),
-                })
-        elif isinstance(aw_meta, dict):
-            quality_drop_counts[f"all_weather_{aw_meta.get('status') or 'filtered'}"] += 1
-
-        cdc_plan = item.get("cdc_vixfix_15m")
-        if isinstance(cdc_plan, dict):
-            cdc_signal = str(cdc_plan.get("signal") or "").upper()
-            cdc_conf = _normalize_confidence(cdc_plan.get("confidence"))
-            cdc_min_conf = getattr(config, "CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE", min_conf)
-            try:
-                cdc_min_conf = float(cdc_min_conf)
-            except Exception:
-                cdc_min_conf = float(min_conf)
-            required_conf = min(float(min_conf), float(cdc_min_conf))
-            if cdc_signal in ("BUY", "SELL") and cdc_conf is not None and cdc_conf >= required_conf:
-                cdc_message = _build_cdc_vixfix_message(item, cdc_plan)
-                if cdc_message:
-                    edge = _extract_plan_edge_metrics(cdc_plan)
-                    freshness = 6.0
-                    last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
-                    if not last_signal_time:
-                        freshness = 2.0
-                    trigger = str(cdc_plan.get("sell_trigger") or "").upper().strip()
-                    score = float(cdc_conf) + freshness + (6.0 if cdc_signal == "SELL" else 4.0)
-                    score += _alert_profile_score_adjustment(
-                        win_rate=edge.get("win_rate_pct"),
-                        confidence=cdc_conf,
-                    )
-                    # Boost SELL signals with high confidence
-                    if cdc_signal == "SELL" and cdc_conf >= 85.0:
-                        score += 8.0
-                    context_key = last_signal_time or trigger or (_format_price_value(cdc_plan.get("entry_price")) or "na")
-                    candidates.append({
-                        "symbol": symbol,
-                        "strategy": "CDCVIX15",
-                        "signal": cdc_signal,
-                        "score": float(score),
-                        "confidence": float(cdc_conf),
-                        "plan": cdc_plan,
-                        "item": item,
-                        "edge_metrics": edge,
-                        "message": cdc_message,
-                        "cache_key": f"CDCVIX15|{symbol}|{cdc_signal}|{context_key}",
-                    })
-
-        az_plan = item.get("actionzone_15m")
-        if isinstance(az_plan, dict):
-            az_signal = str(az_plan.get("signal") or "").upper()
-            if az_signal in ("BUY", "SELL") and az_plan.get("alert"):
-                az_min_conf = getattr(config, "ACTIONZONE_15M_MIN_ALERT_CONFIDENCE", min_conf)
-                try:
-                    az_min_conf = float(az_min_conf)
-                except Exception:
-                    az_min_conf = float(min_conf)
-                required_az_conf = max(float(min_conf), float(az_min_conf))
-                if isinstance(precision60, dict):
-                    required_az_conf = max(required_az_conf, float(precision60.get("min_conf", required_az_conf)))
-                az_conf = _normalize_confidence(az_plan.get("confidence"))
-                if az_conf is not None and az_conf >= required_az_conf:
-                    gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(az_plan, az_signal)
-                    if not gate_ok:
-                        quality_drop_counts[gate_reason] += 1
-                        continue
-                    az_message = _build_actionzone_message(item, az_plan)
-                    if az_message:
-                        trend_alignment = bool(az_plan.get("trend_alignment", True))
-                        bars_since = _safe_float(az_plan.get("bars_since_signal"), None)
-                        if isinstance(precision60, dict):
-                            if bool(precision60.get("require_trend_alignment", True)) and not trend_alignment:
-                                continue
-                            if isinstance(bars_since, float) and bars_since > float(precision60.get("max_bars_since_signal", 0)):
-                                continue
-                        freshness = 0.0
-                        if isinstance(bars_since, float):
-                            if bars_since <= 0:
-                                freshness = 8.0
-                            elif bars_since <= 1:
-                                freshness = 5.0
-                            elif bars_since <= 2:
-                                freshness = 2.0
-                            else:
-                                freshness = -4.0
-                        score = float(az_conf) + freshness + (6.0 if trend_alignment else -8.0)
-                        wr = edge.get("win_rate_pct")
-                        exp = edge.get("expectancy_rr")
-                        trades = edge.get("trades")
-                        score += _alert_profile_score_adjustment(
-                            win_rate=wr,
-                            confidence=az_conf,
-                        )
-                        if isinstance(wr, (int, float)):
-                            score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
-                        if isinstance(exp, (int, float)):
-                            score += max(-4.0, min(8.0, float(exp) * 8.0))
-                        if isinstance(trades, (int, float)):
-                            score += max(0.0, min(4.0, float(trades) / 8.0))
-                        # Boost SELL signals with high win rate
-                        if az_signal == "SELL" and isinstance(wr, (int, float)) and wr >= 65.0:
-                            score += 12.0
-                        last_signal_time = str(az_plan.get("last_signal_time") or "").strip()
-                        zone = str(az_plan.get("zone") or "").upper().strip()
-                        entry_bucket = _format_price_value(az_plan.get("entry_price")) or "na"
-                        context_key = last_signal_time or f"{zone}|{entry_bucket}"
-                        candidates.append({
-                            "symbol": symbol,
-                            "strategy": "AZ15",
-                            "signal": az_signal,
-                            "score": float(score),
-                            "confidence": float(az_conf),
-                            "plan": az_plan,
-                            "item": item,
-                            "edge_metrics": edge,
-                            "message": az_message,
-                            "cache_key": f"AZ15|{symbol}|{az_signal}|{context_key}",
-                        })
-
-        signal = str(item.get("signal") or "").upper()
-        if signal in ("BUY", "SELL"):
-            best_conf = _get_best_confidence(item, signal=signal, require_quality=strict_60, allow_cdc=allow_cdc)
-            if best_conf is not None and best_conf >= min_conf:
-                sources = _collect_alert_sources(
-                    item,
-                    min_conf,
-                    signal=signal,
-                    require_quality=strict_60,
-                    allow_cdc=allow_cdc,
-                )
-                primary_plan = _pick_primary_trade_plan(
-                    item,
-                    signal=signal,
-                    require_quality=strict_60,
-                    allow_cdc=allow_cdc,
-                )
-                if not isinstance(primary_plan, dict):
-                    quality_drop_counts["no_primary_plan_after_strict_gate"] += 1
-                    continue
-                gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(primary_plan, signal)
-                if not gate_ok:
-                    quality_drop_counts[gate_reason] += 1
-                    continue
-                min_sources = getattr(config, "TELEGRAM_ALERT_PRIMARY_MIN_SOURCES", 2)
-                single_source_min_conf = getattr(config, "TELEGRAM_ALERT_PRIMARY_SINGLE_SOURCE_MIN_CONF", 90.0)
-                try:
-                    min_sources = int(min_sources)
-                except Exception:
-                    min_sources = 2
-                try:
-                    single_source_min_conf = float(single_source_min_conf)
-                except Exception:
-                    single_source_min_conf = 90.0
-                source_count = len(sources)
-                if source_count < max(1, min_sources) and float(best_conf) < float(single_source_min_conf):
-                    continue
-                message = _build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
-                if message:
-                    source_bonus = min(8.0, float(len(sources)) * 1.5)
-                    score = float(best_conf) + source_bonus
-                    wr = edge.get("win_rate_pct")
-                    exp = edge.get("expectancy_rr")
-                    trades = edge.get("trades")
-                    score += _alert_profile_score_adjustment(
-                        win_rate=wr,
-                        confidence=best_conf,
-                    )
-                    if isinstance(wr, (int, float)):
-                        score += max(-3.0, min(8.0, (float(wr) - 50.0) * 0.20))
-                    if isinstance(exp, (int, float)):
-                        score += max(-4.0, min(8.0, float(exp) * 8.0))
-                    if isinstance(trades, (int, float)):
-                        score += max(0.0, min(4.0, float(trades) / 8.0))
-                    last_signal_time = str(primary_plan.get("last_signal_time") or "").strip() if isinstance(primary_plan, dict) else ""
-                    entry_bucket = _format_price_value(_pick_plan_value(primary_plan, ["entry_price", "current_price", "price"])) if isinstance(primary_plan, dict) else None
-                    pattern_bucket = str(primary_plan.get("detected_pattern") or "").strip().upper() if isinstance(primary_plan, dict) else ""
-                    source_bucket = _get_primary_plan_source_label(item, primary_plan) if isinstance(primary_plan, dict) else "PRIMARY"
-                    context_key = last_signal_time or "|".join([source_bucket, entry_bucket or "na", pattern_bucket or "NOPATTERN"])
-                    candidates.append({
-                        "symbol": symbol,
-                        "strategy": "PRIMARY",
-                        "signal": signal,
-                        "score": float(score),
-                        "confidence": float(best_conf),
-                        "plan": primary_plan,
-                        "item": item,
-                        "edge_metrics": edge,
-                        "message": message,
-                        "cache_key": f"PRIMARY|{symbol}|{signal}|{context_key}",
-                    })
-    filtered_candidates = []
-    for candidate in candidates:
-        gate_ok, gate_reason, edge_metrics = _evaluate_candidate_backtest_gate(candidate)
-        if not gate_ok:
-            quality_drop_counts[gate_reason] += 1
-            continue
-        candidate["edge_metrics"] = edge_metrics
-        filtered_candidates.append(candidate)
-    stats = {
-        "quality_drop_counts": dict(quality_drop_counts),
+def _pipeline_module_helpers():
+    return {
+        "actionzone_precision60_profile": _actionzone_precision60_profile,
+        "strict_60_mode_enabled": _strict_60_mode_enabled,
+        "strict_60_allow_cdc": _strict_60_allow_cdc,
+        "normalize_symbol": normalize_symbol,
+        "evaluate_super_signal": _evaluate_super_signal,
+        "pick_primary_trade_plan": _pick_primary_trade_plan,
+        "build_super_signal_message": _build_super_signal_message,
+        "build_all_weather_signal": _build_all_weather_signal,
+        "build_all_weather_message": _build_all_weather_message,
+        "normalize_confidence": _normalize_confidence,
+        "build_cdc_vixfix_message": _build_cdc_vixfix_message,
+        "extract_plan_edge_metrics": _extract_plan_edge_metrics,
+        "alert_profile_score_adjustment": _alert_profile_score_adjustment,
+        "format_price_value": _format_price_value,
+        "evaluate_entry_quality_gate": _evaluate_entry_quality_gate,
+        "build_actionzone_message": _build_actionzone_message,
+        "safe_float": _safe_float,
+        "build_price_action_message": _build_price_action_message,
+        "get_best_confidence": _get_best_confidence,
+        "collect_alert_sources": _collect_alert_sources,
+        "get_primary_plan_source_label": _get_primary_plan_source_label,
+        "pick_plan_value": _pick_plan_value,
+        "build_telegram_message": _build_telegram_message,
+        "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
+        "candidate_alert_profile": _candidate_alert_profile,
+        "telegram_kill_switch_state": _telegram_kill_switch_state,
+        "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
+        "build_telegram_candidates": _build_telegram_candidates,
+        "build_cdc_daily_trend_candidates": _build_cdc_daily_trend_candidates,
+        "is_daily_best_pick_window": _is_daily_best_pick_window,
+        "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
+        "build_daily_summary_message": _build_daily_summary_message,
+        "send_telegram_alert": send_telegram_alert,
+        "telegram_alert_cache": _TELEGRAM_ALERT_CACHE,
+        "record_telegram_alert_history": _record_telegram_alert_history,
+        "track_alert_performance": _track_alert_performance,
+        "record_telegram_run_report": _record_telegram_run_report,
     }
-    return filtered_candidates, stats
+
+
+def _daily_alert_module_helpers():
+    return {
+        "normalize_symbol": normalize_symbol,
+        "pick_primary_trade_plan": _pick_primary_trade_plan,
+        "get_best_confidence": _get_best_confidence,
+        "plan_confidence_value": _plan_confidence_value,
+        "collect_alert_sources": _collect_alert_sources,
+        "extract_signal_edge_metrics": _extract_signal_edge_metrics,
+        "get_primary_plan_source_label": _get_primary_plan_source_label,
+        "safe_float": _safe_float,
+        "pick_plan_value": _pick_plan_value,
+        "build_daily_best_pick_message": _build_daily_best_pick_message,
+        "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
+        "candidate_edge_metrics": _candidate_edge_metrics,
+        "plan_trade_direction": _plan_trade_direction,
+        "build_cdc_vixfix_message": _build_cdc_vixfix_message,
+    }
 
 
 def _is_daily_best_pick_window():
-    if not bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ENABLED", True)):
-        return False
-    now = get_thai_now()
-    hour = getattr(config, "TELEGRAM_DAILY_BEST_PICK_HOUR", 9)
-    minute = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MINUTE", 0)
-    window_minutes = getattr(config, "TELEGRAM_DAILY_BEST_PICK_WINDOW_MINUTES", 15)
-    try:
-        hour = int(hour)
-    except Exception:
-        hour = 9
-    try:
-        minute = int(minute)
-    except Exception:
-        minute = 0
-    try:
-        window_minutes = int(window_minutes)
-    except Exception:
-        window_minutes = 15
-    if hour < 0 or hour > 23:
-        hour = 9
-    if minute not in (0, 15, 30, 45):
-        minute = 0
-    if window_minutes < 1:
-        window_minutes = 1
-    if window_minutes > 60:
-        window_minutes = 60
-    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    delta_minutes = (now - target).total_seconds() / 60.0
-    return 0.0 <= delta_minutes < float(window_minutes)
+    return _alerts_is_daily_best_pick_window(config=config, get_now=get_thai_now)
 
 
 def _build_daily_best_pick_candidates(results):
-    min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
-    min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_SCORE", 74.0)
-    max_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 1)
-    require_quality = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY", True))
-    allow_cdc = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC", False))
-    relaxed_enable = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_ENABLE", True))
-    relaxed_min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_CONFIDENCE", 57.0)
-    relaxed_min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_SCORE", 68.0)
-    relaxed_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE", 55.0)
-    relaxed_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES", 4)
-    relaxed_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR", 0.0)
-    baseline_enable = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_ENABLE", True))
-    baseline_min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_CONFIDENCE", 54.0)
-    baseline_min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_SCORE", 60.0)
-    baseline_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_WIN_RATE", 52.0)
-    baseline_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_TRADES", 2)
-    baseline_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_EXPECTANCY_RR", -0.02)
-    baseline_target_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_TARGET_PER_DAY", 1)
-    try:
-        min_conf = float(min_conf)
-    except Exception:
-        min_conf = 55.0
-    try:
-        min_score = float(min_score)
-    except Exception:
-        min_score = 72.0
-    try:
-        max_per_day = int(max_per_day)
-    except Exception:
-        max_per_day = 3
-    try:
-        relaxed_min_conf = float(relaxed_min_conf)
-    except Exception:
-        relaxed_min_conf = 57.0
-    try:
-        relaxed_min_score = float(relaxed_min_score)
-    except Exception:
-        relaxed_min_score = 68.0
-    try:
-        relaxed_min_wr = float(relaxed_min_wr)
-    except Exception:
-        relaxed_min_wr = 55.0
-    try:
-        relaxed_min_trades = int(relaxed_min_trades)
-    except Exception:
-        relaxed_min_trades = 4
-    try:
-        relaxed_min_exp = float(relaxed_min_exp)
-    except Exception:
-        relaxed_min_exp = 0.0
-    try:
-        baseline_min_conf = float(baseline_min_conf)
-    except Exception:
-        baseline_min_conf = 54.0
-    try:
-        baseline_min_score = float(baseline_min_score)
-    except Exception:
-        baseline_min_score = 60.0
-    try:
-        baseline_min_wr = float(baseline_min_wr)
-    except Exception:
-        baseline_min_wr = 52.0
-    try:
-        baseline_min_trades = int(baseline_min_trades)
-    except Exception:
-        baseline_min_trades = 2
-    try:
-        baseline_min_exp = float(baseline_min_exp)
-    except Exception:
-        baseline_min_exp = -0.02
-    try:
-        baseline_target_per_day = int(baseline_target_per_day)
-    except Exception:
-        baseline_target_per_day = 1
-    if max_per_day < 1:
-        max_per_day = 1
-    if baseline_target_per_day < 0:
-        baseline_target_per_day = 0
-
-    candidates = []
-    relaxed_candidates = []
-    baseline_candidates = []
-    for item in results or []:
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
-        if not symbol:
-            continue
-        top_signal = str(item.get("signal") or "").upper().strip()
-        for signal in ("BUY", "SELL"):
-            active_require_quality = require_quality
-            primary_plan = _pick_primary_trade_plan(
-                item,
-                signal=signal,
-                require_quality=active_require_quality,
-                allow_cdc=allow_cdc,
-            )
-            if not isinstance(primary_plan, dict) and relaxed_enable:
-                active_require_quality = False
-                primary_plan = _pick_primary_trade_plan(
-                    item,
-                    signal=signal,
-                    require_quality=False,
-                    allow_cdc=allow_cdc,
-                )
-            if not isinstance(primary_plan, dict):
-                continue
-            best_conf = _get_best_confidence(
-                item,
-                signal=signal,
-                require_quality=active_require_quality,
-                allow_cdc=allow_cdc,
-            )
-            if best_conf is None:
-                best_conf = _plan_confidence_value(primary_plan)
-            if best_conf is None or float(best_conf) < float(min(relaxed_min_conf, baseline_min_conf)):
-                continue
-            source_floor = max(45.0, min(float(best_conf), float(min_conf)))
-            sources = _collect_alert_sources(
-                item,
-                source_floor,
-                signal=signal,
-                require_quality=active_require_quality,
-                allow_cdc=allow_cdc,
-            )
-            edge = _extract_signal_edge_metrics(primary_plan, signal)
-            strategy_label = _get_primary_plan_source_label(item, primary_plan)
-            score = float(best_conf)
-            if top_signal == signal:
-                score += 6.0
-            bars_since = _safe_float(
-                _pick_plan_value(primary_plan, ["bars_since_signal", "bars_since_entry"]),
-                None,
-            )
-            if isinstance(bars_since, float):
-                if bars_since <= 0:
-                    score += 8.0
-                elif bars_since <= 1:
-                    score += 5.0
-                elif bars_since <= 2:
-                    score += 2.0
-                elif bars_since >= 6:
-                    score -= 4.0
-            trend_alignment = primary_plan.get("trend_alignment")
-            if isinstance(trend_alignment, bool):
-                score += 4.0 if trend_alignment else -6.0
-            forecast_dir = str(
-                primary_plan.get("forecast_direction")
-                or ((item.get("price_forecast") or {}).get("direction") if isinstance(item.get("price_forecast"), dict) else "")
-                or ""
-            ).upper().strip()
-            if forecast_dir == signal:
-                score += 5.0
-            wr = edge.get("win_rate_pct")
-            exp = edge.get("expectancy_rr")
-            trades = edge.get("trades")
-            if isinstance(wr, (int, float)):
-                score += max(-4.0, min(10.0, (float(wr) - 50.0) * 0.25))
-            if isinstance(exp, (int, float)):
-                score += max(-4.0, min(8.0, float(exp) * 8.0))
-            if isinstance(trades, (int, float)):
-                score += max(0.0, min(4.0, float(trades) / 8.0))
-            score += min(6.0, float(len(sources)) * 1.5)
-            message = _build_daily_best_pick_message(
-                item,
-                signal,
-                float(best_conf),
-                sources,
-                primary_plan=primary_plan,
-                strategy_label=strategy_label,
-                selection_score=score,
-                mode_label="Strict Daily Pick",
-            )
-            if not isinstance(message, str) or not message.strip():
-                continue
-            candidate = {
-                "symbol": symbol,
-                "signal": signal,
-                "strategy": "DAILY_BEST",
-                "score": float(score),
-                "confidence": float(best_conf),
-                "plan": primary_plan,
-                "item": item,
-                "edge_metrics": edge,
-                "message": message,
-                "strategy_label": strategy_label,
-            }
-            gate_ok, _, normalized_edge = _evaluate_candidate_backtest_gate(candidate)
-            if gate_ok and float(best_conf) >= float(min_conf):
-                candidate["edge_metrics"] = normalized_edge
-                candidates.append(candidate)
-                continue
-            if not relaxed_enable:
-                continue
-            relaxed_edge = normalized_edge if isinstance(normalized_edge, dict) else _candidate_edge_metrics(candidate)
-            relaxed_wr = relaxed_edge.get("win_rate_pct")
-            relaxed_exp = relaxed_edge.get("expectancy_rr")
-            relaxed_trades = relaxed_edge.get("trades")
-            baseline_sources = sources[:]
-            if not baseline_sources and strategy_label:
-                baseline_sources = [str(strategy_label)]
-            if baseline_enable:
-                baseline_ok = True
-                if float(score) < float(baseline_min_score):
-                    baseline_ok = False
-                if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(baseline_min_wr):
-                    baseline_ok = False
-                if float(baseline_min_trades) > 0:
-                    baseline_trade_ok = isinstance(relaxed_trades, (int, float)) and float(relaxed_trades) >= float(baseline_min_trades)
-                    if not baseline_trade_ok:
-                        # Allow baseline mode to use strong score/win-rate even when trade-count metadata is missing.
-                        baseline_trade_ok = (
-                            isinstance(relaxed_wr, (int, float))
-                            and float(relaxed_wr) >= max(float(baseline_min_wr) + 4.0, 56.0)
-                            and float(best_conf) >= max(float(baseline_min_conf) + 4.0, 58.0)
-                            and float(score) >= float(baseline_min_score) + 3.0
-                        )
-                    if not baseline_trade_ok:
-                        baseline_ok = False
-                if isinstance(relaxed_exp, (int, float)) and float(relaxed_exp) < float(baseline_min_exp):
-                    baseline_ok = False
-                if float(best_conf) < float(baseline_min_conf):
-                    baseline_ok = False
-                if baseline_ok:
-                    baseline_message = _build_daily_best_pick_message(
-                        item,
-                        signal,
-                        float(best_conf),
-                        baseline_sources,
-                        primary_plan=primary_plan,
-                        strategy_label=strategy_label,
-                        selection_score=score,
-                        mode_label="Baseline Trend Pick",
-                    )
-                    if isinstance(baseline_message, str) and baseline_message.strip():
-                        baseline_candidate = dict(candidate)
-                        baseline_candidate["message"] = baseline_message
-                        baseline_candidate["edge_metrics"] = relaxed_edge
-                        baseline_candidate["score"] = float(score)
-                        baseline_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Baseline Trend").strip(" |")
-                        baseline_candidate["cache_key"] = f"DAILYBESTBASE|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}"
-                        baseline_candidate["daily_best_mode"] = "baseline"
-                        baseline_candidates.append(baseline_candidate)
-            if float(score) < float(relaxed_min_score):
-                continue
-            if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(relaxed_min_wr):
-                continue
-            if not isinstance(relaxed_trades, (int, float)) or float(relaxed_trades) < float(relaxed_min_trades):
-                continue
-            if isinstance(relaxed_exp, (int, float)) and float(relaxed_exp) < float(relaxed_min_exp):
-                continue
-            relaxed_sources = sources[:]
-            if not relaxed_sources and strategy_label:
-                relaxed_sources = [str(strategy_label)]
-            relaxed_message = _build_daily_best_pick_message(
-                item,
-                signal,
-                float(best_conf),
-                relaxed_sources,
-                primary_plan=primary_plan,
-                strategy_label=strategy_label,
-                selection_score=score,
-                mode_label="Trend Pick",
-            )
-            if not isinstance(relaxed_message, str) or not relaxed_message.strip():
-                continue
-            relaxed_candidate = dict(candidate)
-            relaxed_candidate["message"] = relaxed_message
-            relaxed_candidate["edge_metrics"] = relaxed_edge
-            relaxed_candidate["score"] = float(score)
-            relaxed_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Trend Pick").strip(" |")
-            relaxed_candidate["cache_key"] = f"DAILYBESTRELAX|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}"
-            relaxed_candidate["daily_best_mode"] = "relaxed"
-            relaxed_candidates.append(relaxed_candidate)
-    if not candidates:
-        candidates = relaxed_candidates
-    elif relaxed_enable:
-        used_symbols = {normalize_symbol(row.get("symbol") or "") for row in candidates if isinstance(row, dict)}
-        for row in relaxed_candidates:
-            sym = normalize_symbol(row.get("symbol") or "")
-            if not sym or sym in used_symbols:
-                continue
-            candidates.append(row)
-    if baseline_enable and baseline_candidates:
-        used_symbols = {normalize_symbol(row.get("symbol") or "") for row in candidates if isinstance(row, dict)}
-        baseline_candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-        baseline_added = 0
-        for row in baseline_candidates:
-            if baseline_target_per_day > 0 and baseline_added >= baseline_target_per_day:
-                break
-            sym = normalize_symbol(row.get("symbol") or "")
-            if not sym or sym in used_symbols:
-                continue
-            candidates.append(row)
-            used_symbols.add(sym)
-            baseline_added += 1
-    if not candidates:
-        return []
-    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-    selected = []
-    seen_symbols = set()
-    for candidate in candidates:
-        symbol = str(candidate.get("symbol") or "").strip().upper()
-        if not symbol or symbol in seen_symbols:
-            continue
-        candidate_mode = str(candidate.get("daily_best_mode") or "strict").strip().lower()
-        if candidate_mode == "baseline":
-            candidate_min_score = float(baseline_min_score)
-        elif candidate_mode == "relaxed":
-            candidate_min_score = float(relaxed_min_score)
-        else:
-            candidate_min_score = float(min_score)
-        if float(candidate.get("score", 0.0)) < candidate_min_score:
-            continue
-        selected.append(candidate)
-        seen_symbols.add(symbol)
-        if len(selected) >= max_per_day:
-            break
-    return selected
+    return _alerts_build_daily_best_pick_candidates(
+        results,
+        config=config,
+        helpers=_daily_alert_module_helpers(),
+        get_now=get_thai_now,
+    )
 
 
 def _build_cdc_daily_trend_candidates(results, existing_candidates=None, min_conf=None):
-    enabled = bool(getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_ENABLE", True))
-    if not enabled:
-        return []
-    max_per_day = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MAX_PER_DAY", 1)
-    min_confidence = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_CONFIDENCE", 56.0)
-    min_win_rate = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_WIN_RATE", 54.0)
-    min_score = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_SCORE", 61.0)
-    try:
-        max_per_day = max(1, int(max_per_day))
-    except Exception:
-        max_per_day = 1
-    try:
-        min_confidence = float(min_confidence)
-    except Exception:
-        min_confidence = 56.0
-    try:
-        min_win_rate = float(min_win_rate)
-    except Exception:
-        min_win_rate = 54.0
-    try:
-        min_score = float(min_score)
-    except Exception:
-        min_score = 61.0
-    if isinstance(existing_candidates, list):
-        for row in existing_candidates:
-            if isinstance(row, dict) and str(row.get("strategy") or "").upper() == "CDCVIX15":
-                return []
-    candidates = []
-    for item in results or []:
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
-        cdc_plan = item.get("cdc_vixfix_15m")
-        if not symbol or not isinstance(cdc_plan, dict):
-            continue
-        signal = _plan_trade_direction(cdc_plan)
-        if signal not in ("BUY", "SELL"):
-            continue
-        confidence = _plan_confidence_value(cdc_plan)
-        if not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence):
-            continue
-        candidate = {
-            "symbol": symbol,
-            "strategy": "CDCVIX15",
-            "signal": signal,
-            "plan": cdc_plan,
-            "item": item,
-            "confidence": float(confidence),
-        }
-        edge = _candidate_edge_metrics(candidate)
-        win_rate = edge.get("win_rate_pct")
-        expectancy = edge.get("expectancy_rr")
-        trades = edge.get("trades")
-        if not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate):
-            continue
-        score = float(confidence)
-        forecast_dir = str(cdc_plan.get("forecast_direction") or "").upper().strip()
-        if forecast_dir == signal:
-            score += 5.0
-        trigger = str(cdc_plan.get("sell_trigger") or cdc_plan.get("exit_trigger") or "").upper().strip()
-        if trigger:
-            score += 3.0
-        if isinstance(win_rate, (int, float)):
-            score += max(-3.0, min(8.0, (float(win_rate) - 50.0) * 0.25))
-        if isinstance(expectancy, (int, float)):
-            score += max(-3.0, min(6.0, float(expectancy) * 8.0))
-        if isinstance(trades, (int, float)):
-            score += max(0.0, min(4.0, float(trades) / 6.0))
-        if float(score) < float(min_score):
-            continue
-        message = _build_cdc_vixfix_message(item, cdc_plan, mode_label="Daily Trend")
-        if not isinstance(message, str) or not message.strip():
-            continue
-        candidate.update(
-            {
-                "score": float(score),
-                "edge_metrics": edge,
-                "message": message,
-                "cache_key": f"CDCVIX15DAILY|{symbol}|{signal}|{get_thai_now().strftime('%Y%m%d')}",
-                "cdc_mode": "daily_trend",
-            }
-        )
-        candidates.append(candidate)
-    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-    selected = []
-    seen_symbols = set()
-    for candidate in candidates:
-        symbol = normalize_symbol(candidate.get("symbol") or "")
-        if not symbol or symbol in seen_symbols:
-            continue
-        selected.append(candidate)
-        seen_symbols.add(symbol)
-        if len(selected) >= max_per_day:
-            break
-    return selected
+    return _alerts_build_cdc_daily_trend_candidates(
+        results,
+        config=config,
+        helpers=_daily_alert_module_helpers(),
+        get_now=get_thai_now,
+        existing_candidates=existing_candidates,
+        min_conf=min_conf,
+    )
 
 
 def _build_daily_summary_message(results, existing_candidates=None, min_conf=None):
@@ -4097,175 +3526,13 @@ def _build_daily_summary_message(results, existing_candidates=None, min_conf=Non
 
 
 def _notify_telegram_from_results(results):
-    kill, reason = _telegram_kill_switch_state(results)
-    if kill:
-        logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
-    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
-    max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
-    max_per_symbol = getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1)
-    cooldown_minutes = getattr(config, "TELEGRAM_ALERT_COOLDOWN_MINUTES", 30)
-    try:
-        min_conf = float(min_conf)
-    except Exception:
-        min_conf = 75.0
-    try:
-        max_per_run = int(max_per_run)
-    except Exception:
-        max_per_run = 5
-    try:
-        max_per_symbol = int(max_per_symbol)
-    except Exception:
-        max_per_symbol = 1
-    try:
-        cooldown_minutes = int(cooldown_minutes)
-    except Exception:
-        cooldown_minutes = 30
-    if max_per_run < 1:
-        max_per_run = 1
-    if max_per_symbol < 1:
-        max_per_symbol = 1
-    if cooldown_minutes < 1:
-        cooldown_minutes = 1
-    dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates = []
-    build_stats = {}
-    if not kill:
-        candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
-        cdc_daily_candidates = _build_cdc_daily_trend_candidates(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
-        if cdc_daily_candidates:
-            candidates.extend([row for row in cdc_daily_candidates if isinstance(row, dict)])
-    quality_drop_counts = {}
-    if isinstance(build_stats, dict):
-        quality_drop_counts = build_stats.get("quality_drop_counts") or {}
-    if not candidates:
-        logger.info(
-            "Telegram alerts: no candidates (min_conf=%.1f, dynamic_min_conf=%.1f, quality_drops=%s)",
-            min_conf,
-            dynamic_min_conf,
-            json.dumps(quality_drop_counts, ensure_ascii=False),
-        )
-        if kill and not _is_daily_best_pick_window():
-            _record_telegram_run_report(
-                results=results,
-                kill=kill,
-                kill_reason=reason,
-                min_conf=min_conf,
-                dynamic_min_conf=dynamic_min_conf,
-                candidates=candidates,
-                sent_candidates=[],
-                daily_pick_sent=0,
-                daily_summary_sent=0,
-                dropped_by_cache=0,
-                dropped_by_symbol_cap=0,
-                dropped_by_run_cap=0,
-                quality_drop_counts=quality_drop_counts,
-            )
-            return 0
-    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-    sent = 0
-    dropped_by_cache = 0
-    dropped_by_symbol_cap = 0
-    dropped_by_run_cap = 0
-    per_symbol_sent = {}
-    cooldown_ttl = max(60, int(cooldown_minutes * 60))
-    sent_candidates = []
-    for candidate in candidates:
-        if sent >= max_per_run:
-            dropped_by_run_cap += 1
-            continue
-        symbol = str(candidate.get("symbol") or "")
-        if not symbol:
-            continue
-        if int(per_symbol_sent.get(symbol, 0)) >= max_per_symbol:
-            dropped_by_symbol_cap += 1
-            continue
-        cache_key = str(candidate.get("cache_key") or "").strip()
-        if not cache_key:
-            continue
-        if _TELEGRAM_ALERT_CACHE.get(cache_key):
-            dropped_by_cache += 1
-            continue
-        message = candidate.get("message")
-        if not isinstance(message, str) or not message.strip():
-            continue
-        if send_telegram_alert(message):
-            _TELEGRAM_ALERT_CACHE.set(cache_key, True, ttl_seconds=cooldown_ttl)
-            per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
-            sent += 1
-            sent_candidates.append(candidate)
-            _record_telegram_alert_history(candidate, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=False)
-    daily_pick_sent = 0
-    daily_summary_sent = 0
-    if _is_daily_best_pick_window():
-        daily_candidates = _build_daily_best_pick_candidates(results)
-        for daily_candidate in daily_candidates:
-            if not isinstance(daily_candidate, dict):
-                continue
-            daily_key = f"DAILYBEST|{get_thai_now().strftime('%Y%m%d')}|{daily_candidate.get('symbol')}|{daily_candidate.get('signal')}"
-            if _TELEGRAM_ALERT_CACHE.get(daily_key):
-                continue
-            daily_message = daily_candidate.get("message")
-            if isinstance(daily_message, str) and daily_message.strip() and send_telegram_alert(daily_message):
-                _TELEGRAM_ALERT_CACHE.set(daily_key, True, ttl_seconds=26 * 60 * 60)
-                sent += 1
-                daily_pick_sent += 1
-                sent_candidates.append(daily_candidate)
-                _record_telegram_alert_history(daily_candidate, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=True)
-        else:
-            if not daily_pick_sent:
-                daily_summary = _build_daily_summary_message(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
-                daily_message = daily_summary.get("message") if isinstance(daily_summary, dict) else None
-                daily_key = daily_summary.get("cache_key") if isinstance(daily_summary, dict) else None
-                if (
-                    isinstance(daily_summary, dict)
-                    and isinstance(daily_key, str)
-                    and daily_key.strip()
-                    and not _TELEGRAM_ALERT_CACHE.get(daily_key)
-                    and isinstance(daily_message, str)
-                    and daily_message.strip()
-                    and send_telegram_alert(daily_message)
-                ):
-                    _TELEGRAM_ALERT_CACHE.set(daily_key, True, ttl_seconds=26 * 60 * 60)
-                    sent += 1
-                    daily_summary_sent = 1
-                    _record_telegram_alert_history(daily_summary, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=False)
-                elif not daily_summary_sent:
-                    logger.info("Daily Best Pick window active but no directional candidate or summary was sent")
-    logger.info(
-        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
-        sent,
-        len(candidates),
-        daily_pick_sent,
-        daily_summary_sent,
-        dropped_by_cache,
-        dropped_by_symbol_cap,
-        dropped_by_run_cap,
-        json.dumps(quality_drop_counts, ensure_ascii=False),
-        min_conf,
-        dynamic_min_conf,
+    return _alerts_pipeline_notify_telegram_from_results(
+        results,
+        config=config,
+        helpers=_pipeline_module_helpers(),
+        get_now=get_thai_now,
+        logger=logger,
     )
-    
-    # Track win rate metrics for sent alerts
-    if sent_candidates:
-        _track_alert_performance(sent_candidates, len(sent_candidates))
-
-    _record_telegram_run_report(
-        results=results,
-        kill=kill,
-        kill_reason=reason,
-        min_conf=min_conf,
-        dynamic_min_conf=dynamic_min_conf,
-        candidates=candidates,
-        sent_candidates=sent_candidates,
-        daily_pick_sent=daily_pick_sent,
-        daily_summary_sent=daily_summary_sent,
-        dropped_by_cache=dropped_by_cache,
-        dropped_by_symbol_cap=dropped_by_symbol_cap,
-        dropped_by_run_cap=dropped_by_run_cap,
-        quality_drop_counts=quality_drop_counts,
-    )
-
-    return sent
 
 
 def _track_alert_performance(candidates, sent_count):
@@ -4310,59 +3577,19 @@ def _track_alert_performance(candidates, sent_count):
 
 
 def _get_thread_curl_session():
-    sess = getattr(_THREAD_LOCAL, "curl_session", None)
-    if sess is None:
-        sess = _create_curl_session()
-        _THREAD_LOCAL.curl_session = sess
-    return sess
+    return _data_get_thread_curl_session(config=config, logger=logger)
+
+
+def _set_thread_curl_session(session):
+    return _data_set_thread_curl_session(session)
 
 
 def _normalize_df_index(df):
-    if df is None or getattr(df, "empty", True):
-        return df
-    if isinstance(df.index, pd.DatetimeIndex):
-        try:
-            if df.index.tz is not None:
-                # Convert to Thai time (UTC+7) before making naive
-                df.index = df.index.tz_convert(pytz.timezone('Asia/Bangkok'))
-            df.index = df.index.tz_localize(None)
-        except Exception:
-            pass
-    return df
+    return _data_normalize_df_index(df)
 
 
 def _normalize_price_columns(df, symbol=None):
-    if df is None or getattr(df, "empty", True):
-        return df
-    cols = getattr(df, "columns", None)
-    if isinstance(cols, pd.MultiIndex):
-        # yfinance.download may return MultiIndex columns (Price, Ticker).
-        # For this app we analyze a single symbol per fetch, so flatten to OHLCV.
-        try:
-            df = df.copy()
-            if len(cols.levels) >= 2:
-                lvl0 = [str(x) for x in cols.get_level_values(0)]
-                lvl1 = [str(x) for x in cols.get_level_values(1)]
-                sym = normalize_symbol(symbol)
-                if sym and sym in set(lvl1):
-                    keep = [i for i, t in enumerate(lvl1) if t == sym]
-                    if keep:
-                        df = df.iloc[:, keep]
-                        lvl0 = [lvl0[i] for i in keep]
-                df.columns = pd.Index(lvl0)
-        except Exception:
-            pass
-    if not isinstance(df.columns, pd.Index):
-        return df
-    seen = set()
-    keep_cols = []
-    for name in ("Open", "High", "Low", "Close", "Volume"):
-        if name in df.columns and name not in seen:
-            keep_cols.append(name)
-            seen.add(name)
-    if keep_cols:
-        return df[keep_cols].copy()
-    return df
+    return _data_normalize_price_columns(df, symbol=symbol, normalize_symbol_fn=normalize_symbol)
 
 
 def _history_store_enabled():
@@ -4481,106 +3708,26 @@ def _alert_history_export_csv_enabled():
 
 
 def _alert_history_csv_fieldnames():
-    return [
-        "timestamp",
-        "strategy",
-        "symbol",
-        "signal",
-        "confidence",
-        "score",
-        "daily_pick",
-        "source_label",
-        "strategy_label",
-        "entry_price",
-        "stop_loss",
-        "take_profit",
-        "risk_reward",
-        "detected_pattern",
-        "forecast_direction",
-        "plan_reason",
-        "min_confidence",
-        "dynamic_min_confidence",
-        "backtest_win_rate_pct",
-        "backtest_expectancy_rr",
-        "backtest_trades",
-        "cache_key",
-        "message_plain",
-    ]
+    return _alerts_reporting_alert_history_csv_fieldnames()
 
 
 def _sync_alert_history_csv_locked():
-    if not _alert_history_export_csv_enabled():
-        return
-    jsonl_path = _alert_history_file_path()
-    csv_path = _alert_history_csv_path()
-    rows = []
-    if os.path.exists(jsonl_path):
-        try:
-            with open(jsonl_path, "r", encoding="utf-8") as f:
-                for raw_line in f:
-                    line = str(raw_line or "").strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except Exception:
-                        continue
-                    if isinstance(row, dict):
-                        rows.append(row)
-        except Exception:
-            return
-    fieldnames = _alert_history_csv_fieldnames()
-    try:
-        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            for row in rows:
-                writer.writerow({key: row.get(key) for key in fieldnames})
-    except Exception:
-        return
+    return _alerts_reporting_sync_alert_history_csv_locked(
+        export_enabled=_alert_history_export_csv_enabled(),
+        jsonl_path=_alert_history_file_path(),
+        csv_path=_alert_history_csv_path(),
+    )
 
 
 def _candidate_message_preview(candidate):
-    message = str((candidate or {}).get("message_plain") or (candidate or {}).get("message") or "").strip()
-    if not message:
-        return None
-    message = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", message)).strip()
-    if len(message) > 220:
-        message = message[:217].rstrip() + "..."
-    return message
+    return _alerts_reporting_candidate_message_preview(candidate)
 
 
 def _candidate_ops_snapshot(candidate):
-    if not isinstance(candidate, dict):
-        return {}
-    plan = candidate.get("plan")
-    entry_price = _pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
-    stop_loss = _pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
-    take_profit = _pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
-    snapshot = _candidate_backtest_snapshot(candidate)
-    return {
-        "strategy": str(candidate.get("strategy") or "UNKNOWN").strip().upper(),
-        "symbol": normalize_symbol(candidate.get("symbol") or ""),
-        "signal": str(candidate.get("signal") or "").strip().upper(),
-        "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
-        "score": float(candidate.get("score")) if isinstance(candidate.get("score"), (int, float)) else None,
-        "source_label": _get_plan_label(plan, None) if isinstance(plan, dict) else None,
-        "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
-        "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
-        "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
-        "risk_reward": float(plan.get("risk_reward")) if isinstance(plan, dict) and isinstance(plan.get("risk_reward"), (int, float)) else None,
-        "detected_pattern": str(plan.get("detected_pattern") or "").strip() if isinstance(plan, dict) else None,
-        "forecast_direction": str(
-            plan.get("forecast_direction")
-            or (((candidate.get("item") or {}).get("price_forecast") or {}).get("direction") if isinstance(candidate.get("item"), dict) else "")
-            or ""
-        ).strip().upper() or None,
-        "plan_reason": str(plan.get("reason") or "").strip() if isinstance(plan, dict) else None,
-        "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
-        "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
-        "backtest_trades": snapshot.get("trades"),
-        "message_preview": _candidate_message_preview(candidate),
-    }
+    return _alerts_reporting_candidate_ops_snapshot(
+        candidate,
+        helpers=_reporting_module_helpers(),
+    )
 
 
 def _record_telegram_run_report(
@@ -4598,726 +3745,212 @@ def _record_telegram_run_report(
     dropped_by_run_cap,
     quality_drop_counts,
 ):
-    if not _alert_run_report_enabled():
-        return
-    top_n = getattr(config, "TELEGRAM_ALERT_RUN_REPORT_TOP_CANDIDATES", 5)
-    max_rows = getattr(config, "TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS", 500)
-    try:
-        top_n = max(1, int(top_n))
-    except Exception:
-        top_n = 5
-    try:
-        max_rows = int(max_rows)
-    except Exception:
-        max_rows = 500
-    valid_results = [row for row in (results or []) if isinstance(row, dict) and not row.get("error")]
-    by_symbol_signal = Counter()
-    for row in valid_results:
-        symbol = normalize_symbol(row.get("symbol") or "")
-        signal = str(row.get("signal") or "").strip().upper() or "UNKNOWN"
-        if symbol:
-            by_symbol_signal[f"{symbol}|{signal}"] += 1
-    report = {
-        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "result_count": len(results or []),
-        "valid_symbol_count": len(valid_results),
-        "kill_switch_active": bool(kill),
-        "kill_switch_reason": str(kill_reason or "") if kill else None,
-        "min_confidence": float(min_conf) if isinstance(min_conf, (int, float)) else None,
-        "dynamic_min_confidence": float(dynamic_min_conf) if isinstance(dynamic_min_conf, (int, float)) else None,
-        "candidate_count": len(candidates or []),
-        "sent_count": len(sent_candidates or []),
-        "daily_pick_sent": int(daily_pick_sent or 0),
-        "daily_summary_sent": int(daily_summary_sent or 0),
-        "dropped_by_cache": int(dropped_by_cache or 0),
-        "dropped_by_symbol_cap": int(dropped_by_symbol_cap or 0),
-        "dropped_by_run_cap": int(dropped_by_run_cap or 0),
-        "quality_drop_counts": dict(quality_drop_counts or {}),
-        "symbol_signal_mix": dict(by_symbol_signal),
-        "top_candidates": [_candidate_ops_snapshot(row) for row in (candidates or [])[:top_n]],
-        "sent_candidates": [_candidate_ops_snapshot(row) for row in (sent_candidates or [])],
-    }
-    latest_path = _alert_run_report_file_path()
-    log_path = _alert_run_report_log_path()
-    try:
-        with _ALERT_HISTORY_LOCK:
-            _sync_alert_history_csv_locked()
-            with open(latest_path, "w", encoding="utf-8") as f:
-                json.dump(report, f, ensure_ascii=False, indent=2)
-            with open(log_path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(report, ensure_ascii=False) + "\n")
-            _alert_history_trim_locked(log_path, max_rows=max_rows)
-    except Exception:
-        return
+    return _alerts_reporting_record_telegram_run_report(
+        results=results,
+        kill=kill,
+        kill_reason=kill_reason,
+        min_conf=min_conf,
+        dynamic_min_conf=dynamic_min_conf,
+        candidates=candidates,
+        sent_candidates=sent_candidates,
+        daily_pick_sent=daily_pick_sent,
+        daily_summary_sent=daily_summary_sent,
+        dropped_by_cache=dropped_by_cache,
+        dropped_by_symbol_cap=dropped_by_symbol_cap,
+        dropped_by_run_cap=dropped_by_run_cap,
+        quality_drop_counts=quality_drop_counts,
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
 
 
 def _read_latest_telegram_run_report():
-    path = _alert_run_report_file_path()
-    if not os.path.exists(path):
-        return None
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        return payload if isinstance(payload, dict) else None
-    except Exception:
-        return None
+    return _alerts_reporting_read_latest_telegram_run_report(_alert_run_report_file_path())
 
 
 def _alert_history_trim_locked(path, max_rows):
-    try:
-        max_rows = int(max_rows)
-    except Exception:
-        max_rows = 0
-    if max_rows < 1 or not os.path.exists(path):
-        return
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        if len(lines) <= max_rows:
-            return
-        with open(path, "w", encoding="utf-8") as f:
-            f.writelines(lines[-max_rows:])
-    except Exception:
-        return
+    return _alerts_reporting_alert_history_trim_locked(path, max_rows)
 
 
 def _candidate_backtest_snapshot(candidate):
-    if not isinstance(candidate, dict):
-        return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
-    return _candidate_edge_metrics(candidate)
+    return _alerts_reporting_candidate_backtest_snapshot(
+        candidate,
+        candidate_edge_metrics=_candidate_edge_metrics,
+    )
 
 
 def _record_telegram_alert_history(candidate, min_conf=None, dynamic_min_conf=None, daily_pick=False):
-    if not _alert_history_enabled() or not isinstance(candidate, dict):
-        return
-    message = str(candidate.get("message") or "").strip()
-    if not message:
-        return
-    snapshot = _candidate_backtest_snapshot(candidate)
-    plan = candidate.get("plan")
-    entry_price = _pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
-    stop_loss = _pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
-    take_profit = _pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
-    entry = {
-        "timestamp": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "strategy": str(candidate.get("strategy") or "UNKNOWN").strip().upper(),
-        "symbol": normalize_symbol(candidate.get("symbol") or ""),
-        "signal": str(candidate.get("signal") or "").strip().upper(),
-        "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
-        "score": float(candidate.get("score")) if isinstance(candidate.get("score"), (int, float)) else None,
-        "daily_pick": bool(daily_pick),
-        "message": message,
-        "message_plain": re.sub(r"<[^>]+>", "", message).strip(),
-        "cache_key": str(candidate.get("cache_key") or "").strip(),
-        "min_confidence": float(min_conf) if isinstance(min_conf, (int, float)) else None,
-        "dynamic_min_confidence": float(dynamic_min_conf) if isinstance(dynamic_min_conf, (int, float)) else None,
-        "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
-        "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
-        "backtest_trades": snapshot.get("trades"),
-        "strategy_label": str(candidate.get("strategy_label") or "").strip() or None,
-        "source_label": _get_plan_label(plan, None) if isinstance(plan, dict) else None,
-        "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
-        "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
-        "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
-        "risk_reward": float(plan.get("risk_reward")) if isinstance(plan, dict) and isinstance(plan.get("risk_reward"), (int, float)) else None,
-        "detected_pattern": str(plan.get("detected_pattern") or "").strip() if isinstance(plan, dict) else None,
-        "forecast_direction": str(plan.get("forecast_direction") or "").strip().upper() if isinstance(plan, dict) and str(plan.get("forecast_direction") or "").strip() else None,
-        "plan_reason": str(plan.get("reason") or "").strip() if isinstance(plan, dict) else None,
-    }
-    path = _alert_history_file_path()
-    max_rows = getattr(config, "TELEGRAM_ALERT_HISTORY_MAX_ROWS", 5000)
-    try:
-        max_rows = int(max_rows)
-    except Exception:
-        max_rows = 5000
-    try:
-        with _ALERT_HISTORY_LOCK:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            _alert_history_trim_locked(path, max_rows=max_rows)
-            _sync_alert_history_csv_locked()
-    except Exception:
-        return
+    return _alerts_reporting_record_telegram_alert_history(
+        candidate,
+        min_conf=min_conf,
+        dynamic_min_conf=dynamic_min_conf,
+        daily_pick=daily_pick,
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
 
 
 def _read_telegram_alert_history(days=None, strategies=None, symbols=None):
-    path = _alert_history_file_path()
-    if not os.path.exists(path):
-        return []
-    strategy_filter = {str(v or "").strip().upper() for v in (strategies or []) if str(v or "").strip()}
-    symbol_filter = {normalize_symbol(v) for v in (symbols or []) if normalize_symbol(v)}
-    cutoff = None
-    if isinstance(days, (int, float)) and float(days) > 0:
-        cutoff = get_thai_now() - timedelta(days=float(days))
-    entries = []
-    try:
-        with _ALERT_HISTORY_LOCK:
-            with open(path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-    except Exception:
-        return []
-    for raw_line in lines:
-        line = str(raw_line or "").strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except Exception:
-            continue
-        if not isinstance(row, dict):
-            continue
-        strategy = str(row.get("strategy") or "").strip().upper()
-        symbol = normalize_symbol(row.get("symbol") or "")
-        if strategy_filter and strategy not in strategy_filter:
-            continue
-        if symbol_filter and symbol not in symbol_filter:
-            continue
-        ts_text = str(row.get("timestamp") or "").strip()
-        ts_value = None
-        if ts_text:
-            try:
-                ts_value = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
-            except Exception:
-                ts_value = None
-        if cutoff is not None and isinstance(ts_value, datetime) and ts_value < cutoff:
-            continue
-        row["_timestamp_obj"] = ts_value
-        row["strategy"] = strategy
-        row["symbol"] = symbol
-        entries.append(row)
-    entries.sort(key=lambda row: row.get("_timestamp_obj") or datetime.min, reverse=True)
-    return entries
+    return _alerts_reporting_read_telegram_alert_history(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
 
 
 def _build_telegram_alert_report(days=30, strategies=None, symbols=None, limit_examples_per_strategy=1):
-    entries = _read_telegram_alert_history(days=days, strategies=strategies, symbols=symbols)
-    try:
-        days_value = float(days) if days is not None else None
-    except Exception:
-        days_value = None
-    try:
-        limit_examples_per_strategy = max(1, int(limit_examples_per_strategy))
-    except Exception:
-        limit_examples_per_strategy = 1
-    if not entries:
-        table = []
-        for strategy in _TELEGRAM_REPORT_STRATEGY_ORDER:
-            table.append(
-                {
-                    "strategy": strategy,
-                    "alert_count": 0,
-                    "share_pct": 0.0,
-                    "unique_symbols": 0,
-                    "avg_confidence": None,
-                    "avg_backtest_win_rate_pct": None,
-                    "avg_backtest_expectancy_rr": None,
-                    "avg_backtest_trades": None,
-                    "signals": {},
-                    "latest_alert_at": None,
-                    "examples": [],
-                }
-            )
-        return {
-            "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-            "window_days": days_value,
-            "total_alerts": 0,
-            "alerts_per_day_avg": 0.0 if isinstance(days_value, (int, float)) and days_value > 0 else None,
-            "unique_symbols": 0,
-            "count_by_strategy": {},
-            "table": table,
-            "examples_by_strategy": {},
-        }
-
-    by_strategy = {}
-    unique_symbols = set()
-    for entry in entries:
-        strategy = str(entry.get("strategy") or "UNKNOWN").strip().upper()
-        symbol = normalize_symbol(entry.get("symbol") or "")
-        unique_symbols.add(symbol)
-        bucket = by_strategy.setdefault(
-            strategy,
-            {
-                "count": 0,
-                "confidence_sum": 0.0,
-                "confidence_count": 0,
-                "wr_sum": 0.0,
-                "wr_count": 0,
-                "exp_sum": 0.0,
-                "exp_count": 0,
-                "trades_sum": 0.0,
-                "trades_count": 0,
-                "signals": Counter(),
-                "symbols": set(),
-                "latest_alert_at": None,
-                "examples": [],
-            },
-        )
-        bucket["count"] += 1
-        bucket["signals"][str(entry.get("signal") or "WAIT")] += 1
-        if symbol:
-            bucket["symbols"].add(symbol)
-        ts_text = str(entry.get("timestamp") or "").strip() or None
-        if bucket["latest_alert_at"] is None and ts_text:
-            bucket["latest_alert_at"] = ts_text
-        confidence = entry.get("confidence")
-        if isinstance(confidence, (int, float)):
-            bucket["confidence_sum"] += float(confidence)
-            bucket["confidence_count"] += 1
-        win_rate = entry.get("backtest_win_rate_pct")
-        if isinstance(win_rate, (int, float)):
-            bucket["wr_sum"] += float(win_rate)
-            bucket["wr_count"] += 1
-        expectancy = entry.get("backtest_expectancy_rr")
-        if isinstance(expectancy, (int, float)):
-            bucket["exp_sum"] += float(expectancy)
-            bucket["exp_count"] += 1
-        trades = entry.get("backtest_trades")
-        if isinstance(trades, (int, float)):
-            bucket["trades_sum"] += float(trades)
-            bucket["trades_count"] += 1
-        if len(bucket["examples"]) < limit_examples_per_strategy:
-            bucket["examples"].append(
-                {
-                    "timestamp": ts_text,
-                    "symbol": symbol,
-                    "signal": str(entry.get("signal") or "WAIT"),
-                    "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
-                    "message": str(entry.get("message") or ""),
-                    "message_plain": str(entry.get("message_plain") or ""),
-                }
-            )
-
-    total_alerts = len(entries)
-    count_by_strategy = {strategy: int(bucket["count"]) for strategy, bucket in by_strategy.items()}
-    ordered_keys = list(_TELEGRAM_REPORT_STRATEGY_ORDER) + sorted(
-        [key for key in by_strategy.keys() if key not in _TELEGRAM_REPORT_STRATEGY_ORDER]
+    return _alerts_reporting_build_telegram_alert_report(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        limit_examples_per_strategy=limit_examples_per_strategy,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+        history_lock=_ALERT_HISTORY_LOCK,
     )
-    table = []
-    examples_by_strategy = {}
-    for strategy in ordered_keys:
-        bucket = by_strategy.get(strategy)
-        if not bucket:
-            table.append(
-                {
-                    "strategy": strategy,
-                    "alert_count": 0,
-                    "share_pct": 0.0,
-                    "unique_symbols": 0,
-                    "avg_confidence": None,
-                    "avg_backtest_win_rate_pct": None,
-                    "avg_backtest_expectancy_rr": None,
-                    "avg_backtest_trades": None,
-                    "signals": {},
-                    "latest_alert_at": None,
-                    "examples": [],
-                }
-            )
-            continue
-        avg_conf = (bucket["confidence_sum"] / bucket["confidence_count"]) if bucket["confidence_count"] > 0 else None
-        avg_wr = (bucket["wr_sum"] / bucket["wr_count"]) if bucket["wr_count"] > 0 else None
-        avg_exp = (bucket["exp_sum"] / bucket["exp_count"]) if bucket["exp_count"] > 0 else None
-        avg_trades = (bucket["trades_sum"] / bucket["trades_count"]) if bucket["trades_count"] > 0 else None
-        row = {
-            "strategy": strategy,
-            "alert_count": int(bucket["count"]),
-            "share_pct": (float(bucket["count"]) / float(total_alerts) * 100.0) if total_alerts > 0 else 0.0,
-            "unique_symbols": len(bucket["symbols"]),
-            "avg_confidence": avg_conf,
-            "avg_backtest_win_rate_pct": avg_wr,
-            "avg_backtest_expectancy_rr": avg_exp,
-            "avg_backtest_trades": avg_trades,
-            "signals": dict(bucket["signals"]),
-            "latest_alert_at": bucket["latest_alert_at"],
-            "examples": bucket["examples"],
-        }
-        table.append(row)
-        examples_by_strategy[strategy] = bucket["examples"]
-    alerts_per_day_avg = None
-    if isinstance(days_value, (int, float)) and days_value > 0:
-        alerts_per_day_avg = float(total_alerts) / float(days_value)
-    return {
-        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "window_days": days_value,
-        "total_alerts": int(total_alerts),
-        "alerts_per_day_avg": alerts_per_day_avg,
-        "unique_symbols": len([s for s in unique_symbols if s]),
-        "count_by_strategy": count_by_strategy,
-        "table": table,
-        "examples_by_strategy": examples_by_strategy,
-    }
 
 
 def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1):
-    try:
-        limit_examples_per_strategy = max(1, int(limit_examples_per_strategy))
-    except Exception:
-        limit_examples_per_strategy = 1
-    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 72.0)
-    try:
-        min_conf = float(min_conf)
-    except Exception:
-        min_conf = 72.0
-    kill, reason = _telegram_kill_switch_state(results)
-    dynamic_min_conf = _telegram_dynamic_conf_threshold(min_conf, results)
-    candidates = []
-    build_stats = {}
-    if not kill:
-        candidates, build_stats = _build_telegram_candidates(results, dynamic_min_conf)
-    daily_candidates = _build_daily_best_pick_candidates(results)
-    for row in daily_candidates:
-        if isinstance(row, dict):
-            row = row.setdefault("cache_key", f"PREVIEW|{row.get('strategy')}|{row.get('symbol')}|{row.get('signal')}")
-    combined = [row for row in candidates if isinstance(row, dict)] + [row for row in daily_candidates if isinstance(row, dict)]
-    combined.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
-    by_strategy = Counter()
-    examples_by_strategy = {}
-    for candidate in combined:
-        strategy = str(candidate.get("strategy") or "UNKNOWN").strip().upper()
-        by_strategy[strategy] += 1
-        bucket = examples_by_strategy.setdefault(strategy, [])
-        if len(bucket) >= limit_examples_per_strategy:
-            continue
-        snapshot = _candidate_backtest_snapshot(candidate)
-        bucket.append(
-            {
-                "symbol": normalize_symbol(candidate.get("symbol") or ""),
-                "signal": str(candidate.get("signal") or "").strip().upper(),
-                "confidence": float(candidate.get("confidence")) if isinstance(candidate.get("confidence"), (int, float)) else None,
-                "message": str(candidate.get("message") or ""),
-                "backtest_win_rate_pct": snapshot.get("win_rate_pct"),
-                "backtest_expectancy_rr": snapshot.get("expectancy_rr"),
-                "backtest_trades": snapshot.get("trades"),
-            }
-        )
-    table = []
-    ordered_keys = list(_TELEGRAM_REPORT_STRATEGY_ORDER) + sorted([k for k in by_strategy.keys() if k not in _TELEGRAM_REPORT_STRATEGY_ORDER])
-    for strategy in ordered_keys:
-        table.append(
-            {
-                "strategy": strategy,
-                "candidate_count": int(by_strategy.get(strategy, 0)),
-                "examples": examples_by_strategy.get(strategy, []),
-            }
-        )
-    quality_drop_counts = build_stats.get("quality_drop_counts") if isinstance(build_stats, dict) else {}
+    return _alerts_reporting_build_telegram_alert_live_preview(
+        results,
+        limit_examples_per_strategy=limit_examples_per_strategy,
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+    )
+
+
+def _reporting_module_helpers():
     return {
-        "generated_at": get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "kill_switch_active": bool(kill),
-        "kill_switch_reason": str(reason or "") if kill else None,
-        "min_confidence": float(min_conf),
-        "dynamic_min_confidence": float(dynamic_min_conf),
-        "candidate_count": len(combined),
-        "count_by_strategy": dict(by_strategy),
-        "quality_drop_counts": quality_drop_counts or {},
-        "table": table,
-        "examples_by_strategy": examples_by_strategy,
+        "alert_run_report_enabled": _alert_run_report_enabled,
+        "alert_run_report_file_path": _alert_run_report_file_path,
+        "alert_run_report_log_path": _alert_run_report_log_path,
+        "alert_history_enabled": _alert_history_enabled,
+        "alert_history_file_path": _alert_history_file_path,
+        "alert_history_csv_path": _alert_history_csv_path,
+        "normalize_symbol": normalize_symbol,
+        "pick_plan_value": _pick_plan_value,
+        "candidate_backtest_snapshot": _candidate_backtest_snapshot,
+        "candidate_alert_profile": _candidate_alert_profile,
+        "candidate_mode_label": _candidate_mode_label,
+        "get_plan_label": _get_plan_label,
+        "candidate_message_preview": _candidate_message_preview,
+        "sync_alert_history_csv_locked": _sync_alert_history_csv_locked,
+        "alert_history_trim_locked": _alert_history_trim_locked,
+        "timedelta": timedelta,
+        "read_telegram_alert_history": _read_telegram_alert_history,
+        "telegram_kill_switch_state": _telegram_kill_switch_state,
+        "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
+        "build_telegram_candidates": _build_telegram_candidates,
+        "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
     }
+
+
+def _write_verify_output(output_path, payload):
+    return _alerts_reporting_write_verify_output(
+        output_path,
+        results=payload.get("results"),
+        request_meta=payload.get("request"),
+        summary=payload.get("summary"),
+        telegram_alerts=payload.get("telegram_alerts"),
+        all_weather=payload.get("all_weather"),
+        backtest_rules=payload.get("backtest_rules"),
+        health=payload.get("health"),
+        latest_run=payload.get("latest_run"),
+        live_preview=payload.get("live_preview"),
+        include_results=bool(payload.get("include_results")),
+        clean_json_value=_clean_json_value,
+    )
+
+
+def _data_source_health_snapshot():
+    return _data_build_source_health_snapshot(config=config)
 
 
 def _period_to_timedelta(period):
-    text = str(period or "").strip().lower()
-    if not text:
-        return None
-    if text == "ytd":
-        now = get_thai_now()
-        return now - datetime(now.year, 1, 1)
-    m = re.match(r"^(\d+)(m|mo|h|d|wk|w|y)$", text)
-    if not m:
-        return None
-    value = int(m.group(1))
-    unit = m.group(2)
-    if unit == "h":
-        return timedelta(hours=value)
-    if unit == "d":
-        return timedelta(days=value)
-    if unit in ("w", "wk"):
-        return timedelta(weeks=value)
-    if unit in ("m", "mo"):
-        return timedelta(days=value * 30)
-    if unit == "y":
-        return timedelta(days=value * 365)
-    return None
+    return _data_period_to_timedelta(period, now_getter=get_thai_now)
 
 
 def _slice_history_by_period(df, period):
-    if df is None or getattr(df, "empty", True):
-        return df
-    delta = _period_to_timedelta(period)
-    if delta is None:
-        return df.copy()
-    end_ts = df.index.max()
-    if pd.isna(end_ts):
-        return df.copy()
-    cutoff = end_ts - delta
-    sliced = df[df.index >= cutoff].copy()
-    return sliced if not sliced.empty else df.copy()
+    return _data_slice_history_by_period(df, period, now_getter=get_thai_now)
 
 
 def _remote_history_period(period, interval):
-    text = str(period or "").strip().lower()
-    if not text:
-        return period
-    delta = _period_to_timedelta(text)
-    intraday = str(interval or "").strip().lower() in {"1m", "2m", "5m", "15m", "30m", "60m", "90m", "1h"}
-    if intraday and isinstance(delta, timedelta) and delta > timedelta(days=60):
-        return "60d"
-    return period
+    return _data_remote_history_period(period, interval, now_getter=get_thai_now)
 
 
 def _chart_interval(interval):
-    text = str(interval or "").strip().lower()
-    if text == "1h":
-        return "60m"
-    return text or "1d"
+    return _data_chart_interval(interval)
 
 
 def _prefer_chart_api():
-    if bool(getattr(config, "YF_PREFER_CHART_API", False)):
-        return True
-    return str(os.environ.get("GITHUB_ACTIONS", "")).strip().lower() == "true"
+    return _data_prefer_chart_api(config=config, environ=os.environ)
 
 
 def _fetch_yahoo_chart_history(symbol, period, interval=None, auto_adjust=True):
-    sym = normalize_symbol(symbol)
-    if not sym:
-        return None
-    session = _get_thread_curl_session()
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
-    params = {
-        "range": str(period or "1mo"),
-        "interval": _chart_interval(interval),
-        "includePrePost": "false",
-        "events": "div,splits,capitalGains",
-    }
-    response = session.get(url, params=params, timeout=20)
-    status_code = int(getattr(response, "status_code", 0))
-    if status_code >= 400:
-        raise RuntimeError(f"Yahoo chart API HTTP {status_code} for {sym}")
-    payload = response.json()
-    chart = ((payload or {}).get("chart") or {})
-    error = chart.get("error")
-    if error:
-        raise RuntimeError(f"Yahoo chart API error for {sym}: {error}")
-    results = chart.get("result") or []
-    if not results:
-        return None
-    result = results[0] or {}
-    timestamps = result.get("timestamp") or []
-    indicators = result.get("indicators") or {}
-    quote_list = indicators.get("quote") or []
-    if not timestamps or not quote_list:
-        return None
-    quote = quote_list[0] or {}
-    df = pd.DataFrame(
-        {
-            "Open": quote.get("open") or [],
-            "High": quote.get("high") or [],
-            "Low": quote.get("low") or [],
-            "Close": quote.get("close") or [],
-            "Volume": quote.get("volume") or [],
+    return _data_fetch_yahoo_chart_history(
+        symbol,
+        period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        config=config,
+        logger=logger,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+            "get_thread_curl_session": _get_thread_curl_session,
+            "normalize_df_index": _normalize_df_index,
         },
-        index=pd.to_datetime(timestamps, unit="s", utc=True),
     )
-    if auto_adjust:
-        adjclose_list = indicators.get("adjclose") or []
-        if adjclose_list:
-            adjclose = adjclose_list[0].get("adjclose") or []
-            if len(adjclose) == len(df.index):
-                raw_close = pd.to_numeric(df["Close"], errors="coerce")
-                adj_close = pd.to_numeric(pd.Series(adjclose, index=df.index), errors="coerce")
-                with np.errstate(divide="ignore", invalid="ignore"):
-                    ratio = adj_close / raw_close.replace(0, np.nan)
-                ratio = ratio.replace([np.inf, -np.inf], np.nan)
-                for col in ("Open", "High", "Low", "Close"):
-                    series = pd.to_numeric(df[col], errors="coerce")
-                    df[col] = series * ratio.fillna(1.0)
-    df = df.dropna(subset=["Open", "High", "Low", "Close"], how="all")
-    if df.empty:
-        return None
-    return _normalize_df_index(df)
 
 
 def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
-    sym = normalize_symbol(symbol)
-    if not sym:
-        return None
-    key = ("hist", sym, str(period or ""), str(interval or ""), bool(auto_adjust))
-    cached = _YF_CACHE.get(key)
-    if cached is _YF_EMPTY_SENTINEL:
-        return None
-    if isinstance(cached, pd.DataFrame) and not cached.empty:
-        return cached.copy()
-    disk_df = None
-    if interval:
-        disk_df = _history_store_read(sym, interval=interval, auto_adjust=auto_adjust)
-    _configure_yf_tz_cache()
-    remote_period = _remote_history_period(period, interval)
-    if _prefer_chart_api():
-        try:
-            df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                df = _normalize_price_columns(df, sym)
-                if interval:
-                    merged_df = _history_store_merge(disk_df, df, symbol=sym)
-                    if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
-                        df = merged_df
-                        _history_store_write(sym, interval, auto_adjust, merged_df)
-                sliced_df = _slice_history_by_period(df, period)
-                _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
-                return sliced_df.copy()
-        except Exception as e:
-            logger.warning("Preferred Yahoo chart API fetch failed for %s: %s", sym, e)
-    auth_error_seen = False
-    for attempt in range(3):
-        try:
-            session = _get_thread_curl_session()
-            ticker = yf.Ticker(sym, session=session)
-            if interval:
-                df = ticker.history(period=remote_period, interval=interval, auto_adjust=auto_adjust)
-            else:
-                df = ticker.history(period=remote_period, auto_adjust=auto_adjust)
-            if df is None or df.empty:
-                # Fallback: yfinance Ticker.history may sporadically return empty.
-                dl_kwargs = {
-                    "period": remote_period,
-                    "auto_adjust": auto_adjust,
-                    "progress": False,
-                    "threads": False,
-                    "session": session,
-                }
-                if interval:
-                    dl_kwargs["interval"] = interval
-                try:
-                    df = yf.download(sym, **dl_kwargs)
-                except Exception as dl_e:
-                    dl_msg = str(dl_e).lower()
-                    if attempt < 2 and _is_yf_auth_error(dl_msg):
-                        auth_error_seen = True
-                        logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, dl_e)
-                        _clear_yf_runtime_cache(clear_tz_cache=True)
-                        continue
-                    if "certificate verify locations" in dl_msg or "curl: (77)" in dl_msg:
-                        try:
-                            insecure_session = curl_requests.Session(
-                                verify=False,
-                                impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
-                            )
-                            _THREAD_LOCAL.curl_session = insecure_session
-                            dl_kwargs["session"] = insecure_session
-                            df = yf.download(sym, **dl_kwargs)
-                        except Exception:
-                            df = None
-                    else:
-                        df = None
-                if df is None or df.empty:
-                    # Some SSL failures in yfinance return empty data instead of raising.
-                    try:
-                        insecure_session = curl_requests.Session(
-                            verify=False,
-                            impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
-                        )
-                        _THREAD_LOCAL.curl_session = insecure_session
-                        dl_kwargs["session"] = insecure_session
-                        df = yf.download(sym, **dl_kwargs)
-                    except Exception:
-                        df = None
-                if df is None or df.empty:
-                    if auth_error_seen:
-                        try:
-                            df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
-                        except Exception as chart_e:
-                            logger.warning("Yahoo chart API fallback failed for %s: %s", sym, chart_e)
-                    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-                        sliced_disk = _slice_history_by_period(disk_df, period)
-                        _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-                        return sliced_disk.copy()
-                    _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
-                    return None
-            df = _normalize_df_index(df)
-            df = _normalize_price_columns(df, sym)
-            if interval:
-                merged_df = _history_store_merge(disk_df, df, symbol=sym)
-                if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
-                    df = merged_df
-                    _history_store_write(sym, interval, auto_adjust, merged_df)
-            sliced_df = _slice_history_by_period(df, period)
-            _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
-            return sliced_df.copy()
-        except Exception as e:
-            msg = str(e).lower()
-            if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
-                _configure_yf_tz_cache(force_temp=True)
-                _THREAD_LOCAL.curl_session = None
-                continue
-            if attempt < 2 and _is_yf_auth_error(msg):
-                auth_error_seen = True
-                logger.warning("Resetting yfinance cookie/session cache after auth error for %s: %s", sym, e)
-                _clear_yf_runtime_cache(clear_tz_cache=True)
-                continue
-            if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
-                _THREAD_LOCAL.curl_session = curl_requests.Session(
-                    verify=False,
-                    impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
-                )
-                continue
-            if _is_yf_auth_error(msg):
-                auth_error_seen = True
-            if auth_error_seen:
-                try:
-                    remote_period = _remote_history_period(period, interval)
-                    df = _fetch_yahoo_chart_history(sym, remote_period, interval=interval, auto_adjust=auto_adjust)
-                    if isinstance(df, pd.DataFrame) and not df.empty:
-                        df = _normalize_price_columns(df, sym)
-                        if interval:
-                            merged_df = _history_store_merge(disk_df, df, symbol=sym)
-                            if isinstance(merged_df, pd.DataFrame) and not merged_df.empty:
-                                df = merged_df
-                                _history_store_write(sym, interval, auto_adjust, merged_df)
-                        sliced_df = _slice_history_by_period(df, period)
-                        _YF_CACHE.set(key, sliced_df, ttl_seconds=cache_ttl_seconds)
-                        return sliced_df.copy()
-                except Exception as chart_e:
-                    logger.warning("Yahoo chart API fallback failed for %s: %s", sym, chart_e)
-            logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
-            if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-                sliced_disk = _slice_history_by_period(disk_df, period)
-                _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-                return sliced_disk.copy()
-            _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
-            return None
-    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-        sliced_disk = _slice_history_by_period(disk_df, period)
-        _YF_CACHE.set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-        return sliced_disk.copy()
-    _YF_CACHE.set(key, _YF_EMPTY_SENTINEL, ttl_seconds=8)
-    return None
+    return _data_get_yf_history(
+        symbol,
+        period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        cache_ttl_seconds=cache_ttl_seconds,
+        config=config,
+        logger=logger,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+            "cache_get": _YF_CACHE.get,
+            "cache_set": _YF_CACHE.set,
+            "empty_sentinel": _YF_EMPTY_SENTINEL,
+            "history_store_read": _history_store_read,
+            "history_store_merge": _history_store_merge,
+            "history_store_write": _history_store_write,
+            "configure_yf_tz_cache": _configure_yf_tz_cache,
+            "normalize_price_columns": _normalize_price_columns,
+            "normalize_df_index": _normalize_df_index,
+            "slice_history_by_period": _slice_history_by_period,
+            "remote_history_period": _remote_history_period,
+            "prefer_chart_api": _prefer_chart_api,
+            "fetch_yahoo_chart_history": _fetch_yahoo_chart_history,
+            "get_thread_curl_session": _get_thread_curl_session,
+            "is_yf_auth_error": _is_yf_auth_error,
+            "clear_yf_runtime_cache": _clear_yf_runtime_cache,
+            "set_thread_curl_session": _set_thread_curl_session,
+            "record_source_health_event": lambda *args, **kwargs: _data_record_source_health_event(*args, config=config, **kwargs),
+        },
+    )
 
 
 def _get_http_verify_setting():
-    verify = getattr(config, "HTTP_VERIFY", True)
-    if not verify:
-        return False
-    ca_bundle = getattr(config, "HTTP_CA_BUNDLE", "")
-    if isinstance(ca_bundle, str) and ca_bundle.strip():
-        bundle = ca_bundle.strip()
-        if os.path.exists(bundle):
-            return bundle
-        logger.warning("HTTP_CA_BUNDLE not found: %s; falling back to system cert store", bundle)
-    # Use system trust store by default. Passing certifi path may fail on some Windows setups.
-    return True
+    return _data_get_http_verify_setting(config=config, logger=logger)
 
 
 def _create_curl_session():
-    impersonate = getattr(config, "CURL_IMPERSONATE", "chrome110")
-    verify = _get_http_verify_setting()
-    try:
-        return curl_requests.Session(verify=verify, impersonate=impersonate)
-    except Exception as e:
-        msg = str(e).lower()
-        if "certificate verify locations" in msg or "curl: (77)" in msg:
-            logger.warning("Falling back to verify=False due to CA configuration error: %s", e)
-            return curl_requests.Session(verify=False, impersonate=impersonate)
-        raise
+    return _data_create_curl_session(config=config, logger=logger)
 
 
 def _ema_cross_15m_get_cached(symbol, profile_key="default"):
@@ -5497,6 +4130,30 @@ def _candle_based_risk(df, idx, direction, atr_value, default_stop, buffer_atr=0
     if direction == "SELL" and high_i is not None:
         return float(max(default_stop, high_i + atr_component))
     return float(default_stop)
+
+
+def _price_action_strategy_helpers():
+    return {
+        "add_price_patterns": _add_price_patterns,
+        "safe_float": _safe_float,
+        "recent_pattern_confirmation": _recent_pattern_confirmation,
+        "price_action_proxy_metrics": _price_action_proxy_metrics,
+        "candle_based_risk": _candle_based_risk,
+    }
+
+
+def _price_action_15m_plan(symbol, item, data_15m=None, data_1h=None, order_blocks=None, prediction=None, phase_status=None):
+    return _strategies_build_price_action_plan(
+        symbol,
+        item,
+        data_15m=data_15m,
+        data_1h=data_1h,
+        order_blocks=order_blocks,
+        prediction=prediction,
+        phase_status=phase_status,
+        config=config,
+        helpers=_price_action_strategy_helpers(),
+    )
 
 
 def _cdc_forecast_bias(close, fast, slow, k, d, market_top, momentum_lookback=3):
@@ -6662,16 +5319,18 @@ def get_basic_info(symbol):
             msg = str(e).lower()
             if attempt == 0 and ("disk i/o error" in msg or "operationalerror" in msg):
                 _configure_yf_tz_cache(force_temp=True)
-                _THREAD_LOCAL.curl_session = None
+                _set_thread_curl_session(None)
                 continue
             if attempt < 2 and _is_yf_auth_error(msg):
                 logger.warning("Resetting yfinance cookie/session cache after auth error for %s info: %s", sym, e)
                 _clear_yf_runtime_cache(clear_tz_cache=True)
                 continue
             if attempt == 0 and ("certificate verify locations" in msg or "curl: (77)" in msg):
-                _THREAD_LOCAL.curl_session = curl_requests.Session(
-                    verify=False,
-                    impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                _set_thread_curl_session(
+                    curl_requests.Session(
+                        verify=False,
+                        impersonate=getattr(config, "CURL_IMPERSONATE", "chrome110"),
+                    )
                 )
                 continue
             payload = {'name': sym, 'sector': 'N/A', 'market_cap': 0, 'pe_ratio': 'N/A', 'dividend_yield': 0}
@@ -9305,6 +7964,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
         ema_cross_plan = EMACross15m.analyze(symbol, data_15m=shared_15m)
         actionzone_plan = _actionzone_15m_alert(symbol, data_15m=shared_15m, data_1h=shared_1h)
         cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol, data_15m=shared_15m)
+        order_blocks_15m = _order_block_levels_15m(symbol, data_15m=shared_15m)
         exit_context = {
             "support": float(support) if pd.notna(support) else None,
             "resistance": float(resistance) if pd.notna(resistance) else None,
@@ -9353,7 +8013,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             tp_keys=["take_profit", "smc_take_profit"],
             context=exit_context,
         )
-        order_blocks_15m = _order_block_levels_15m(symbol, data_15m=shared_15m)
         prediction = build_prediction_summary(
             short_term_plan,
             sniper_plan,
@@ -9365,6 +8024,31 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             phase_status,
             crypto_reversal_plan,
             cdc_vixfix_plan,
+        )
+        price_action_plan = _price_action_15m_plan(
+            symbol,
+            {
+                "symbol": symbol,
+                "short_term_15m": short_term_plan,
+                "sniper_15m": sniper_plan,
+                "quantum_15m": quantum_plan,
+                "crypto_reversal_15m": crypto_reversal_plan,
+                "ema_cross_15m": ema_cross_plan,
+                "actionzone_15m": actionzone_plan,
+                "cdc_vixfix_15m": cdc_vixfix_plan,
+            },
+            data_15m=shared_15m,
+            data_1h=shared_1h,
+            order_blocks=order_blocks_15m,
+            prediction=prediction,
+            phase_status=phase_status,
+        )
+        price_action_plan = _attach_exit_levels(
+            price_action_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit"],
+            context=exit_context,
         )
         price_forecast = build_price_forecast(
             float(latest["Close"]) if pd.notna(latest["Close"]) else None,
@@ -9388,6 +8072,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
                 "ema_cross_15m": ema_cross_plan,
                 "actionzone_15m": actionzone_plan,
                 "cdc_vixfix_15m": cdc_vixfix_plan,
+                "price_action_15m": price_action_plan,
             }
         )
         if isinstance(all_weather_report, dict):
@@ -9411,6 +8096,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             "ema_cross_15m": ema_cross_plan,
             "actionzone_15m": actionzone_plan,
             "cdc_vixfix_15m": cdc_vixfix_plan,
+            "price_action_15m": price_action_plan,
             "order_blocks_15m": order_blocks_15m,
             "support": float(support) if pd.notna(support) else None,
             "resistance": float(resistance) if pd.notna(resistance) else None,
@@ -9432,6 +8118,7 @@ def _build_health_snapshot():
         "status": "ok",
         "server_time": get_thai_now().strftime("%Y-%m-%d %H:%M:%S (Asia/Bangkok)"),
         "warnings": _get_config_warnings(),
+        "data_sources": _data_source_health_snapshot(),
     }
 
 
@@ -9768,7 +8455,7 @@ def report_all_weather():
     }
     return jsonify(_clean_json_value(payload))
 
-def _run_once(symbols, period, notify_telegram):
+def _run_once(symbols, period, notify_telegram, verify_output=None, verify_include_results=None):
     uniq = _parse_symbols_input(symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
     if not uniq:
         return 2
@@ -9780,21 +8467,51 @@ def _run_once(symbols, period, notify_telegram):
     alert_backtest = _build_alert_backtest_summary(results)
     backtest_rules = _build_backtest_rulebook(results)
     all_weather = _build_all_weather_summary(results)
+    health_snapshot = _build_health_snapshot()
+    latest_run = _read_latest_telegram_run_report()
+    live_preview = _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1)
+    verify_request = {
+        "symbols": uniq,
+        "period": period,
+        "include_chart_data": False,
+        "notify_telegram": bool(notify_telegram),
+    }
+    verify_summary = _build_analysis_summary(results, requested_symbols=len(uniq), period=period)
+    if verify_include_results is None:
+        verify_include_results = bool(getattr(config, "VERIFY_INCLUDE_RESULTS", False))
+    verify_path = str(verify_output or getattr(config, "VERIFY_OUTPUT_PATH", "") or "").strip()
+    if verify_path:
+        written_path = _write_verify_output(
+            verify_path,
+            {
+                "results": results,
+                "request": verify_request,
+                "summary": verify_summary,
+                "telegram_alerts": alert_backtest,
+                "all_weather": all_weather,
+                "backtest_rules": backtest_rules,
+                "health": health_snapshot,
+                "latest_run": latest_run,
+                "live_preview": live_preview,
+                "include_results": bool(verify_include_results),
+            },
+        )
+        if not written_path:
+            logger.error("Failed to write verify output to %s", verify_path)
+            return 1
     payload = {
         "results": [_clean_json_value(r) for r in results],
         "meta": _clean_json_value(
             {
-                "request": {
-                    "symbols": uniq,
-                    "period": period,
-                    "include_chart_data": False,
-                    "notify_telegram": bool(notify_telegram),
-                },
-                "summary": _build_analysis_summary(results, requested_symbols=len(uniq), period=period),
+                "request": verify_request,
+                "summary": verify_summary,
                 "telegram_alerts": alert_backtest,
                 "all_weather": all_weather,
                 "backtest_rules": backtest_rules,
-                "health": _build_health_snapshot(),
+                "health": health_snapshot,
+                "latest_run": latest_run,
+                "live_preview": live_preview,
+                "verify_output_path": verify_path or None,
             }
         ),
     }
@@ -9806,9 +8523,19 @@ if __name__ == '__main__':
     parser.add_argument("--symbols", default="")
     parser.add_argument("--period", default="1mo")
     parser.add_argument("--notify-telegram", action="store_true")
+    parser.add_argument("--verify-output", default="")
+    parser.add_argument("--verify-include-results", action="store_true", default=None)
     parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
     if str(args.symbols or "").strip():
-        raise SystemExit(_run_once(args.symbols, str(args.period or "1mo"), bool(args.notify_telegram)))
+        raise SystemExit(
+            _run_once(
+                args.symbols,
+                str(args.period or "1mo"),
+                bool(args.notify_telegram),
+                verify_output=str(args.verify_output or ""),
+                verify_include_results=args.verify_include_results,
+            )
+        )
     port = int(args.port) if args.port is not None else int(getattr(config, "PORT", 5000))
     app.run(debug=getattr(config, "FLASK_DEBUG", True), port=port)

@@ -111,6 +111,11 @@ jobs:
       YF_HISTORY_STORE_ENABLE: ${{ vars.YF_HISTORY_STORE_ENABLE || 'true' }}
       YF_HISTORY_STORE_MAX_ROWS: ${{ vars.YF_HISTORY_STORE_MAX_ROWS || '50000' }}
       YF_PREFER_CHART_API: ${{ vars.YF_PREFER_CHART_API || 'true' }}
+      YF_FETCH_MAX_RETRIES: ${{ vars.YF_FETCH_MAX_RETRIES || '3' }}
+      YF_RETRY_BACKOFF_SECONDS: ${{ vars.YF_RETRY_BACKOFF_SECONDS || '1.25' }}
+      YF_SOURCE_HEALTH_RECENT_EVENTS: ${{ vars.YF_SOURCE_HEALTH_RECENT_EVENTS || '40' }}
+      VERIFY_OUTPUT_PATH: ${{ vars.VERIFY_OUTPUT_PATH || '.data/telegram_alerts/workflow_verify.json' }}
+      VERIFY_INCLUDE_RESULTS: ${{ vars.VERIFY_INCLUDE_RESULTS || 'false' }}
       ANALYZE_MAX_WORKERS: ${{ vars.ANALYZE_MAX_WORKERS || '4' }}
       ACTIONZONE_15M_ALERT_BARS: ${{ vars.ACTIONZONE_15M_ALERT_BARS || '1' }}
       ACTIONZONE_15M_MIN_STOP_PCT: ${{ vars.ACTIONZONE_15M_MIN_STOP_PCT || '1.0' }}
@@ -140,6 +145,25 @@ jobs:
       EMA_CROSS_15M_OPT_TARGET_EXPECTANCY_RR: ${{ vars.EMA_CROSS_15M_OPT_TARGET_EXPECTANCY_RR || '0.10' }}
       ACTIONZONE_15M_TP_MULT: ${{ vars.ACTIONZONE_15M_TP_MULT || '2.0' }}
       ACTIONZONE_15M_STOP_ATR_MULT: ${{ vars.ACTIONZONE_15M_STOP_ATR_MULT || '1.8' }}
+      PRICE_ACTION_15M_ENABLED: ${{ vars.PRICE_ACTION_15M_ENABLED || 'true' }}
+      PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE: ${{ vars.PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE || '66.0' }}
+      PRICE_ACTION_15M_MIN_SCORE: ${{ vars.PRICE_ACTION_15M_MIN_SCORE || '68.0' }}
+      PRICE_ACTION_15M_SWING_LOOKBACK: ${{ vars.PRICE_ACTION_15M_SWING_LOOKBACK || '3' }}
+      PRICE_ACTION_15M_SR_LOOKBACK: ${{ vars.PRICE_ACTION_15M_SR_LOOKBACK || '24' }}
+      PRICE_ACTION_15M_REQUIRE_PATTERN: ${{ vars.PRICE_ACTION_15M_REQUIRE_PATTERN || 'true' }}
+      PRICE_ACTION_15M_PATTERN_LOOKBACK_BARS: ${{ vars.PRICE_ACTION_15M_PATTERN_LOOKBACK_BARS || '3' }}
+      PRICE_ACTION_15M_ENTRY_CONFIRMATION_MODE: ${{ vars.PRICE_ACTION_15M_ENTRY_CONFIRMATION_MODE || 'engulfing_pinbar' }}
+      PRICE_ACTION_15M_MIN_ADX: ${{ vars.PRICE_ACTION_15M_MIN_ADX || '18.0' }}
+      PRICE_ACTION_15M_REQUIRE_EMA200_ALIGNMENT: ${{ vars.PRICE_ACTION_15M_REQUIRE_EMA200_ALIGNMENT || 'false' }}
+      PRICE_ACTION_15M_ROLE_REVERSAL_BUFFER_PCT: ${{ vars.PRICE_ACTION_15M_ROLE_REVERSAL_BUFFER_PCT || '0.35' }}
+      PRICE_ACTION_15M_ZONE_PROXIMITY_PCT: ${{ vars.PRICE_ACTION_15M_ZONE_PROXIMITY_PCT || '1.0' }}
+      PRICE_ACTION_15M_STOP_ATR_MULT: ${{ vars.PRICE_ACTION_15M_STOP_ATR_MULT || '1.5' }}
+      PRICE_ACTION_15M_TP_MULT: ${{ vars.PRICE_ACTION_15M_TP_MULT || '2.2' }}
+      PRICE_ACTION_15M_CANDLE_STOP_BUFFER_ATR: ${{ vars.PRICE_ACTION_15M_CANDLE_STOP_BUFFER_ATR || '0.15' }}
+      PRICE_ACTION_15M_MIN_PROXY_WIN_RATE: ${{ vars.PRICE_ACTION_15M_MIN_PROXY_WIN_RATE || '55.0' }}
+      PRICE_ACTION_15M_MIN_PROXY_TRADES: ${{ vars.PRICE_ACTION_15M_MIN_PROXY_TRADES || '4' }}
+      PRICE_ACTION_15M_MIN_PROXY_EXPECTANCY_RR: ${{ vars.PRICE_ACTION_15M_MIN_PROXY_EXPECTANCY_RR || '0.0' }}
+      PRICE_ACTION_15M_MIN_PROXY_SOURCE_COUNT: ${{ vars.PRICE_ACTION_15M_MIN_PROXY_SOURCE_COUNT || '1' }}
       ACTIONZONE_15M_MAX_FORWARD_BARS: ${{ vars.ACTIONZONE_15M_MAX_FORWARD_BARS || '64' }}
       ACTIONZONE_15M_YF_PERIOD: ${{ vars.ACTIONZONE_15M_YF_PERIOD || '60d' }}
       ACTIONZONE_15M_FAST_MIN: ${{ vars.ACTIONZONE_15M_FAST_MIN || '6' }}
@@ -217,7 +241,7 @@ jobs:
           rm -f .yf_cache/tkr-tz.db .yf_cache/tkr-tz.db-shm .yf_cache/tkr-tz.db-wal
       - name: Run analysis and notify
         run: |
-          python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram
+          python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram --verify-output "$VERIFY_OUTPUT_PATH"
       - name: Upload Telegram alert data
         if: always()
         uses: actions/upload-artifact@v4
@@ -225,5 +249,6 @@ jobs:
           name: telegram-alert-data
           path: |
             .data/telegram_alerts/**
+            ${{ env.VERIFY_OUTPUT_PATH }}
           if-no-files-found: ignore
           retention-days: 14

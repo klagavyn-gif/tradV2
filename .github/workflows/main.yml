@@ -244,7 +244,7 @@ jobs:
           python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram --verify-output "$VERIFY_OUTPUT_PATH"
       - name: Upload Telegram alert data
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: telegram-alert-data
           path: |

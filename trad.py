@@ -3840,6 +3840,7 @@ def _reporting_module_helpers():
         "normalize_symbol": normalize_symbol,
         "pick_plan_value": _pick_plan_value,
         "candidate_backtest_snapshot": _candidate_backtest_snapshot,
+        "candidate_ops_snapshot": _candidate_ops_snapshot,
         "candidate_alert_profile": _candidate_alert_profile,
         "candidate_mode_label": _candidate_mode_label,
         "get_plan_label": _get_plan_label,

@@ -2543,16 +2543,22 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
             trigger_text = "CDC_RED_REVERSAL (เทรนด์กลับตัว)"
         elif sell_trigger == "TREND_ROLLOVER":
             trigger_text = "TREND_ROLLOVER (โมเมนตัมอ่อนแรงต่อเนื่อง)"
-        elif sell_trigger == "PRECISION60_TAKE_PROFIT":
-            trigger_text = "PRECISION60_TAKE_PROFIT (แตะเป้าปิดทำกำไร)"
-        elif sell_trigger == "PRECISION60_TIME_STOP":
-            trigger_text = "PRECISION60_TIME_STOP (ถือครบอายุสัญญาณ)"
+        elif sell_trigger == "TAKE_PROFIT":
+            trigger_text = "TAKE_PROFIT (แตะเป้าปิดทำกำไร)"
+        elif sell_trigger == "TIME_STOP":
+            trigger_text = "TIME_STOP (ถือครบอายุสัญญาณ)"
         lines.append("<b>🚨 Trigger:</b> " + _html_escape(trigger_text))
 
     stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
     if stop_lines:
         lines.append("────────────────")
         lines.extend(stop_lines)
+
+    exit_lines = _format_exit_levels_lines(plan)
+    if exit_lines:
+        if not stop_lines:
+            lines.append("────────────────")
+        lines.extend([_html_escape(line) for line in exit_lines])
 
     analysis_points = plan.get("analysis_points")
     if isinstance(analysis_points, list):
@@ -7290,12 +7296,12 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         elif entry_idx is not None and bars_since_entry is not None:
             if take_profit_price is not None and current_price is not None and current_price >= take_profit_price:
                 signal = "SELL"
-                reason = f"ราคาแตะเป้าปิดทำกำไรภายในโหมด Precision60 ที่ {take_profit_pct:.2f}% จากจุดเข้า"
-                sell_trigger = "PRECISION60_TAKE_PROFIT"
+                reason = f"ราคาแตะเป้าปิดทำกำไรตามแผน CDC ที่ {take_profit_pct:.2f}% จากจุดเข้า"
+                sell_trigger = "TAKE_PROFIT"
             elif max_hold_bars and bars_since_entry >= max_hold_bars:
                 signal = "SELL"
-                reason = f"ถือครบ {int(max_hold_bars)} แท่งของแผน Precision60 แล้ว จึงปิดรอบเพื่อลดการยืดเยื้อ"
-                sell_trigger = "PRECISION60_TIME_STOP"
+                reason = f"ถือครบ {int(max_hold_bars)} แท่งของแผน CDC แล้ว จึงปิดรอบเพื่อลดการยืดเยื้อ"
+                sell_trigger = "TIME_STOP"
             elif bool(strict_sell_condition.iloc[-1]):
                 if not require_pattern or sell_pattern_ok:
                     signal = "SELL"
@@ -8013,6 +8019,13 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             entry_keys=["current_price", "entry_price", "price"],
             stop_keys=["stop_loss"],
             tp_keys=["take_profit", "smc_take_profit"],
+            context=exit_context,
+        )
+        cdc_vixfix_plan = _attach_exit_levels(
+            cdc_vixfix_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit_price", "take_profit"],
             context=exit_context,
         )
         prediction = build_prediction_summary(

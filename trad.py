@@ -3852,6 +3852,7 @@ def _reporting_module_helpers():
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
         "build_telegram_candidates": _build_telegram_candidates,
+        "build_cdc_daily_trend_candidates": _build_cdc_daily_trend_candidates,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
     }
 

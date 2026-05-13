@@ -574,6 +574,7 @@ def build_telegram_alert_live_preview(results, *, limit_examples_per_strategy=1,
     telegram_kill_switch_state = helpers["telegram_kill_switch_state"]
     telegram_dynamic_conf_threshold = helpers["telegram_dynamic_conf_threshold"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
+    build_cdc_daily_trend_candidates = helpers["build_cdc_daily_trend_candidates"]
     build_daily_best_pick_candidates = helpers["build_daily_best_pick_candidates"]
     normalize_symbol = helpers["normalize_symbol"]
     candidate_backtest_snapshot_fn = helpers["candidate_backtest_snapshot"]
@@ -584,6 +585,9 @@ def build_telegram_alert_live_preview(results, *, limit_examples_per_strategy=1,
     build_stats = {}
     if not kill:
         candidates, build_stats = build_telegram_candidates(results, dynamic_min_conf)
+        cdc_daily_candidates = build_cdc_daily_trend_candidates(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
+        if cdc_daily_candidates:
+            candidates.extend([row for row in cdc_daily_candidates if isinstance(row, dict)])
     daily_candidates = build_daily_best_pick_candidates(results)
     for row in daily_candidates:
         if isinstance(row, dict):

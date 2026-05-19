@@ -1664,6 +1664,54 @@ def _alert_mode_usage_hint(mode_label=None):
     return None
 
 
+def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_label=None):
+    signal_text = str(signal or "").strip().upper()
+    if signal_text not in ("BUY", "SELL"):
+        return None
+    plan = plan if isinstance(plan, dict) else {}
+    mode_text = str(mode_label or "").strip().lower()
+    source_text = str(source_label or "").strip()
+    trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
+    exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
+    reversal_triggers = {"CDC_RED_REVERSAL", "TREND_ROLLOVER"}
+
+    if "daily trend" in mode_text:
+        action_code = f"BIAS {signal_text}"
+        primary_text = f"ใช้เป็น bias ของวันฝั่ง {signal_text} แล้วรอระบบหลักหรือจังหวะราคาใกล้จุดเข้าเป็นตัวกดยืนยัน"
+        note_text = "ยังไม่ควรรีบกดทันทีจากข้อความนี้อย่างเดียว"
+    elif signal_text == "BUY":
+        action_code = "ENTRY BUY"
+        primary_text = "ถ้ายังไม่มีสถานะ สามารถกด BUY/Long ตามแผนได้"
+        if forecast_dir == "SELL":
+            note_text = "แต่ Forecast ยังสวนทาง ควรรอแท่งยืนยันเพิ่มหรือใช้ขนาดไม้เล็กลง"
+        else:
+            note_text = "ถ้ามี Short เดิม ควรปิด Short ก่อนแล้วค่อยเปิด BUY"
+    elif trigger in exit_triggers:
+        action_code = "EXIT SELL"
+        primary_text = "ถ้ามี BUY/Long เดิม ให้ปิดกำไรหรือปิดลดความเสี่ยงตามแผนนี้"
+        note_text = "ยังไม่ใช่สัญญาณเปิด Short ใหม่ เว้นแต่โครงสร้างลงและระบบอื่นยืนยันซ้ำ"
+    elif trigger in reversal_triggers or forecast_dir == "SELL":
+        action_code = "ENTRY SHORT"
+        primary_text = "สามารถกด SELL/Short ตามแผนได้ หรือใช้เป็นสัญญาณปิด BUY เดิมก่อน"
+        note_text = "ไม่ควรไล่ Short ถ้าราคายังไม่หลุดจุดยืนยันหรือระยะห่างจากจุดเข้าเริ่มกว้าง"
+    else:
+        action_code = "SELL / RISK-OFF"
+        primary_text = "ให้มองเป็นสัญญาณลดความเสี่ยงหรือปิด BUY เดิมก่อนเป็นหลัก"
+        note_text = "ถ้า Forecast ยังเป็น BUY ให้ระวังว่านี่อาจเป็นการปิดรอบ มากกว่าการกลับฝั่งเป็น Short เต็มตัว"
+
+    if source_text and "CDC" in source_text.upper() and action_code == "ENTRY SHORT" and forecast_dir == "BUY":
+        action_code = "SELL / RISK-OFF"
+        primary_text = "ให้ปิด BUY เดิมหรือลดความเสี่ยงก่อน ยังไม่ควรตีความเป็น Short เต็มตัว"
+        note_text = "เพราะ Forecast ยังเอนขึ้น แม้ CDC ฝั่งออกหรือกลับตัวระยะสั้นเริ่มทำงาน"
+
+    return {
+        "action_code": action_code,
+        "primary_text": primary_text,
+        "note_text": note_text,
+    }
+
+
 def _resolve_alert_profile_meta(win_rate=None, confidence=None, expectancy=None, trades=None, mode_label=None):
     wr_points, wr_weight = _alert_profile_metric_points(win_rate, 48.0, 66.0, 40.0)
     conf_points, conf_weight = _alert_profile_metric_points(confidence, 55.0, 90.0, 30.0)
@@ -2278,6 +2326,7 @@ def _message_module_helpers():
         "format_exit_levels_lines": _format_exit_levels_lines,
         "format_price_forecast_lines": _format_price_forecast_lines,
         "alert_mode_usage_hint": _alert_mode_usage_hint,
+        "build_trade_action_guidance": _build_trade_action_guidance,
         "plan_confidence_value": _plan_confidence_value,
         "pick_plan_value": _pick_plan_value,
     }
@@ -2519,6 +2568,24 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
             mode_label=mode_label,
         )
     )
+    action_guidance = _build_trade_action_guidance(
+        signal,
+        plan=plan,
+        mode_label=mode_label,
+        source_label="CDC+VixFix 15m",
+    )
+    if isinstance(action_guidance, dict):
+        lines.append(
+            "<b>🎯 ควรทำ:</b> "
+            + _html_escape(str(action_guidance.get("primary_text") or ""))
+        )
+        lines.append(
+            "<b>🧭 แปลสัญญาณ:</b> "
+            + _html_escape(str(action_guidance.get("action_code") or ""))
+        )
+        note_text = str(action_guidance.get("note_text") or "").strip()
+        if note_text:
+            lines.append("<b>⚠️ หมายเหตุ:</b> " + _html_escape(note_text))
 
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")

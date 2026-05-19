@@ -22,6 +22,7 @@ def build_telegram_message(
     get_plan_label = helpers["get_plan_label"]
     format_exit_levels_lines = helpers["format_exit_levels_lines"]
     format_price_forecast_lines = helpers["format_price_forecast_lines"]
+    build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
@@ -65,6 +66,18 @@ def build_telegram_message(
             mode_label=mode_label,
         )
     )
+    action_guidance = build_trade_action_guidance(
+        signal,
+        plan=primary_plan,
+        mode_label=mode_label,
+        source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
+    )
+    if isinstance(action_guidance, dict):
+        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
+        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
+        note_text = str(action_guidance.get("note_text") or "").strip()
+        if note_text:
+            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     append_pattern_context_lines(lines, pattern)
     if isinstance(primary_plan, dict):
@@ -158,6 +171,7 @@ def build_price_action_message(item, plan, *, helpers, get_now):
     build_stop_context_lines = helpers["build_stop_context_lines"]
     format_exit_levels_lines = helpers["format_exit_levels_lines"]
     format_price_forecast_lines = helpers["format_price_forecast_lines"]
+    build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     signal = str(plan.get("signal") or "").upper()
     if signal not in ("BUY", "SELL"):
@@ -230,6 +244,17 @@ def build_price_action_message(item, plan, *, helpers, get_now):
             trades=plan.get("historical_trades"),
         )
     )
+    action_guidance = build_trade_action_guidance(
+        signal,
+        plan=plan,
+        source_label="Price Action 15m",
+    )
+    if isinstance(action_guidance, dict):
+        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
+        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
+        note_text = str(action_guidance.get("note_text") or "").strip()
+        if note_text:
+            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
 
     proxy_sources = plan.get("proxy_sources")
     if isinstance(proxy_sources, list) and proxy_sources:
@@ -351,6 +376,7 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
     strict_60_allow_cdc = helpers["strict_60_allow_cdc"]
     build_stop_context_lines = helpers["build_stop_context_lines"]
     format_exit_levels_lines = helpers["format_exit_levels_lines"]
+    build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
     symbol = normalize_symbol(item.get("symbol") or "")
@@ -391,6 +417,17 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
             require_quality=strict_60_mode_enabled(),
             allow_cdc=strict_60_allow_cdc(),
         )
+    action_guidance = build_trade_action_guidance(
+        signal,
+        plan=primary_plan,
+        source_label="Super Signal Ensemble",
+    )
+    if isinstance(action_guidance, dict):
+        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
+        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
+        note_text = str(action_guidance.get("note_text") or "").strip()
+        if note_text:
+            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     if pattern and pattern != "None":
         lines.append(f"<b>🕯️ Confirmation Pattern:</b> {html_escape(pattern)}")
@@ -416,4 +453,3 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
     lines.append("🕒 <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
     lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 วิเคราะห์กราฟบน TradingView</a>")
     return "\n".join(lines)
-

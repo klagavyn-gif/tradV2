@@ -33,6 +33,7 @@ from alerts.messages import (
     build_price_action_message as _alerts_build_price_action_message,
     build_super_signal_message as _alerts_build_super_signal_message,
     build_telegram_message as _alerts_build_telegram_message,
+    build_trend_breakout_message as _alerts_build_trend_breakout_message,
 )
 from alerts.pipeline import (
     build_telegram_candidates as _alerts_pipeline_build_telegram_candidates,
@@ -165,7 +166,7 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
 
 _HISTORY_STORE_LOCK = threading.Lock()
 _ALERT_HISTORY_LOCK = threading.Lock()
-_TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "PRIMARY", "DAILY_BEST")
+_TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "TCB15", "PRIMARY", "DAILY_BEST")
 
 try:
     _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
@@ -1142,6 +1143,18 @@ def _build_strategy_summary_observations(item, min_conf=None):
                 confidence=_plan_confidence_value(pa_plan),
                 symbol=symbol,
                 signal=pa_signal,
+            )
+        ]
+
+    tcb_plan = item.get("trend_breakout_15m")
+    if isinstance(tcb_plan, dict):
+        tcb_signal = _plan_trade_direction(tcb_plan)
+        summary["TCB15"] = [
+            _summary_edge_observation(
+                _summary_strategy_edge_metrics(tcb_plan, signal=tcb_signal),
+                confidence=_plan_confidence_value(tcb_plan),
+                symbol=symbol,
+                signal=tcb_signal,
             )
         ]
 
@@ -2389,6 +2402,15 @@ def _build_price_action_message(item, plan):
     )
 
 
+def _build_trend_breakout_message(item, plan):
+    return _alerts_build_trend_breakout_message(
+        item,
+        plan,
+        helpers=_message_module_helpers(),
+        get_now=get_thai_now,
+    )
+
+
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -3435,6 +3457,7 @@ def _pipeline_module_helpers():
         "build_actionzone_message": _build_actionzone_message,
         "safe_float": _safe_float,
         "build_price_action_message": _build_price_action_message,
+        "build_trend_breakout_message": _build_trend_breakout_message,
         "get_best_confidence": _get_best_confidence,
         "collect_alert_sources": _collect_alert_sources,
         "get_primary_plan_source_label": _get_primary_plan_source_label,
@@ -4305,6 +4328,321 @@ def _cdc_forecast_bias(close, fast, slow, k, d, market_top, momentum_lookback=3)
         "bear_score": float(bear_score),
         "reason": ", ".join(reasons[:4]),
     }
+
+
+def _trend_breakout_15m_plan(symbol, item=None, data_15m=None, data_1h=None):
+    try:
+        if not bool(getattr(config, "TREND_BREAKOUT_15M_ENABLED", True)):
+            return None
+        sym = normalize_symbol(symbol)
+        if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
+            yf_period = getattr(config, "CDC_VIXFIX_15M_YF_PERIOD", "60d")
+            data_15m = get_yf_history(sym, period=str(yf_period), interval="15m", auto_adjust=True)
+        if data_15m is None or data_15m.empty or len(data_15m) < 80:
+            return None
+        df = data_15m[["Open", "High", "Low", "Close", "Volume"]].copy()
+        if isinstance(df.index, pd.DatetimeIndex):
+            try:
+                df.index = df.index.tz_localize(None)
+            except Exception:
+                pass
+        df = _add_price_patterns(df)
+        close = df["Close"].astype(float)
+        high = df["High"].astype(float)
+        low = df["Low"].astype(float)
+        volume = df["Volume"].astype(float)
+        df["EMA20"] = close.ewm(span=20, adjust=False).mean()
+        df["EMA50"] = close.ewm(span=50, adjust=False).mean()
+        df["EMA200"] = close.ewm(span=200, adjust=False).mean()
+        tr1 = (high - low).abs()
+        tr2 = (high - close.shift(1)).abs()
+        tr3 = (low - close.shift(1)).abs()
+        df["TR"] = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        df["ATR"] = df["TR"].rolling(14).mean()
+        df["VOL_AVG20"] = volume.rolling(20).mean()
+        up_move = high.diff()
+        down_move = -low.diff()
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        tr_sum = df["TR"].rolling(14).sum()
+        plus_di = 100.0 * pd.Series(plus_dm, index=df.index).rolling(14).sum() / tr_sum.replace(0, np.nan)
+        minus_di = 100.0 * pd.Series(minus_dm, index=df.index).rolling(14).sum() / tr_sum.replace(0, np.nan)
+        dx = ((plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)) * 100.0
+        df["ADX"] = dx.rolling(14).mean()
+
+        min_conf = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE", 67.0), 67.0)
+        min_score = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_SCORE", 68.0), 68.0)
+        lookback = max(10, int(getattr(config, "TREND_BREAKOUT_15M_LOOKBACK_BARS", 20)))
+        alert_bars = max(0, int(getattr(config, "TREND_BREAKOUT_15M_ALERT_BARS", 2)))
+        min_adx = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_ADX", 20.0), 20.0)
+        min_rvol = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_RVOL", 1.15), 1.15)
+        min_ema_gap_pct = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_EMA_GAP_PCT", 0.05), 0.05)
+        breakout_buffer_pct = _safe_float(getattr(config, "TREND_BREAKOUT_15M_BREAKOUT_BUFFER_PCT", 0.15), 0.15)
+        require_ema200 = bool(getattr(config, "TREND_BREAKOUT_15M_REQUIRE_EMA200_ALIGNMENT", True))
+        require_1h = bool(getattr(config, "TREND_BREAKOUT_15M_REQUIRE_1H_ALIGNMENT", True))
+        require_pattern = bool(getattr(config, "TREND_BREAKOUT_15M_REQUIRE_PATTERN", False))
+        pattern_lookback = max(1, int(getattr(config, "TREND_BREAKOUT_15M_PATTERN_LOOKBACK_BARS", 3)))
+        pattern_mode = getattr(config, "TREND_BREAKOUT_15M_ENTRY_CONFIRMATION_MODE", "engulfing_pinbar")
+        max_extension_atr = max(0.4, _safe_float(getattr(config, "TREND_BREAKOUT_15M_MAX_EXTENSION_ATR", 1.6), 1.6))
+        stop_atr_mult = max(0.8, _safe_float(getattr(config, "TREND_BREAKOUT_15M_STOP_ATR_MULT", 1.4), 1.4))
+        tp_mult = max(1.2, _safe_float(getattr(config, "TREND_BREAKOUT_15M_TP_MULT", 2.0), 2.0))
+        candle_stop_buffer = _safe_float(getattr(config, "TREND_BREAKOUT_15M_CANDLE_STOP_BUFFER_ATR", 0.15), 0.15)
+        min_proxy_wr = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_PROXY_WIN_RATE", 55.0), 55.0)
+        min_proxy_exp = _safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_PROXY_EXPECTANCY_RR", 0.0), 0.0)
+        min_proxy_trades = int(getattr(config, "TREND_BREAKOUT_15M_MIN_PROXY_TRADES", 4))
+        min_proxy_sources = int(getattr(config, "TREND_BREAKOUT_15M_MIN_PROXY_SOURCE_COUNT", 1))
+
+        breakout_high = high.shift(1).rolling(lookback).max()
+        breakdown_low = low.shift(1).rolling(lookback).min()
+        ema20 = df["EMA20"]
+        ema50 = df["EMA50"]
+        ema200 = df["EMA200"]
+        atr = df["ATR"]
+        adx = df["ADX"]
+        rvol = volume / df["VOL_AVG20"].replace(0, np.nan)
+        ema_gap_pct = ((ema20 - ema50).abs() / close.replace(0, np.nan)) * 100.0
+        breakout_buffer = max(0.0010, float(breakout_buffer_pct) / 100.0)
+        breakout_close = close > (breakout_high * (1.0 + breakout_buffer))
+        breakdown_close = close < (breakdown_low * (1.0 - breakout_buffer))
+        bullish_stack = (ema20 > ema50) & (close > ema20)
+        bearish_stack = (ema20 < ema50) & (close < ema20)
+        ema200_ok = (close >= ema200) if require_ema200 else pd.Series(True, index=df.index)
+        ema200_sell_ok = (close <= ema200) if require_ema200 else pd.Series(True, index=df.index)
+        trend_strength_ok = adx >= float(min_adx)
+        volume_ok = rvol >= float(min_rvol)
+        ema_gap_ok = ema_gap_pct >= float(min_ema_gap_pct)
+        extension_ok = pd.Series(True, index=df.index)
+        if max_extension_atr > 0:
+            extension_ok = (close - ema20) <= (atr * float(max_extension_atr))
+        sell_extension_ok = pd.Series(True, index=df.index)
+        if max_extension_atr > 0:
+            sell_extension_ok = (ema20 - close) <= (atr * float(max_extension_atr))
+
+        trend_1h = None
+        if isinstance(data_1h, pd.DataFrame) and not data_1h.empty and "Close" in data_1h.columns:
+            df_1h = data_1h.copy()
+            df_1h["EMA20"] = df_1h["Close"].ewm(span=20, adjust=False).mean()
+            df_1h["EMA50"] = df_1h["Close"].ewm(span=50, adjust=False).mean()
+            close_1h = _safe_float(df_1h["Close"].iloc[-1], None)
+            ema20_1h = _safe_float(df_1h["EMA20"].iloc[-1], None)
+            ema50_1h = _safe_float(df_1h["EMA50"].iloc[-1], None)
+            if all(isinstance(v, (int, float)) for v in (close_1h, ema20_1h, ema50_1h)):
+                if close_1h >= ema20_1h >= ema50_1h:
+                    trend_1h = "UP"
+                elif close_1h <= ema20_1h <= ema50_1h:
+                    trend_1h = "DOWN"
+        trend_1h_ok = (trend_1h == "UP") if require_1h else True
+        trend_1h_sell_ok = (trend_1h == "DOWN") if require_1h else True
+
+        breakout_condition = bullish_stack & breakout_close & trend_strength_ok.fillna(False) & volume_ok.fillna(False) & ema_gap_ok.fillna(False) & ema200_ok.fillna(False) & extension_ok.fillna(False)
+        breakdown_condition = bearish_stack & breakdown_close & trend_strength_ok.fillna(False) & volume_ok.fillna(False) & ema_gap_ok.fillna(False) & ema200_sell_ok.fillna(False) & sell_extension_ok.fillna(False)
+        breakout_idx = breakout_condition[breakout_condition].index[-1] if breakout_condition.any() else None
+        breakdown_idx = breakdown_condition[breakdown_condition].index[-1] if breakdown_condition.any() else None
+
+        def _bars_since(idx):
+            if idx is None:
+                return None, None
+            try:
+                pos = int(df.index.get_loc(idx))
+                return max(0, len(df) - pos - 1), pos
+            except Exception:
+                return None, None
+
+        breakout_bars_since, breakout_pos = _bars_since(breakout_idx)
+        breakdown_bars_since, breakdown_pos = _bars_since(breakdown_idx)
+        breakout_recent = breakout_idx is not None and isinstance(breakout_bars_since, (int, float)) and breakout_bars_since <= alert_bars
+        breakdown_recent = breakdown_idx is not None and isinstance(breakdown_bars_since, (int, float)) and breakdown_bars_since <= alert_bars
+
+        buy_pattern_ok = False
+        buy_pattern_name = "None"
+        buy_pattern_idx = None
+        if isinstance(breakout_pos, int):
+            buy_pattern_ok, buy_pattern_name, buy_pattern_idx = _recent_pattern_confirmation(
+                df,
+                breakout_pos,
+                "BUY",
+                lookback_bars=pattern_lookback,
+                mode=pattern_mode,
+            )
+        sell_pattern_ok = False
+        sell_pattern_name = "None"
+        sell_pattern_idx = None
+        if isinstance(breakdown_pos, int):
+            sell_pattern_ok, sell_pattern_name, sell_pattern_idx = _recent_pattern_confirmation(
+                df,
+                breakdown_pos,
+                "SELL",
+                lookback_bars=pattern_lookback,
+                mode=pattern_mode,
+            )
+
+        signal = "WAIT"
+        reasons = []
+        confidence = None
+        breakout_level = _safe_float(breakout_high.iloc[-1], None)
+        breakdown_level = _safe_float(breakdown_low.iloc[-1], None)
+        entry_price = _safe_float(close.iloc[-1], None)
+        current_price = entry_price
+        atr_value = _safe_float(atr.iloc[-1], None)
+        adx_value = _safe_float(adx.iloc[-1], None)
+        rvol_value = _safe_float(rvol.iloc[-1], None)
+        ema_gap_value = _safe_float(ema_gap_pct.iloc[-1], None)
+        market_bias = "BULLISH" if bool(bullish_stack.iloc[-1]) else "BEARISH" if bool(bearish_stack.iloc[-1]) else "NEUTRAL"
+        if breakout_recent and trend_1h_ok and (not require_pattern or buy_pattern_ok):
+            signal = "BUY"
+            reasons.append("ราคาปิดทะลุกรอบสูงเดิมพร้อมโครงสร้าง EMA ขาขึ้น")
+            if isinstance(rvol_value, (int, float)):
+                reasons.append(f"RVOL สูง {float(rvol_value):.2f} เท่า สนับสนุน breakout")
+            if isinstance(adx_value, (int, float)):
+                reasons.append(f"ADX {float(adx_value):.1f} ยืนยันแรงต่อเนื่องของเทรนด์")
+            if trend_1h == "UP":
+                reasons.append("เทรนด์ 1H หนุนฝั่ง BUY")
+            if buy_pattern_ok and buy_pattern_name and buy_pattern_name != "None":
+                reasons.append(f"มี pattern ยืนยัน: {buy_pattern_name}")
+            score = 52.0
+            if isinstance(adx_value, (int, float)):
+                score += max(0.0, min(10.0, (float(adx_value) - float(min_adx)) * 0.60))
+            if isinstance(rvol_value, (int, float)):
+                score += max(0.0, min(10.0, (float(rvol_value) - float(min_rvol)) * 10.0))
+            if isinstance(ema_gap_value, (int, float)):
+                score += max(0.0, min(8.0, (float(ema_gap_value) - float(min_ema_gap_pct)) * 18.0))
+            if trend_1h == "UP":
+                score += 6.0
+            if buy_pattern_ok:
+                score += 4.0
+            if isinstance(breakout_bars_since, (int, float)):
+                if breakout_bars_since <= 0:
+                    score += 8.0
+                elif breakout_bars_since <= 1:
+                    score += 5.0
+                else:
+                    score += 2.0
+            confidence = max(50.0, min(95.0, score))
+        elif breakdown_recent and trend_1h_sell_ok and (not require_pattern or sell_pattern_ok):
+            signal = "SELL"
+            reasons.append("ราคาปิดหลุดกรอบต่ำเดิมพร้อมโครงสร้าง EMA ขาลง")
+            if isinstance(rvol_value, (int, float)):
+                reasons.append(f"RVOL สูง {float(rvol_value):.2f} เท่า สนับสนุน breakdown")
+            if isinstance(adx_value, (int, float)):
+                reasons.append(f"ADX {float(adx_value):.1f} ยืนยันแรงต่อเนื่องของเทรนด์ลง")
+            if trend_1h == "DOWN":
+                reasons.append("เทรนด์ 1H หนุนฝั่ง SHORT")
+            if sell_pattern_ok and sell_pattern_name and sell_pattern_name != "None":
+                reasons.append(f"มี pattern ยืนยัน: {sell_pattern_name}")
+            score = 52.0
+            if isinstance(adx_value, (int, float)):
+                score += max(0.0, min(10.0, (float(adx_value) - float(min_adx)) * 0.60))
+            if isinstance(rvol_value, (int, float)):
+                score += max(0.0, min(10.0, (float(rvol_value) - float(min_rvol)) * 10.0))
+            if isinstance(ema_gap_value, (int, float)):
+                score += max(0.0, min(8.0, (float(ema_gap_value) - float(min_ema_gap_pct)) * 18.0))
+            if trend_1h == "DOWN":
+                score += 6.0
+            if sell_pattern_ok:
+                score += 4.0
+            if isinstance(breakdown_bars_since, (int, float)):
+                if breakdown_bars_since <= 0:
+                    score += 8.0
+                elif breakdown_bars_since <= 1:
+                    score += 5.0
+                else:
+                    score += 2.0
+            confidence = max(50.0, min(95.0, score))
+        proxy_signal = signal if signal in ("BUY", "SELL") else "BUY"
+        proxy_metrics = _price_action_proxy_metrics(item, proxy_signal) if isinstance(item, dict) else {"win_rate_pct": None, "expectancy_rr": None, "trades": None, "source_count": 0, "source_labels": []}
+        proxy_wr = proxy_metrics.get("win_rate_pct")
+        proxy_exp = proxy_metrics.get("expectancy_rr")
+        proxy_trades = proxy_metrics.get("trades")
+        proxy_source_count = int(proxy_metrics.get("source_count") or 0)
+        proxy_ok = signal in ("BUY", "SELL") and proxy_source_count >= min_proxy_sources
+        if proxy_ok and isinstance(proxy_wr, (int, float)) and float(proxy_wr) < min_proxy_wr:
+            proxy_ok = False
+        if proxy_ok and isinstance(proxy_exp, (int, float)) and float(proxy_exp) < min_proxy_exp:
+            proxy_ok = False
+        if proxy_ok and isinstance(proxy_trades, (int, float)) and float(proxy_trades) < min_proxy_trades:
+            proxy_ok = False
+        if not proxy_ok:
+            signal = "WAIT"
+
+        stop_loss = None
+        take_profit = None
+        if signal == "BUY" and isinstance(entry_price, (int, float)) and isinstance(atr_value, (int, float)) and atr_value > 0:
+            stop_candidates = []
+            if isinstance(breakout_level, (int, float)) and breakout_level < entry_price:
+                stop_candidates.append(float(breakout_level))
+            stop_candidates.append(float(entry_price) - (float(atr_value) * float(stop_atr_mult)))
+            stop_loss = min(stop_candidates) if stop_candidates else None
+            stop_loss = _candle_based_risk(
+                df,
+                pattern_idx if isinstance(pattern_idx, int) else (idx_pos if isinstance(idx_pos, int) else len(df) - 1),
+                "BUY",
+                atr_value,
+                stop_loss,
+                buffer_atr=candle_stop_buffer,
+            )
+            if isinstance(stop_loss, (int, float)):
+                risk_dist = abs(float(entry_price) - float(stop_loss))
+                if risk_dist > 0:
+                    take_profit = float(entry_price) + (risk_dist * float(tp_mult))
+        elif signal == "SELL" and isinstance(entry_price, (int, float)) and isinstance(atr_value, (int, float)) and atr_value > 0:
+            stop_candidates = []
+            if isinstance(breakdown_level, (int, float)) and breakdown_level > entry_price:
+                stop_candidates.append(float(breakdown_level))
+            stop_candidates.append(float(entry_price) + (float(atr_value) * float(stop_atr_mult)))
+            stop_loss = max(stop_candidates) if stop_candidates else None
+            stop_loss = _candle_based_risk(
+                df,
+                sell_pattern_idx if isinstance(sell_pattern_idx, int) else (breakdown_pos if isinstance(breakdown_pos, int) else len(df) - 1),
+                "SELL",
+                atr_value,
+                stop_loss,
+                buffer_atr=candle_stop_buffer,
+            )
+            if isinstance(stop_loss, (int, float)):
+                risk_dist = abs(float(entry_price) - float(stop_loss))
+                if risk_dist > 0:
+                    take_profit = float(entry_price) - (risk_dist * float(tp_mult))
+
+        last_signal_idx = breakout_idx if signal == "BUY" else breakdown_idx if signal == "SELL" else None
+        last_signal_time = last_signal_idx.strftime("%Y-%m-%d %H:%M") if last_signal_idx is not None else None
+        active_level = breakout_level if signal == "BUY" else breakdown_level if signal == "SELL" else None
+        active_bars_since = breakout_bars_since if signal == "BUY" else breakdown_bars_since if signal == "SELL" else None
+        active_pattern_name = buy_pattern_name if signal == "BUY" else sell_pattern_name if signal == "SELL" else "None"
+        forecast_direction = "BUY" if trend_1h == "UP" else "SELL" if trend_1h == "DOWN" else None
+        alert = bool(signal in ("BUY", "SELL") and isinstance(confidence, (int, float)) and confidence >= min_conf and float(confidence) >= float(min_score))
+        return {
+            "strategy": "Trend Breakout 15m",
+            "signal": signal,
+            "alert": alert,
+            "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
+            "predicted_win_prob": float(confidence) if isinstance(confidence, (int, float)) else None,
+            "historical_win_rate": proxy_wr,
+            "historical_avg_rr": proxy_exp,
+            "historical_trades": proxy_trades,
+            "proxy_sources": proxy_metrics.get("source_labels") or [],
+            "proxy_source_count": proxy_source_count,
+            "score": float(confidence) if signal in ("BUY", "SELL") and isinstance(confidence, (int, float)) else 0.0,
+            "setup": signal if signal in ("BUY", "SELL") else "WAIT",
+            "market_bias": market_bias,
+            "trend_1h": trend_1h,
+            "breakout_level": float(active_level) if isinstance(active_level, (int, float)) else None,
+            "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
+            "current_price": float(current_price) if isinstance(current_price, (int, float)) else None,
+            "price": float(current_price) if isinstance(current_price, (int, float)) else None,
+            "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
+            "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
+            "bars_since_signal": int(active_bars_since) if isinstance(active_bars_since, (int, float)) else None,
+            "last_signal_time": last_signal_time,
+            "detected_pattern": active_pattern_name if isinstance(active_pattern_name, str) else "None",
+            "adx": float(adx_value) if isinstance(adx_value, (int, float)) else None,
+            "atr": float(atr_value) if isinstance(atr_value, (int, float)) else None,
+            "rvol": float(rvol_value) if isinstance(rvol_value, (int, float)) else None,
+            "ema_gap_pct": float(ema_gap_value) if isinstance(ema_gap_value, (int, float)) else None,
+            "forecast_direction": forecast_direction,
+            "reasons": reasons[:6],
+        }
+    except Exception:
+        return None
 
 
 def _ema_cross_15m_prepare_df(raw_df):
@@ -8132,6 +8470,29 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             tp_keys=["take_profit"],
             context=exit_context,
         )
+        trend_breakout_plan = _trend_breakout_15m_plan(
+            symbol,
+            {
+                "symbol": symbol,
+                "short_term_15m": short_term_plan,
+                "sniper_15m": sniper_plan,
+                "quantum_15m": quantum_plan,
+                "crypto_reversal_15m": crypto_reversal_plan,
+                "ema_cross_15m": ema_cross_plan,
+                "actionzone_15m": actionzone_plan,
+                "cdc_vixfix_15m": cdc_vixfix_plan,
+                "price_action_15m": price_action_plan,
+            },
+            data_15m=shared_15m,
+            data_1h=shared_1h,
+        )
+        trend_breakout_plan = _attach_exit_levels(
+            trend_breakout_plan,
+            entry_keys=["entry_price", "current_price", "price"],
+            stop_keys=["stop_loss"],
+            tp_keys=["take_profit"],
+            context=exit_context,
+        )
         price_forecast = build_price_forecast(
             float(latest["Close"]) if pd.notna(latest["Close"]) else None,
             prediction,
@@ -8155,6 +8516,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
                 "actionzone_15m": actionzone_plan,
                 "cdc_vixfix_15m": cdc_vixfix_plan,
                 "price_action_15m": price_action_plan,
+                "trend_breakout_15m": trend_breakout_plan,
             }
         )
         if isinstance(all_weather_report, dict):
@@ -8179,6 +8541,7 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             "actionzone_15m": actionzone_plan,
             "cdc_vixfix_15m": cdc_vixfix_plan,
             "price_action_15m": price_action_plan,
+            "trend_breakout_15m": trend_breakout_plan,
             "order_blocks_15m": order_blocks_15m,
             "support": float(support) if pd.notna(support) else None,
             "resistance": float(resistance) if pd.notna(resistance) else None,

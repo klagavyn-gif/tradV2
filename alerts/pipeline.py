@@ -21,6 +21,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
     build_actionzone_message = helpers["build_actionzone_message"]
     safe_float = helpers["safe_float"]
     build_price_action_message = helpers["build_price_action_message"]
+    build_trend_breakout_message = helpers["build_trend_breakout_message"]
     get_best_confidence = helpers["get_best_confidence"]
     collect_alert_sources = helpers["collect_alert_sources"]
     get_primary_plan_source_label = helpers["get_primary_plan_source_label"]
@@ -255,6 +256,55 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                                 "edge_metrics": edge,
                                 "message": pa_message,
                                 "cache_key": f"PA15|{symbol}|{pa_signal}|{context_key}",
+                            }
+                        )
+
+        tcb_plan = item.get("trend_breakout_15m")
+        if isinstance(tcb_plan, dict):
+            tcb_signal = str(tcb_plan.get("signal") or "").upper()
+            tcb_conf = normalize_confidence(tcb_plan.get("confidence"))
+            tcb_min_conf = safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE", min_conf), float(min_conf))
+            tcb_min_score = safe_float(getattr(config, "TREND_BREAKOUT_15M_MIN_SCORE", 68.0), 68.0)
+            tcb_score = safe_float(tcb_plan.get("score"), 0.0)
+            if tcb_signal in ("BUY", "SELL") and tcb_plan.get("alert") and tcb_conf is not None and tcb_conf >= tcb_min_conf and tcb_score >= tcb_min_score:
+                gate_ok, gate_reason, edge = evaluate_entry_quality_gate(tcb_plan, tcb_signal)
+                if not gate_ok:
+                    quality_drop_counts[f"trend_breakout_{gate_reason}"] += 1
+                else:
+                    tcb_message = build_trend_breakout_message(item, tcb_plan)
+                    if tcb_message:
+                        score = float(tcb_score)
+                        score += alert_profile_score_adjustment(
+                            win_rate=edge.get("win_rate_pct"),
+                            confidence=tcb_conf,
+                            expectancy=edge.get("expectancy_rr"),
+                            trades=edge.get("trades"),
+                        )
+                        if isinstance(edge.get("win_rate_pct"), (int, float)):
+                            score += max(-3.0, min(8.0, (float(edge["win_rate_pct"]) - 50.0) * 0.20))
+                        if isinstance(edge.get("expectancy_rr"), (int, float)):
+                            score += max(-4.0, min(8.0, float(edge["expectancy_rr"]) * 8.0))
+                        if isinstance(edge.get("trades"), (int, float)):
+                            score += max(0.0, min(4.0, float(edge["trades"]) / 8.0))
+                        context_key = "|".join(
+                            [
+                                str(tcb_plan.get("last_signal_time") or ""),
+                                str(tcb_plan.get("trend_1h") or ""),
+                                str(tcb_plan.get("breakout_level") or ""),
+                            ]
+                        ).strip("|") or (format_price_value(tcb_plan.get("entry_price")) or "na")
+                        candidates.append(
+                            {
+                                "symbol": symbol,
+                                "strategy": "TCB15",
+                                "signal": tcb_signal,
+                                "score": float(score),
+                                "confidence": float(tcb_conf),
+                                "plan": tcb_plan,
+                                "item": item,
+                                "edge_metrics": edge,
+                                "message": tcb_message,
+                                "cache_key": f"TCB15|{symbol}|{tcb_signal}|{context_key}",
                             }
                         )
 
@@ -539,4 +589,3 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
     )
 
     return sent
-

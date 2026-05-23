@@ -371,6 +371,7 @@ def build_cdc_daily_trend_candidates(results, *, config, helpers, get_now, exist
     plan_confidence_value = helpers["plan_confidence_value"]
     candidate_edge_metrics = helpers["candidate_edge_metrics"]
     build_cdc_vixfix_message = helpers["build_cdc_vixfix_message"]
+    symbol_profiles = getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {}) or {}
 
     enabled = bool(getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_ENABLE", True))
     if not enabled:
@@ -429,10 +430,19 @@ def build_cdc_daily_trend_candidates(results, *, config, helpers, get_now, exist
         forecast_score = cdc_plan.get("forecast_score")
         trend_color = str(cdc_plan.get("trend_color") or "").upper().strip()
         trigger = str(cdc_plan.get("sell_trigger") or cdc_plan.get("exit_trigger") or "").upper().strip()
+        profile = symbol_profiles.get(symbol) if isinstance(symbol_profiles.get(symbol), dict) else {}
+        profile_min_forecast_score = profile.get("forecast_min_score")
         try:
             forecast_score = float(forecast_score)
         except Exception:
             forecast_score = None
+        try:
+            profile_min_forecast_score = float(profile_min_forecast_score)
+        except Exception:
+            profile_min_forecast_score = None
+        effective_min_forecast_score = float(min_forecast_score)
+        if isinstance(profile_min_forecast_score, (int, float)):
+            effective_min_forecast_score = max(effective_min_forecast_score, float(profile_min_forecast_score))
         if signal == "SELL":
             if trigger in exit_sell_triggers and not allow_exit_sell:
                 continue
@@ -440,7 +450,7 @@ def build_cdc_daily_trend_candidates(results, *, config, helpers, get_now, exist
                 continue
         if require_forecast_alignment and forecast_dir != signal:
             continue
-        if isinstance(forecast_score, (int, float)) and float(forecast_score) < float(min_forecast_score):
+        if isinstance(forecast_score, (int, float)) and float(forecast_score) < effective_min_forecast_score:
             continue
         if require_trend_color_alignment:
             expected_trend_color = "GREEN" if signal == "BUY" else "RED"
@@ -472,7 +482,7 @@ def build_cdc_daily_trend_candidates(results, *, config, helpers, get_now, exist
             elif signal == "BUY":
                 score += 2.0
         if isinstance(forecast_score, (int, float)):
-            score += max(0.0, min(8.0, (float(forecast_score) - float(min_forecast_score)) * 0.35))
+            score += max(0.0, min(8.0, (float(forecast_score) - effective_min_forecast_score) * 0.35))
         if trend_color == ("GREEN" if signal == "BUY" else "RED"):
             score += 4.0
         if isinstance(win_rate, (int, float)):

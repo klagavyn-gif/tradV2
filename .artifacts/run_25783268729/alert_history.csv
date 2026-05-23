@@ -1,0 +1,31 @@
+﻿timestamp,strategy,symbol,signal,alert_tier,alert_tier_score,tier_action,alert_mode,confidence,score,daily_pick,source_label,strategy_label,entry_price,stop_loss,take_profit,risk_reward,detected_pattern,forecast_direction,plan_reason,min_confidence,dynamic_min_confidence,backtest_win_rate_pct,backtest_expectancy_rr,backtest_trades,cache_key,message_plain
+2026-05-13 13:50:21,CDCVIX15,LINK-USD,BUY,A,87.5,ใช้กำหนด bias ของวัน แล้วรอระบบหลักยืนยันก่อนเข้าไม้จริง,Daily Trend,95.0,108.0,False,Trade Plan,,10.501999855041504,10.34446985721588,,,None,BUY,"CDC ยังหนุนขาขึ้น, เพิ่งมี VixFix spike ฝั่ง panic low และโมเมนตัมเริ่มฟื้น",69.0,66.20715644545571,95.0,,0.0,CDCVIX15DAILY|LINK-USD|BUY|20260513,"🟢 CDC+VixFix 15m BUY | LINK-USD
+LINK-USD
+🧭 โหมด: Daily Trend
+────────────────
+📍 จุดอ้างอิง: 10.50 | ราคาปัจจุบัน: 10.52 | SL: 10.34 | เปลี่ยนแปลง: +0.00%
+📊 ความมั่นใจ: 95%
+🏷️ ระดับสัญญาณ: A | Precision Setup
+🧠 วิธีใช้: ใช้กำหนด bias ของวัน แล้วรอระบบหลักยืนยันก่อนเข้าไม้จริง
+🧪 โปรไฟล์: คัดเข้ม เน้นไม้ที่สถิติและโครงสร้างพร้อมสุด
+📚 ค่าอ้างอิง: Confidence ล่าสุด 95%
+✅ ใช้ตัดสินใจ: Conf 95%
+🧭 คาดทิศทาง: BUY (92/100)
+📐 โครงสร้าง: ขาขึ้น
+🧠 มุมมองหลัก: CDC ยังหนุนขาขึ้น, เพิ่งมี VixFix spike ฝั่ง panic low และโมเมนตัมเริ่มฟื้น
+────────────────
+🛡️ จุดตัดขาดทุน (SL): 10.34
+🧠 หลักการวาง SL: อิงจุดที่สมมติฐานการยืดตัวหรือกลับตัวเสีย ไม่ใช่ตั้ง stop แบบตายตัว
+📏 ระยะห่างถึง SL: 1.50% จากจุดเข้า
+❌ Invalidation: มุมมอง BUY จะเสียเมื่อราคาหลุด 10.34
+────────────────
+🔎 เหตุผลเชิงวิเคราะห์:
+• CDC อยู่ในโซนเขียว: EMA 12/26 เรียงตัวขาขึ้น และราคายืนเหนือ EMA เร็ว
+• โมเมนตัมยังหนุนฝั่งซื้อ โดย K/D = 47.1/45.7
+• Forecast สอดคล้องกับสัญญาณฝั่ง BUY (92/100)
+• สัญญาณเกิดมาแล้ว 3 แท่งบนกรอบ 15m
+🧭 Timeframe Reference: Trend reference: 1H | Entry pattern: 15m
+────────────────
+🕒 สัญญาณล่าสุด: 2026-05-13 13:15
+⏱️ เวลา: 2026-05-13 13:50
+📈 ดูชาร์ตบน TradingView"

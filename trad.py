@@ -4316,9 +4316,9 @@ def _cdc_forecast_bias(close, fast, slow, k, d, market_top, momentum_lookback=3)
         reasons.append("VixFix เข้าพื้นที่เสี่ยงยอด")
     gap = abs(bull_score - bear_score)
     direction = "NEUTRAL"
-    if bull_score >= bear_score + 8.0:
+    if bull_score >= bear_score + 5.0:
         direction = "BUY"
-    elif bear_score >= bull_score + 8.0:
+    elif bear_score >= bull_score + 5.0:
         direction = "SELL"
     score = min(92.0, 50.0 + gap)
     return {

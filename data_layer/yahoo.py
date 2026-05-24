@@ -293,6 +293,156 @@ def prefer_chart_api(*, config, environ):
     return str(environ.get("GITHUB_ACTIONS", "")).strip().lower() == "true"
 
 
+def interval_to_minutes(interval):
+    text = str(interval or "").strip().lower()
+    if not text:
+        return None
+    if text == "1h":
+        return 60
+    import re
+
+    m = re.match(r"^(\d+)(m|h|d|wk|w|mo)$", text)
+    if not m:
+        return None
+    value = int(m.group(1))
+    unit = m.group(2)
+    if unit == "m":
+        return value
+    if unit == "h":
+        return value * 60
+    if unit == "d":
+        return value * 1440
+    if unit in ("w", "wk"):
+        return value * 7 * 1440
+    if unit == "mo":
+        return value * 30 * 1440
+    return None
+
+
+def history_last_bar_age_minutes(df, *, interval=None, tz_name="Asia/Bangkok", now_getter=None):
+    if df is None or getattr(df, "empty", True):
+        return None
+    try:
+        last_ts = df.index.max()
+    except Exception:
+        return None
+    if pd.isna(last_ts):
+        return None
+    try:
+        last_ts = pd.Timestamp(last_ts)
+    except Exception:
+        return None
+    try:
+        if last_ts.tzinfo is not None:
+            last_dt = last_ts.tz_convert(pytz.timezone(tz_name)).to_pydatetime().replace(tzinfo=None)
+        else:
+            last_dt = last_ts.to_pydatetime().replace(tzinfo=None)
+    except Exception:
+        try:
+            last_dt = pd.to_datetime(last_ts).to_pydatetime().replace(tzinfo=None)
+        except Exception:
+            return None
+    now_dt = now_getter() if callable(now_getter) else datetime.now(pytz.timezone(tz_name)).replace(tzinfo=None)
+    try:
+        age_minutes = max(0.0, (now_dt - last_dt).total_seconds() / 60.0)
+    except Exception:
+        return None
+    interval_minutes = interval_to_minutes(interval)
+    if isinstance(interval_minutes, int) and interval_minutes > 0 and age_minutes <= float(interval_minutes):
+        return 0.0
+    return age_minutes
+
+
+def disk_fallback_policy(interval, *, auth_error_seen=False, config, environ=None):
+    env = environ if isinstance(environ, dict) else os.environ
+    on_github = str(env.get("GITHUB_ACTIONS", "")).strip().lower() == "true"
+    if auth_error_seen:
+        enabled = bool(getattr(config, "YF_AUTH_DISK_FALLBACK_ENABLE", True))
+        github_only = bool(getattr(config, "YF_AUTH_DISK_FALLBACK_GITHUB_ONLY", True))
+        max_age_minutes = float(getattr(config, "YF_AUTH_DISK_FALLBACK_MAX_AGE_MINUTES", 1440))
+        max_stale_bars = int(getattr(config, "YF_AUTH_DISK_FALLBACK_MAX_STALE_BARS", 12))
+        grace_minutes = float(getattr(config, "YF_AUTH_DISK_FALLBACK_GRACE_MINUTES", 5.0))
+        if github_only and not on_github:
+            enabled = False
+    else:
+        enabled = bool(getattr(config, "YF_DISK_FALLBACK_ENABLE", True))
+        max_age_minutes = float(getattr(config, "YF_DISK_FALLBACK_MAX_AGE_MINUTES", 720))
+        max_stale_bars = int(getattr(config, "YF_DISK_FALLBACK_MAX_STALE_BARS", 8))
+        grace_minutes = float(getattr(config, "YF_DISK_FALLBACK_GRACE_MINUTES", 5.0))
+    interval_minutes = interval_to_minutes(interval)
+    allowed_age_minutes = None
+    if isinstance(interval_minutes, int) and interval_minutes > 0 and max_stale_bars > 0:
+        allowed_age_minutes = float(interval_minutes * max_stale_bars) + max(0.0, grace_minutes)
+    if max_age_minutes > 0:
+        allowed_age_minutes = (
+            min(allowed_age_minutes, max_age_minutes)
+            if isinstance(allowed_age_minutes, (int, float))
+            else max_age_minutes
+        )
+    return {
+        "enabled": bool(enabled),
+        "on_github": on_github,
+        "allowed_age_minutes": allowed_age_minutes,
+        "interval_minutes": interval_minutes,
+        "auth_error_seen": bool(auth_error_seen),
+    }
+
+
+def resolve_disk_history_fallback(
+    disk_df,
+    period,
+    *,
+    interval=None,
+    auth_error_seen=False,
+    config,
+    logger,
+    slice_history_by_period_fn,
+):
+    meta = {
+        "used": False,
+        "reason": "disabled",
+        "detail": None,
+        "age_minutes": None,
+        "allowed_age_minutes": None,
+    }
+    if disk_df is None or getattr(disk_df, "empty", True):
+        meta["reason"] = "missing"
+        meta["detail"] = "disk_history_missing"
+        return None, meta
+    policy = disk_fallback_policy(interval, auth_error_seen=auth_error_seen, config=config)
+    meta["allowed_age_minutes"] = policy.get("allowed_age_minutes")
+    if not policy.get("enabled"):
+        meta["reason"] = "disabled"
+        meta["detail"] = "disk_history_disabled"
+        return None, meta
+    sliced_disk = slice_history_by_period_fn(disk_df, period)
+    if sliced_disk is None or getattr(sliced_disk, "empty", True):
+        meta["reason"] = "empty"
+        meta["detail"] = "disk_history_empty"
+        return None, meta
+    age_minutes = history_last_bar_age_minutes(sliced_disk, interval=interval)
+    meta["age_minutes"] = age_minutes
+    allowed_age_minutes = policy.get("allowed_age_minutes")
+    if isinstance(age_minutes, (int, float)) and isinstance(allowed_age_minutes, (int, float)) and age_minutes > allowed_age_minutes:
+        meta["reason"] = "stale"
+        meta["detail"] = f"disk_history_stale:{round(age_minutes, 1)}m>{round(allowed_age_minutes, 1)}m"
+        logger.warning(
+            "Skipping Yahoo disk fallback because cached history is stale for interval=%s: age=%.1fm allowed=%.1fm",
+            interval,
+            age_minutes,
+            allowed_age_minutes,
+        )
+        return None, meta
+    meta["used"] = True
+    meta["reason"] = "ok"
+    fallback_type = "auth_disk_history" if auth_error_seen else "disk_history"
+    if isinstance(age_minutes, (int, float)):
+        meta["detail"] = f"{fallback_type}:{round(age_minutes, 1)}m"
+    else:
+        meta["detail"] = fallback_type
+    return sliced_disk, meta
+
+
 def fetch_yahoo_chart_history(
     symbol,
     period,
@@ -608,19 +758,37 @@ def get_yf_history(
                                 elapsed_ms=(time.perf_counter() - chart_started) * 1000.0,
                             )
                             logger.warning("Yahoo chart API fallback failed for %s: %s", sym, chart_e)
-                    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-                        sliced_disk = slice_history_by_period_fn(disk_df, period)
+                    fallback_df, fallback_meta = resolve_disk_history_fallback(
+                        disk_df,
+                        period,
+                        interval=interval,
+                        auth_error_seen=auth_error_seen,
+                        config=config,
+                        logger=logger,
+                        slice_history_by_period_fn=slice_history_by_period_fn,
+                    )
+                    if isinstance(fallback_df, pd.DataFrame) and not fallback_df.empty:
                         record_source_health_event_fn(
                             "disk_history",
                             "fallback",
                             symbol=sym,
-                            detail="empty_remote_history",
+                            detail=fallback_meta.get("detail") or "empty_remote_history",
                             attempt=attempt + 1,
                             period=period,
                             interval=interval,
                         )
-                        cache_set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-                        return sliced_disk.copy()
+                        cache_set(key, fallback_df, ttl_seconds=cache_ttl_seconds)
+                        return fallback_df.copy()
+                    if fallback_meta.get("reason") == "stale":
+                        record_source_health_event_fn(
+                            "disk_history",
+                            "stale",
+                            symbol=sym,
+                            detail=fallback_meta.get("detail"),
+                            attempt=attempt + 1,
+                            period=period,
+                            interval=interval,
+                        )
                     record_source_health_event_fn(
                         "history_fetch",
                         "empty",
@@ -741,34 +909,70 @@ def get_yf_history(
                 interval=interval,
             )
             logger.warning("Error fetching %s: %s", sym, e, exc_info=True)
-            if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-                sliced_disk = slice_history_by_period_fn(disk_df, period)
+            fallback_df, fallback_meta = resolve_disk_history_fallback(
+                disk_df,
+                period,
+                interval=interval,
+                auth_error_seen=auth_error_seen,
+                config=config,
+                logger=logger,
+                slice_history_by_period_fn=slice_history_by_period_fn,
+            )
+            if isinstance(fallback_df, pd.DataFrame) and not fallback_df.empty:
                 record_source_health_event_fn(
                     "disk_history",
                     "fallback",
                     symbol=sym,
-                    detail="exception_remote_history",
+                    detail=fallback_meta.get("detail") or "exception_remote_history",
                     attempt=attempt + 1,
                     period=period,
                     interval=interval,
                 )
-                cache_set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-                return sliced_disk.copy()
+                cache_set(key, fallback_df, ttl_seconds=cache_ttl_seconds)
+                return fallback_df.copy()
+            if fallback_meta.get("reason") == "stale":
+                record_source_health_event_fn(
+                    "disk_history",
+                    "stale",
+                    symbol=sym,
+                    detail=fallback_meta.get("detail"),
+                    attempt=attempt + 1,
+                    period=period,
+                    interval=interval,
+                )
             cache_set(key, empty_sentinel, ttl_seconds=8)
             return None
-    if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
-        sliced_disk = slice_history_by_period_fn(disk_df, period)
+    fallback_df, fallback_meta = resolve_disk_history_fallback(
+        disk_df,
+        period,
+        interval=interval,
+        auth_error_seen=auth_error_seen,
+        config=config,
+        logger=logger,
+        slice_history_by_period_fn=slice_history_by_period_fn,
+    )
+    if isinstance(fallback_df, pd.DataFrame) and not fallback_df.empty:
         record_source_health_event_fn(
             "disk_history",
             "fallback",
             symbol=sym,
-            detail="post_retry_fallback",
+            detail=fallback_meta.get("detail") or "post_retry_fallback",
             attempt=max_retries,
             period=period,
             interval=interval,
         )
-        cache_set(key, sliced_disk, ttl_seconds=cache_ttl_seconds)
-        return sliced_disk.copy()
+        cache_set(key, fallback_df, ttl_seconds=cache_ttl_seconds)
+        return fallback_df.copy()
+    if fallback_meta.get("reason") == "stale":
+        record_source_health_event_fn(
+            "disk_history",
+            "stale",
+            symbol=sym,
+            detail=fallback_meta.get("detail"),
+            attempt=max_retries,
+            period=period,
+            interval=interval,
+        )
     record_source_health_event_fn(
         "history_fetch",
         "unavailable",

@@ -3,8 +3,10 @@ __pycache__/
 
 .yf_cache/
 .data/telegram_alerts/
+.git.broken
 
 _probe_push.py
 _stable_test_arg.json
 _tmp_metric_completion_check.json
+.tmp_strategy_summary.json
 aw15_step*.txt

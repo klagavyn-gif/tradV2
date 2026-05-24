@@ -30,6 +30,118 @@ def is_daily_best_pick_window(*, config, get_now):
     return 0.0 <= delta_minutes < float(window_minutes)
 
 
+def _normalize_symbol_allowlist(raw_values, normalize_symbol):
+    symbols = set()
+    if isinstance(raw_values, (set, list, tuple)):
+        iterable = list(raw_values)
+    else:
+        iterable = str(raw_values or "").split(",")
+    for value in iterable:
+        symbol = normalize_symbol(value or "")
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def _build_daily_best_cdc_followthrough_plan(item, *, config, helpers, signal):
+    if str(signal or "").upper().strip() != "BUY":
+        return None
+    if not bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE", True)):
+        return None
+    normalize_symbol = helpers["normalize_symbol"]
+    plan_confidence_value = helpers["plan_confidence_value"]
+    symbol = normalize_symbol(item.get("symbol") or "")
+    cdc_plan = item.get("cdc_vixfix_15m")
+    if not symbol or not isinstance(cdc_plan, dict):
+        return None
+    allowlist = _normalize_symbol_allowlist(
+        getattr(config, "TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST", ()),
+        normalize_symbol,
+    )
+    if allowlist and symbol not in allowlist:
+        return None
+    if str(cdc_plan.get("signal") or "").upper().strip() == "BUY":
+        return None
+    trend_color = str(cdc_plan.get("trend_color") or "").upper().strip()
+    if trend_color != "GREEN":
+        return None
+    symbol_profiles = getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {})
+    profile = symbol_profiles.get(symbol) if isinstance(symbol_profiles, dict) and isinstance(symbol_profiles.get(symbol), dict) else {}
+    min_red_to_green_score = profile.get(
+        "daily_best_min_red_to_green_score",
+        getattr(config, "TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE", 68.0),
+    )
+    max_bars_since_flip = profile.get(
+        "daily_best_max_bars_since_flip",
+        getattr(config, "TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP", 3),
+    )
+    require_reclaim = profile.get(
+        "daily_best_require_reclaim",
+        getattr(config, "TELEGRAM_DAILY_BEST_PICK_CDC_REQUIRE_RECLAIM", True),
+    )
+    try:
+        min_red_to_green_score = float(min_red_to_green_score)
+    except Exception:
+        min_red_to_green_score = 68.0
+    try:
+        max_bars_since_flip = max(0, int(max_bars_since_flip))
+    except Exception:
+        max_bars_since_flip = 3
+    red_to_green_score = cdc_plan.get("red_to_green_quality_score")
+    green_flip_bars_since = cdc_plan.get("green_flip_bars_since")
+    green_flip_reclaim = bool(cdc_plan.get("green_flip_reclaim"))
+    try:
+        red_to_green_score = float(red_to_green_score)
+    except Exception:
+        return None
+    try:
+        green_flip_bars_since = int(green_flip_bars_since)
+    except Exception:
+        return None
+    if red_to_green_score < min_red_to_green_score:
+        return None
+    if green_flip_bars_since > max_bars_since_flip:
+        return None
+    if require_reclaim and green_flip_bars_since > 0 and not green_flip_reclaim:
+        return None
+    forecast_dir = str(cdc_plan.get("forecast_direction") or "").upper().strip()
+    forecast_score = cdc_plan.get("forecast_score")
+    try:
+        forecast_score = float(forecast_score)
+    except Exception:
+        forecast_score = None
+    if forecast_dir == "SELL" and isinstance(forecast_score, float) and forecast_score >= 60.0:
+        return None
+    confidence = plan_confidence_value(cdc_plan)
+    if not isinstance(confidence, (int, float)):
+        confidence = red_to_green_score
+    confidence = max(float(confidence), min(95.0, float(red_to_green_score) - 2.0))
+    analysis_points = list(cdc_plan.get("analysis_points") or [])
+    analysis_points.insert(
+        0,
+        f"Daily Best Pick ใช้ CDC red->green score {float(red_to_green_score):.0f}/100 กับเหรียญใน Telegram Alerts",
+    )
+    if green_flip_reclaim:
+        analysis_points.insert(1, "ราคายืนยันเหนือ high ของแท่งกลับตัวล่าสุดแล้ว")
+    synthetic_plan = dict(cdc_plan)
+    synthetic_plan.update(
+        {
+            "signal": "BUY",
+            "confidence": min(95.0, float(confidence)),
+            "source_label": "CDC+VixFix 15m Red->Green",
+            "setup": "POST_FLIP_RECLAIM" if green_flip_reclaim else "POST_FLIP_FOLLOW_THROUGH",
+            "reason": "Daily Best Pick อนุญาตจังหวะ BUY หลัง CDC พลิกเขียวและมี follow-through/reclaim ตาม threshold รายเหรียญ",
+            "entry_price": synthetic_plan.get("current_price") or synthetic_plan.get("entry_price"),
+            "bars_since_signal": green_flip_bars_since,
+            "bars_since_entry": green_flip_bars_since,
+            "daily_best_cdc_followthrough": True,
+            "daily_best_cdc_symbol": symbol,
+            "analysis_points": analysis_points[:6],
+        }
+    )
+    return synthetic_plan
+
+
 def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
     normalize_symbol = helpers["normalize_symbol"]
     pick_primary_trade_plan = helpers["pick_primary_trade_plan"]
@@ -42,7 +154,12 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
     pick_plan_value = helpers["pick_plan_value"]
     build_daily_best_pick_message = helpers["build_daily_best_pick_message"]
     evaluate_candidate_backtest_gate = helpers["evaluate_candidate_backtest_gate"]
+    evaluate_candidate_symbol_strategy_gate = helpers["evaluate_candidate_symbol_strategy_gate"]
     candidate_edge_metrics = helpers["candidate_edge_metrics"]
+    symbol_allowlist = _normalize_symbol_allowlist(
+        getattr(config, "TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST", ()),
+        normalize_symbol,
+    )
 
     min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
     min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_SCORE", 74.0)
@@ -55,13 +172,6 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
     relaxed_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE", 55.0)
     relaxed_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES", 4)
     relaxed_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR", 0.0)
-    baseline_enable = bool(getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_ENABLE", True))
-    baseline_min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_CONFIDENCE", 54.0)
-    baseline_min_score = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_SCORE", 60.0)
-    baseline_min_wr = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_WIN_RATE", 52.0)
-    baseline_min_trades = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_TRADES", 2)
-    baseline_min_exp = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_EXPECTANCY_RR", -0.02)
-    baseline_target_per_day = getattr(config, "TELEGRAM_DAILY_BEST_PICK_BASELINE_TARGET_PER_DAY", 1)
     try:
         min_conf = float(min_conf)
     except Exception:
@@ -94,38 +204,11 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
         relaxed_min_exp = float(relaxed_min_exp)
     except Exception:
         relaxed_min_exp = 0.0
-    try:
-        baseline_min_conf = float(baseline_min_conf)
-    except Exception:
-        baseline_min_conf = 54.0
-    try:
-        baseline_min_score = float(baseline_min_score)
-    except Exception:
-        baseline_min_score = 60.0
-    try:
-        baseline_min_wr = float(baseline_min_wr)
-    except Exception:
-        baseline_min_wr = 52.0
-    try:
-        baseline_min_trades = int(baseline_min_trades)
-    except Exception:
-        baseline_min_trades = 2
-    try:
-        baseline_min_exp = float(baseline_min_exp)
-    except Exception:
-        baseline_min_exp = -0.02
-    try:
-        baseline_target_per_day = int(baseline_target_per_day)
-    except Exception:
-        baseline_target_per_day = 1
     if max_per_day < 1:
         max_per_day = 1
-    if baseline_target_per_day < 0:
-        baseline_target_per_day = 0
 
     candidates = []
     relaxed_candidates = []
-    baseline_candidates = []
     today_key = get_now().strftime("%Y%m%d")
     for item in results or []:
         if not isinstance(item, dict) or item.get("error"):
@@ -133,9 +216,17 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
         symbol = normalize_symbol(item.get("symbol") or "")
         if not symbol:
             continue
+        if symbol_allowlist and symbol not in symbol_allowlist:
+            continue
         top_signal = str(item.get("signal") or "").upper().strip()
         for signal in ("BUY", "SELL"):
             active_require_quality = require_quality
+            synthetic_cdc_plan = _build_daily_best_cdc_followthrough_plan(
+                item,
+                config=config,
+                helpers=helpers,
+                signal=signal,
+            )
             primary_plan = pick_primary_trade_plan(
                 item,
                 signal=signal,
@@ -150,6 +241,9 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                     require_quality=False,
                     allow_cdc=allow_cdc,
                 )
+            if not isinstance(primary_plan, dict) and isinstance(synthetic_cdc_plan, dict):
+                active_require_quality = False
+                primary_plan = synthetic_cdc_plan
             if not isinstance(primary_plan, dict):
                 continue
             best_conf = get_best_confidence(
@@ -158,9 +252,13 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 require_quality=active_require_quality,
                 allow_cdc=allow_cdc,
             )
+            if isinstance(primary_plan, dict) and bool(primary_plan.get("daily_best_cdc_followthrough")):
+                synthetic_conf = plan_confidence_value(primary_plan)
+                if isinstance(synthetic_conf, (int, float)):
+                    best_conf = max(float(best_conf or 0.0), float(synthetic_conf))
             if best_conf is None:
                 best_conf = plan_confidence_value(primary_plan)
-            if best_conf is None or float(best_conf) < float(min(relaxed_min_conf, baseline_min_conf)):
+            if best_conf is None or float(best_conf) < float(relaxed_min_conf):
                 continue
             source_floor = max(45.0, min(float(best_conf), float(min_conf)))
             sources = collect_alert_sources(
@@ -170,6 +268,11 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 require_quality=active_require_quality,
                 allow_cdc=allow_cdc,
             )
+            if bool(primary_plan.get("daily_best_cdc_followthrough")):
+                cdc_source = f"CDC+VixFix 15m Red->Green ({float(best_conf):.0f}%)"
+                if not any("CDC+VixFix 15m" in str(row) for row in sources):
+                    sources = [cdc_source] + list(sources)
+                sources = sources[:3]
             edge = extract_signal_edge_metrics(primary_plan, signal)
             strategy_label = get_primary_plan_source_label(item, primary_plan)
             score = float(best_conf)
@@ -207,6 +310,12 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 score += max(-4.0, min(8.0, float(exp) * 8.0))
             if isinstance(trades, (int, float)):
                 score += max(0.0, min(4.0, float(trades) / 8.0))
+            if bool(primary_plan.get("daily_best_cdc_followthrough")):
+                red_to_green_score = safe_float(primary_plan.get("red_to_green_quality_score"), None)
+                if isinstance(red_to_green_score, float):
+                    score += max(0.0, min(10.0, (float(red_to_green_score) - 65.0) * 0.35))
+                if bool(primary_plan.get("green_flip_reclaim")):
+                    score += 5.0
             score += min(6.0, float(len(sources)) * 1.5)
             message = build_daily_best_pick_message(
                 item,
@@ -229,64 +338,25 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 "plan": primary_plan,
                 "item": item,
                 "edge_metrics": edge,
+                "source_count": len(sources),
                 "message": message,
                 "strategy_label": strategy_label,
             }
             gate_ok, _, normalized_edge = evaluate_candidate_backtest_gate(candidate)
             if gate_ok and float(best_conf) >= float(min_conf):
                 candidate["edge_metrics"] = normalized_edge
-                candidates.append(candidate)
-                continue
+                profile_ok, _, profile_edge = evaluate_candidate_symbol_strategy_gate(candidate)
+                if profile_ok:
+                    if isinstance(profile_edge, dict) and profile_edge:
+                        candidate["edge_metrics"] = profile_edge
+                    candidates.append(candidate)
+                    continue
             if not relaxed_enable:
                 continue
             relaxed_edge = normalized_edge if isinstance(normalized_edge, dict) else candidate_edge_metrics(candidate)
             relaxed_wr = relaxed_edge.get("win_rate_pct")
             relaxed_exp = relaxed_edge.get("expectancy_rr")
             relaxed_trades = relaxed_edge.get("trades")
-            baseline_sources = sources[:]
-            if not baseline_sources and strategy_label:
-                baseline_sources = [str(strategy_label)]
-            if baseline_enable:
-                baseline_ok = True
-                if float(score) < float(baseline_min_score):
-                    baseline_ok = False
-                if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(baseline_min_wr):
-                    baseline_ok = False
-                if float(baseline_min_trades) > 0:
-                    baseline_trade_ok = isinstance(relaxed_trades, (int, float)) and float(relaxed_trades) >= float(baseline_min_trades)
-                    if not baseline_trade_ok:
-                        baseline_trade_ok = (
-                            isinstance(relaxed_wr, (int, float))
-                            and float(relaxed_wr) >= max(float(baseline_min_wr) + 4.0, 56.0)
-                            and float(best_conf) >= max(float(baseline_min_conf) + 4.0, 58.0)
-                            and float(score) >= float(baseline_min_score) + 3.0
-                        )
-                    if not baseline_trade_ok:
-                        baseline_ok = False
-                if isinstance(relaxed_exp, (int, float)) and float(relaxed_exp) < float(baseline_min_exp):
-                    baseline_ok = False
-                if float(best_conf) < float(baseline_min_conf):
-                    baseline_ok = False
-                if baseline_ok:
-                    baseline_message = build_daily_best_pick_message(
-                        item,
-                        signal,
-                        float(best_conf),
-                        baseline_sources,
-                        primary_plan=primary_plan,
-                        strategy_label=strategy_label,
-                        selection_score=score,
-                        mode_label="Baseline Trend Pick",
-                    )
-                    if isinstance(baseline_message, str) and baseline_message.strip():
-                        baseline_candidate = dict(candidate)
-                        baseline_candidate["message"] = baseline_message
-                        baseline_candidate["edge_metrics"] = relaxed_edge
-                        baseline_candidate["score"] = float(score)
-                        baseline_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Baseline Trend").strip(" |")
-                        baseline_candidate["cache_key"] = f"DAILYBESTBASE|{symbol}|{signal}|{today_key}"
-                        baseline_candidate["daily_best_mode"] = "baseline"
-                        baseline_candidates.append(baseline_candidate)
             if float(score) < float(relaxed_min_score):
                 continue
             if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(relaxed_min_wr):
@@ -317,6 +387,11 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
             relaxed_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Trend Pick").strip(" |")
             relaxed_candidate["cache_key"] = f"DAILYBESTRELAX|{symbol}|{signal}|{today_key}"
             relaxed_candidate["daily_best_mode"] = "relaxed"
+            profile_ok, _, profile_edge = evaluate_candidate_symbol_strategy_gate(relaxed_candidate)
+            if not profile_ok:
+                continue
+            if isinstance(profile_edge, dict) and profile_edge:
+                relaxed_candidate["edge_metrics"] = profile_edge
             relaxed_candidates.append(relaxed_candidate)
     if not candidates:
         candidates = relaxed_candidates
@@ -327,19 +402,6 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
             if not sym or sym in used_symbols:
                 continue
             candidates.append(row)
-    if baseline_enable and baseline_candidates:
-        used_symbols = {normalize_symbol(row.get("symbol") or "") for row in candidates if isinstance(row, dict)}
-        baseline_candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-        baseline_added = 0
-        for row in baseline_candidates:
-            if baseline_target_per_day > 0 and baseline_added >= baseline_target_per_day:
-                break
-            sym = normalize_symbol(row.get("symbol") or "")
-            if not sym or sym in used_symbols:
-                continue
-            candidates.append(row)
-            used_symbols.add(sym)
-            baseline_added += 1
     if not candidates:
         return []
     candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
@@ -350,168 +412,11 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
         if not symbol or symbol in seen_symbols:
             continue
         candidate_mode = str(candidate.get("daily_best_mode") or "strict").strip().lower()
-        if candidate_mode == "baseline":
-            candidate_min_score = float(baseline_min_score)
-        elif candidate_mode == "relaxed":
+        if candidate_mode == "relaxed":
             candidate_min_score = float(relaxed_min_score)
         else:
             candidate_min_score = float(min_score)
         if float(candidate.get("score", 0.0)) < candidate_min_score:
-            continue
-        selected.append(candidate)
-        seen_symbols.add(symbol)
-        if len(selected) >= max_per_day:
-            break
-    return selected
-
-
-def build_cdc_daily_trend_candidates(results, *, config, helpers, get_now, existing_candidates=None, min_conf=None):
-    normalize_symbol = helpers["normalize_symbol"]
-    plan_trade_direction = helpers["plan_trade_direction"]
-    plan_confidence_value = helpers["plan_confidence_value"]
-    candidate_edge_metrics = helpers["candidate_edge_metrics"]
-    build_cdc_vixfix_message = helpers["build_cdc_vixfix_message"]
-    symbol_profiles = getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {}) or {}
-
-    enabled = bool(getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_ENABLE", True))
-    if not enabled:
-        return []
-    max_per_day = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MAX_PER_DAY", 1)
-    min_confidence = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_CONFIDENCE", 56.0)
-    min_win_rate = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_WIN_RATE", 54.0)
-    min_score = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_SCORE", 61.0)
-    min_forecast_score = getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_MIN_FORECAST_SCORE", 62.0)
-    require_forecast_alignment = bool(
-        getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_FORECAST_ALIGNMENT", True)
-    )
-    require_trend_color_alignment = bool(
-        getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_TREND_COLOR_ALIGNMENT", True)
-    )
-    allow_exit_sell = bool(getattr(config, "CDC_VIXFIX_15M_DAILY_TREND_ALLOW_EXIT_SELL", False))
-    try:
-        max_per_day = max(1, int(max_per_day))
-    except Exception:
-        max_per_day = 1
-    try:
-        min_confidence = float(min_confidence)
-    except Exception:
-        min_confidence = 56.0
-    try:
-        min_win_rate = float(min_win_rate)
-    except Exception:
-        min_win_rate = 54.0
-    try:
-        min_score = float(min_score)
-    except Exception:
-        min_score = 61.0
-    try:
-        min_forecast_score = float(min_forecast_score)
-    except Exception:
-        min_forecast_score = 62.0
-    if isinstance(existing_candidates, list):
-        for row in existing_candidates:
-            if isinstance(row, dict) and str(row.get("strategy") or "").upper() == "CDCVIX15":
-                return []
-    candidates = []
-    today_key = get_now().strftime("%Y%m%d")
-    exit_sell_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
-    reversal_sell_triggers = {"CDC_RED_REVERSAL", "TREND_ROLLOVER"}
-    for item in results or []:
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
-        cdc_plan = item.get("cdc_vixfix_15m")
-        if not symbol or not isinstance(cdc_plan, dict):
-            continue
-        signal = plan_trade_direction(cdc_plan)
-        if signal not in ("BUY", "SELL"):
-            continue
-        forecast_dir = str(cdc_plan.get("forecast_direction") or "").upper().strip()
-        forecast_score = cdc_plan.get("forecast_score")
-        trend_color = str(cdc_plan.get("trend_color") or "").upper().strip()
-        trigger = str(cdc_plan.get("sell_trigger") or cdc_plan.get("exit_trigger") or "").upper().strip()
-        profile = symbol_profiles.get(symbol) if isinstance(symbol_profiles.get(symbol), dict) else {}
-        profile_min_forecast_score = profile.get("forecast_min_score")
-        try:
-            forecast_score = float(forecast_score)
-        except Exception:
-            forecast_score = None
-        try:
-            profile_min_forecast_score = float(profile_min_forecast_score)
-        except Exception:
-            profile_min_forecast_score = None
-        effective_min_forecast_score = float(min_forecast_score)
-        if isinstance(profile_min_forecast_score, (int, float)):
-            effective_min_forecast_score = max(effective_min_forecast_score, float(profile_min_forecast_score))
-        if signal == "SELL":
-            if trigger in exit_sell_triggers and not allow_exit_sell:
-                continue
-            if trigger and trigger not in reversal_sell_triggers and trigger not in exit_sell_triggers:
-                continue
-        if require_forecast_alignment and forecast_dir != signal:
-            continue
-        if isinstance(forecast_score, (int, float)) and float(forecast_score) < effective_min_forecast_score:
-            continue
-        if require_trend_color_alignment:
-            expected_trend_color = "GREEN" if signal == "BUY" else "RED"
-            if trend_color != expected_trend_color:
-                continue
-        confidence = plan_confidence_value(cdc_plan)
-        if not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence):
-            continue
-        candidate = {
-            "symbol": symbol,
-            "strategy": "CDCVIX15",
-            "signal": signal,
-            "plan": cdc_plan,
-            "item": item,
-            "confidence": float(confidence),
-        }
-        edge = candidate_edge_metrics(candidate)
-        win_rate = edge.get("win_rate_pct")
-        expectancy = edge.get("expectancy_rr")
-        trades = edge.get("trades")
-        if not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate):
-            continue
-        score = float(confidence)
-        if forecast_dir == signal:
-            score += 5.0
-        if trigger:
-            if trigger in reversal_sell_triggers:
-                score += 4.0
-            elif signal == "BUY":
-                score += 2.0
-        if isinstance(forecast_score, (int, float)):
-            score += max(0.0, min(8.0, (float(forecast_score) - effective_min_forecast_score) * 0.35))
-        if trend_color == ("GREEN" if signal == "BUY" else "RED"):
-            score += 4.0
-        if isinstance(win_rate, (int, float)):
-            score += max(-3.0, min(8.0, (float(win_rate) - 50.0) * 0.25))
-        if isinstance(expectancy, (int, float)):
-            score += max(-3.0, min(6.0, float(expectancy) * 8.0))
-        if isinstance(trades, (int, float)):
-            score += max(0.0, min(4.0, float(trades) / 6.0))
-        if float(score) < float(min_score):
-            continue
-        message = build_cdc_vixfix_message(item, cdc_plan, mode_label="Daily Trend")
-        if not isinstance(message, str) or not message.strip():
-            continue
-        candidate.update(
-            {
-                "score": float(score),
-                "edge_metrics": edge,
-                "message": message,
-                "cache_key": f"CDCVIX15DAILY|{symbol}|{signal}|{today_key}",
-                "cdc_mode": "daily_trend",
-            }
-        )
-        candidates.append(candidate)
-    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
-    selected = []
-    seen_symbols = set()
-    for candidate in candidates:
-        symbol = normalize_symbol(candidate.get("symbol") or "")
-        if not symbol or symbol in seen_symbols:
             continue
         selected.append(candidate)
         seen_symbols.add(symbol)

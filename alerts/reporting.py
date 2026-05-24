@@ -20,6 +20,7 @@ def alert_history_csv_fieldnames():
         "confidence",
         "score",
         "daily_pick",
+        "source_count",
         "source_label",
         "strategy_label",
         "entry_price",
@@ -28,7 +29,11 @@ def alert_history_csv_fieldnames():
         "risk_reward",
         "detected_pattern",
         "forecast_direction",
+        "forecast_score",
         "plan_reason",
+        "bars_since_signal",
+        "red_to_green_quality_score",
+        "green_flip_reclaim",
         "min_confidence",
         "dynamic_min_confidence",
         "backtest_win_rate_pct",
@@ -331,7 +336,12 @@ def record_telegram_alert_history(
         "risk_reward": float(plan.get("risk_reward")) if isinstance(plan, dict) and isinstance(plan.get("risk_reward"), (int, float)) else None,
         "detected_pattern": str(plan.get("detected_pattern") or "").strip() if isinstance(plan, dict) else None,
         "forecast_direction": str(plan.get("forecast_direction") or "").strip().upper() if isinstance(plan, dict) and str(plan.get("forecast_direction") or "").strip() else None,
+        "forecast_score": float(plan.get("forecast_score")) if isinstance(plan, dict) and isinstance(plan.get("forecast_score"), (int, float)) else None,
         "plan_reason": str(plan.get("reason") or "").strip() if isinstance(plan, dict) else None,
+        "source_count": int(candidate.get("source_count")) if isinstance(candidate.get("source_count"), (int, float)) else None,
+        "bars_since_signal": pick_plan_value(plan, ["bars_since_signal", "bars_since_entry"]) if isinstance(plan, dict) else None,
+        "red_to_green_quality_score": float(plan.get("red_to_green_quality_score")) if isinstance(plan, dict) and isinstance(plan.get("red_to_green_quality_score"), (int, float)) else None,
+        "green_flip_reclaim": bool(plan.get("green_flip_reclaim")) if isinstance(plan, dict) and "green_flip_reclaim" in plan else None,
     }
     path = helpers["alert_history_file_path"]()
     max_rows = getattr(config, "TELEGRAM_ALERT_HISTORY_MAX_ROWS", 5000)
@@ -574,7 +584,6 @@ def build_telegram_alert_live_preview(results, *, limit_examples_per_strategy=1,
     telegram_kill_switch_state = helpers["telegram_kill_switch_state"]
     telegram_dynamic_conf_threshold = helpers["telegram_dynamic_conf_threshold"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
-    build_cdc_daily_trend_candidates = helpers["build_cdc_daily_trend_candidates"]
     build_daily_best_pick_candidates = helpers["build_daily_best_pick_candidates"]
     normalize_symbol = helpers["normalize_symbol"]
     candidate_backtest_snapshot_fn = helpers["candidate_backtest_snapshot"]
@@ -585,9 +594,6 @@ def build_telegram_alert_live_preview(results, *, limit_examples_per_strategy=1,
     build_stats = {}
     if not kill:
         candidates, build_stats = build_telegram_candidates(results, dynamic_min_conf)
-        cdc_daily_candidates = build_cdc_daily_trend_candidates(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
-        if cdc_daily_candidates:
-            candidates.extend([row for row in cdc_daily_candidates if isinstance(row, dict)])
     daily_candidates = build_daily_best_pick_candidates(results)
     for row in daily_candidates:
         if isinstance(row, dict):

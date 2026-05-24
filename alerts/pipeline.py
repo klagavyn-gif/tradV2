@@ -28,6 +28,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
     pick_plan_value = helpers["pick_plan_value"]
     build_telegram_message = helpers["build_telegram_message"]
     evaluate_candidate_backtest_gate = helpers["evaluate_candidate_backtest_gate"]
+    evaluate_candidate_symbol_strategy_gate = helpers["evaluate_candidate_symbol_strategy_gate"]
     candidate_alert_profile = helpers["candidate_alert_profile"]
 
     candidates = []
@@ -379,6 +380,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                             "plan": primary_plan,
                             "item": item,
                             "edge_metrics": edge,
+                            "source_count": source_count,
                             "message": message,
                             "cache_key": f"PRIMARY|{symbol}|{signal}|{context_key}",
                         }
@@ -391,6 +393,12 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
             quality_drop_counts[gate_reason] += 1
             continue
         candidate["edge_metrics"] = edge_metrics
+        profile_ok, profile_reason, profile_metrics = evaluate_candidate_symbol_strategy_gate(candidate)
+        if not profile_ok:
+            quality_drop_counts[profile_reason] += 1
+            continue
+        if isinstance(profile_metrics, dict) and profile_metrics:
+            candidate["edge_metrics"] = profile_metrics
         candidate["alert_profile"] = candidate_alert_profile(candidate)
         filtered_candidates.append(candidate)
 
@@ -404,7 +412,6 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
     telegram_kill_switch_state = helpers["telegram_kill_switch_state"]
     telegram_dynamic_conf_threshold = helpers["telegram_dynamic_conf_threshold"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
-    build_cdc_daily_trend_candidates = helpers["build_cdc_daily_trend_candidates"]
     is_daily_best_pick_window = helpers["is_daily_best_pick_window"]
     build_daily_best_pick_candidates = helpers["build_daily_best_pick_candidates"]
     build_daily_summary_message = helpers["build_daily_summary_message"]
@@ -449,9 +456,6 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
     build_stats = {}
     if not kill:
         candidates, build_stats = build_telegram_candidates(results, dynamic_min_conf)
-        cdc_daily_candidates = build_cdc_daily_trend_candidates(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
-        if cdc_daily_candidates:
-            candidates.extend([row for row in cdc_daily_candidates if isinstance(row, dict)])
 
     quality_drop_counts = {}
     if isinstance(build_stats, dict):
@@ -459,7 +463,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
 
     if not candidates:
         logger.info(
-            "Telegram alerts: no candidates (min_conf=%.1f, dynamic_min_conf=%.1f, quality_drops=%s)",
+            "Telegram alerts: no primary candidates (min_conf=%.1f, dynamic_min_conf=%.1f, quality_drops=%s)",
             min_conf,
             dynamic_min_conf,
             json.dumps(quality_drop_counts, ensure_ascii=False),

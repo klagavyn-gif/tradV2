@@ -41,6 +41,16 @@ def _env_float(name, default=0.0):
         return float(default)
 
 
+def _env_csv_set(name, default=""):
+    raw = _env_str(name, default)
+    values = []
+    for part in str(raw or "").split(","):
+        text = str(part or "").strip().upper()
+        if text:
+            values.append(text)
+    return set(values)
+
+
 DATABASE_URI = _env_str("DATABASE_URI", "sqlite:///trading_app.db")
 
 SECRET_KEY = _env_str("SECRET_KEY", "")
@@ -61,6 +71,15 @@ YF_PREFER_CHART_API = _env_bool("YF_PREFER_CHART_API", False)
 YF_FETCH_MAX_RETRIES = _env_int("YF_FETCH_MAX_RETRIES", 3)
 YF_RETRY_BACKOFF_SECONDS = _env_float("YF_RETRY_BACKOFF_SECONDS", 1.25)
 YF_SOURCE_HEALTH_RECENT_EVENTS = _env_int("YF_SOURCE_HEALTH_RECENT_EVENTS", 40)
+YF_DISK_FALLBACK_ENABLE = _env_bool("YF_DISK_FALLBACK_ENABLE", True)
+YF_DISK_FALLBACK_MAX_AGE_MINUTES = _env_float("YF_DISK_FALLBACK_MAX_AGE_MINUTES", 720.0)
+YF_DISK_FALLBACK_MAX_STALE_BARS = _env_int("YF_DISK_FALLBACK_MAX_STALE_BARS", 8)
+YF_DISK_FALLBACK_GRACE_MINUTES = _env_float("YF_DISK_FALLBACK_GRACE_MINUTES", 5.0)
+YF_AUTH_DISK_FALLBACK_ENABLE = _env_bool("YF_AUTH_DISK_FALLBACK_ENABLE", True)
+YF_AUTH_DISK_FALLBACK_GITHUB_ONLY = _env_bool("YF_AUTH_DISK_FALLBACK_GITHUB_ONLY", True)
+YF_AUTH_DISK_FALLBACK_MAX_AGE_MINUTES = _env_float("YF_AUTH_DISK_FALLBACK_MAX_AGE_MINUTES", 1440.0)
+YF_AUTH_DISK_FALLBACK_MAX_STALE_BARS = _env_int("YF_AUTH_DISK_FALLBACK_MAX_STALE_BARS", 12)
+YF_AUTH_DISK_FALLBACK_GRACE_MINUTES = _env_float("YF_AUTH_DISK_FALLBACK_GRACE_MINUTES", 5.0)
 ANALYZE_MAX_WORKERS = _env_int("ANALYZE_MAX_WORKERS", 5)
 VERIFY_OUTPUT_PATH = _env_str("VERIFY_OUTPUT_PATH", ".data/telegram_alerts/verify_output.json")
 VERIFY_INCLUDE_RESULTS = _env_bool("VERIFY_INCLUDE_RESULTS", False)
@@ -100,6 +119,16 @@ TELEGRAM_ALERT_HISTORY_EXPORT_CSV = _env_bool("TELEGRAM_ALERT_HISTORY_EXPORT_CSV
 TELEGRAM_ALERT_RUN_REPORT_ENABLED = _env_bool("TELEGRAM_ALERT_RUN_REPORT_ENABLED", True)
 TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS = _env_int("TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS", 500)
 TELEGRAM_ALERT_RUN_REPORT_TOP_CANDIDATES = _env_int("TELEGRAM_ALERT_RUN_REPORT_TOP_CANDIDATES", 5)
+TELEGRAM_ALERT_AUTO_TUNE_ENABLE = _env_bool("TELEGRAM_ALERT_AUTO_TUNE_ENABLE", True)
+TELEGRAM_ALERT_AUTO_TUNE_HISTORY_DAYS = _env_int("TELEGRAM_ALERT_AUTO_TUNE_HISTORY_DAYS", 45)
+TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_SYMBOL = _env_int("TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_SYMBOL", 12)
+TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_STRATEGY = _env_int("TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_STRATEGY", 20)
+TELEGRAM_ALERT_AUTO_TUNE_TARGET_ALERTS_PER_DAY = _env_float("TELEGRAM_ALERT_AUTO_TUNE_TARGET_ALERTS_PER_DAY", 2.0)
+TELEGRAM_ALERT_AUTO_TUNE_TARGET_DAILY_PICKS_PER_DAY = _env_float("TELEGRAM_ALERT_AUTO_TUNE_TARGET_DAILY_PICKS_PER_DAY", 1.0)
+TELEGRAM_ALERT_AUTO_TUNE_OUTPUT_PATH = _env_str(
+    "TELEGRAM_ALERT_AUTO_TUNE_OUTPUT_PATH",
+    ".data/telegram_alerts/auto_tuned_thresholds.json",
+)
 TELEGRAM_DAILY_BEST_PICK_ENABLED = _env_bool("TELEGRAM_DAILY_BEST_PICK_ENABLED", True)
 TELEGRAM_DAILY_BEST_PICK_HOUR = _env_int("TELEGRAM_DAILY_BEST_PICK_HOUR", 9)
 TELEGRAM_DAILY_BEST_PICK_MINUTE = _env_int("TELEGRAM_DAILY_BEST_PICK_MINUTE", 0)
@@ -115,13 +144,14 @@ TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_SCORE = _env_float("TELEGRAM_DAILY_BEST_PIC
 TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE = _env_float("TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE", 55.0)
 TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES = _env_int("TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES", 4)
 TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR = _env_float("TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR", 0.0)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_ENABLE = _env_bool("TELEGRAM_DAILY_BEST_PICK_BASELINE_ENABLE", True)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_CONFIDENCE = _env_float("TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_CONFIDENCE", 52.0)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_SCORE = _env_float("TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_SCORE", 57.0)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_WIN_RATE = _env_float("TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_WIN_RATE", 51.0)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_TRADES = _env_int("TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_HIST_TRADES", 0)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_EXPECTANCY_RR = _env_float("TELEGRAM_DAILY_BEST_PICK_BASELINE_MIN_EXPECTANCY_RR", -0.03)
-TELEGRAM_DAILY_BEST_PICK_BASELINE_TARGET_PER_DAY = _env_int("TELEGRAM_DAILY_BEST_PICK_BASELINE_TARGET_PER_DAY", 1)
+TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST = _env_csv_set(
+    "TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST",
+    "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD",
+)
+TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE = _env_bool("TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE", True)
+TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE = _env_float("TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE", 68.0)
+TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP = _env_int("TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP", 3)
+TELEGRAM_DAILY_BEST_PICK_CDC_REQUIRE_RECLAIM = _env_bool("TELEGRAM_DAILY_BEST_PICK_CDC_REQUIRE_RECLAIM", True)
 TELEGRAM_DAILY_SUMMARY_ENABLED = _env_bool("TELEGRAM_DAILY_SUMMARY_ENABLED", True)
 TELEGRAM_DAILY_SUMMARY_TOP_N = _env_int("TELEGRAM_DAILY_SUMMARY_TOP_N", 3)
 TELEGRAM_KILL_SWITCH_ENABLED = _env_bool("TELEGRAM_KILL_SWITCH_ENABLED", False)
@@ -130,6 +160,184 @@ TELEGRAM_KILL_SWITCH_SELL_RATIO = _env_float("TELEGRAM_KILL_SWITCH_SELL_RATIO", 
 TELEGRAM_KILL_SWITCH_TREND_MISMATCH_RATIO = _env_float("TELEGRAM_KILL_SWITCH_TREND_MISMATCH_RATIO", 0.60)
 TELEGRAM_KILL_SWITCH_HIGH_VOL_PCT = _env_float("TELEGRAM_KILL_SWITCH_HIGH_VOL_PCT", 4.0)
 TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO = _env_float("TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO", 0.50)
+TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES = {
+    "SS15": {
+        "min_confidence": 64.0,
+        "min_win_rate_pct": 65.0,
+        "min_expectancy_rr": 0.15,
+        "min_trades": 8,
+    },
+    "AW15": {
+        "min_confidence": 68.0,
+        "min_score": 76.0,
+        "min_win_rate_pct": 56.0,
+        "min_expectancy_rr": 0.03,
+        "min_trades": 6,
+    },
+    "CDCVIX15": {
+        "buy_min_confidence": 66.0,
+        "sell_min_confidence": 70.0,
+        "min_score": 74.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.04,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+        "sell_min_robustness_score": 45.0,
+    },
+    "AZ15": {
+        "min_confidence": 76.0,
+        "min_score": 80.0,
+        "min_win_rate_pct": 58.0,
+        "min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "PA15": {
+        "min_confidence": 67.0,
+        "min_score": 72.0,
+        "min_win_rate_pct": 57.0,
+        "min_expectancy_rr": 0.04,
+        "min_trades": 8,
+    },
+    "TCB15": {
+        "min_confidence": 68.0,
+        "min_score": 73.0,
+        "min_win_rate_pct": 57.0,
+        "min_expectancy_rr": 0.04,
+        "min_trades": 8,
+    },
+    "PRIMARY": {
+        "min_confidence": 76.0,
+        "min_score": 82.0,
+        "min_win_rate_pct": 60.0,
+        "min_expectancy_rr": 0.06,
+        "min_trades": 8,
+        "min_source_count": 2,
+        "single_source_min_confidence": 90.0,
+    },
+    "DAILY_BEST": {
+        "min_confidence": 64.0,
+        "min_score": 80.0,
+        "min_win_rate_pct": 58.0,
+        "min_expectancy_rr": 0.04,
+        "min_trades": 6,
+        "min_source_count": 1,
+    },
+}
+TELEGRAM_ALERT_SYMBOL_QUALITY_PROFILES = {
+    "BTC-USD": {
+        "buy_min_confidence": 74.0,
+        "sell_min_confidence": 75.0,
+        "min_score": 84.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "DOGE-USD": {
+        "buy_min_confidence": 70.0,
+        "sell_min_confidence": 71.0,
+        "min_score": 80.0,
+        "buy_min_win_rate_pct": 57.0,
+        "sell_min_win_rate_pct": 59.0,
+        "buy_min_expectancy_rr": 0.04,
+        "sell_min_expectancy_rr": 0.04,
+        "min_trades": 8,
+    },
+    "ETH-USD": {
+        "buy_min_confidence": 72.0,
+        "sell_min_confidence": 73.0,
+        "min_score": 82.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "ADA-USD": {
+        "buy_min_confidence": 71.0,
+        "sell_min_confidence": 72.0,
+        "min_score": 81.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "XRP-USD": {
+        "buy_min_confidence": 72.0,
+        "sell_min_confidence": 73.0,
+        "min_score": 82.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "BNB-USD": {
+        "buy_min_confidence": 75.0,
+        "sell_min_confidence": 76.0,
+        "min_score": 86.0,
+        "buy_min_win_rate_pct": 59.0,
+        "sell_min_win_rate_pct": 61.0,
+        "buy_min_expectancy_rr": 0.06,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "SOL-USD": {
+        "buy_min_confidence": 71.0,
+        "sell_min_confidence": 72.0,
+        "min_score": 81.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "TRX-USD": {
+        "buy_min_confidence": 78.0,
+        "sell_min_confidence": 79.0,
+        "min_score": 88.0,
+        "buy_min_win_rate_pct": 61.0,
+        "sell_min_win_rate_pct": 62.0,
+        "buy_min_expectancy_rr": 0.08,
+        "sell_min_expectancy_rr": 0.06,
+        "min_trades": 8,
+        "min_robustness_score": 50.0,
+    },
+    "NEAR-USD": {
+        "buy_min_confidence": 69.0,
+        "sell_min_confidence": 70.0,
+        "min_score": 78.0,
+        "buy_min_win_rate_pct": 57.0,
+        "sell_min_win_rate_pct": 59.0,
+        "buy_min_expectancy_rr": 0.04,
+        "sell_min_expectancy_rr": 0.04,
+        "min_trades": 8,
+    },
+    "LINK-USD": {
+        "buy_min_confidence": 73.0,
+        "sell_min_confidence": 74.0,
+        "min_score": 83.0,
+        "buy_min_win_rate_pct": 58.0,
+        "sell_min_win_rate_pct": 60.0,
+        "buy_min_expectancy_rr": 0.05,
+        "sell_min_expectancy_rr": 0.05,
+        "min_trades": 8,
+    },
+    "PAXG-USD": {
+        "buy_min_confidence": 77.0,
+        "sell_min_confidence": 78.0,
+        "min_score": 88.0,
+        "buy_min_win_rate_pct": 60.0,
+        "sell_min_win_rate_pct": 61.0,
+        "buy_min_expectancy_rr": 0.07,
+        "sell_min_expectancy_rr": 0.06,
+        "min_trades": 8,
+        "min_robustness_score": 50.0,
+    },
+}
 
 ALL_WEATHER_15M_ENABLED = _env_bool("ALL_WEATHER_15M_ENABLED", True)
 ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE = _env_float("ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE", 67.0)
@@ -297,15 +505,6 @@ CDC_VIXFIX_15M_RELAXED_ENTRY_ENABLE = _env_bool("CDC_VIXFIX_15M_RELAXED_ENTRY_EN
 CDC_VIXFIX_15M_RELAXED_STOCH_MAX = _env_float("CDC_VIXFIX_15M_RELAXED_STOCH_MAX", 45.0)
 CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK = _env_int("CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK", 3)
 CDC_VIXFIX_15M_FORECAST_MIN_SCORE = _env_float("CDC_VIXFIX_15M_FORECAST_MIN_SCORE", 60.0)
-CDC_VIXFIX_15M_DAILY_TREND_ENABLE = _env_bool("CDC_VIXFIX_15M_DAILY_TREND_ENABLE", True)
-CDC_VIXFIX_15M_DAILY_TREND_MIN_CONFIDENCE = _env_float("CDC_VIXFIX_15M_DAILY_TREND_MIN_CONFIDENCE", 54.0)
-CDC_VIXFIX_15M_DAILY_TREND_MIN_WIN_RATE = _env_float("CDC_VIXFIX_15M_DAILY_TREND_MIN_WIN_RATE", 52.0)
-CDC_VIXFIX_15M_DAILY_TREND_MIN_SCORE = _env_float("CDC_VIXFIX_15M_DAILY_TREND_MIN_SCORE", 59.0)
-CDC_VIXFIX_15M_DAILY_TREND_MAX_PER_DAY = _env_int("CDC_VIXFIX_15M_DAILY_TREND_MAX_PER_DAY", 1)
-CDC_VIXFIX_15M_DAILY_TREND_MIN_FORECAST_SCORE = _env_float("CDC_VIXFIX_15M_DAILY_TREND_MIN_FORECAST_SCORE", 60.0)
-CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_FORECAST_ALIGNMENT = _env_bool("CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_FORECAST_ALIGNMENT", True)
-CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_TREND_COLOR_ALIGNMENT = _env_bool("CDC_VIXFIX_15M_DAILY_TREND_REQUIRE_TREND_COLOR_ALIGNMENT", True)
-CDC_VIXFIX_15M_DAILY_TREND_ALLOW_EXIT_SELL = _env_bool("CDC_VIXFIX_15M_DAILY_TREND_ALLOW_EXIT_SELL", False)
 CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT = _env_bool("CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT", False)
 CDC_VIXFIX_15M_TAKE_PROFIT_PCT = _env_float("CDC_VIXFIX_15M_TAKE_PROFIT_PCT", 0.2)
 CDC_VIXFIX_15M_MAX_HOLD_BARS = _env_int("CDC_VIXFIX_15M_MAX_HOLD_BARS", 24)
@@ -319,6 +518,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 88.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -328,6 +529,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 65.0,
+        "daily_best_min_red_to_green_score": 82.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 48,
     },
@@ -337,6 +540,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 82.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -346,6 +551,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 82.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -355,6 +562,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 65.0,
+        "daily_best_min_red_to_green_score": 84.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 48,
     },
@@ -364,6 +573,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 88.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -373,6 +584,19 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 82.0,
+        "daily_best_require_reclaim": True,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "TRX-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 25.0,
+        "forecast_min_score": 65.0,
+        "daily_best_min_red_to_green_score": 92.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -382,6 +606,8 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 80.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
@@ -391,11 +617,24 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 25.0,
         "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 86.0,
+        "daily_best_require_reclaim": True,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "PAXG-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 25.0,
+        "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 90.0,
+        "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
 }
-CDC_VIXFIX_15M_DISABLED_SYMBOLS = {"TRX-USD"}
+CDC_VIXFIX_15M_DISABLED_SYMBOLS = set()
 
 ORDERBLOCK_15M_PIVOT_LENGTH = _env_int("ORDERBLOCK_15M_PIVOT_LENGTH", 5)
 ORDERBLOCK_15M_MAX_BLOCKS = _env_int("ORDERBLOCK_15M_MAX_BLOCKS", 6)

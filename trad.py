@@ -23,9 +23,14 @@ from itertools import repeat
 from curl_cffi import requests as curl_requests
 import config
 from alerts.daily import (
-    build_cdc_daily_trend_candidates as _alerts_build_cdc_daily_trend_candidates,
     build_daily_best_pick_candidates as _alerts_build_daily_best_pick_candidates,
     is_daily_best_pick_window as _alerts_is_daily_best_pick_window,
+)
+from alerts.auto_tuning import (
+    build_auto_tuned_thresholds as _alerts_auto_tuning_build_auto_tuned_thresholds,
+    load_auto_tuned_profiles as _alerts_auto_tuning_load_auto_tuned_profiles,
+    read_alert_history_entries as _alerts_auto_tuning_read_alert_history_entries,
+    write_auto_tuned_thresholds as _alerts_auto_tuning_write_auto_tuned_thresholds,
 )
 from alerts.messages import (
     build_all_weather_message as _alerts_build_all_weather_message,
@@ -166,6 +171,7 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
 
 _HISTORY_STORE_LOCK = threading.Lock()
 _ALERT_HISTORY_LOCK = threading.Lock()
+_ALERT_AUTO_TUNE_CACHE = {"path": None, "mtime": None, "payload": {}}
 _TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "TCB15", "PRIMARY", "DAILY_BEST")
 
 try:
@@ -1280,6 +1286,145 @@ def _evaluate_candidate_backtest_gate(candidate):
     return True, "pass", metrics
 
 
+def _profile_side_value(profile, signal, key, default=None):
+    if not isinstance(profile, dict):
+        return default
+    side_key = f"{str(signal or '').strip().lower()}_{key}"
+    if side_key in profile:
+        return profile.get(side_key)
+    return profile.get(key, default)
+
+
+def _merge_telegram_candidate_quality_profile(symbol, strategy):
+    merged = {}
+    strategy_profiles = getattr(config, "TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES", {}) or {}
+    symbol_profiles = getattr(config, "TELEGRAM_ALERT_SYMBOL_QUALITY_PROFILES", {}) or {}
+    tuned_profiles = _load_auto_tuned_thresholds()
+    tuned_strategy_profiles = tuned_profiles.get("telegram_alert_strategy_quality_profiles") if isinstance(tuned_profiles, dict) else {}
+    tuned_symbol_profiles = tuned_profiles.get("telegram_alert_symbol_quality_profiles") if isinstance(tuned_profiles, dict) else {}
+    strategy_profile = strategy_profiles.get(str(strategy or "").strip().upper())
+    symbol_profile = symbol_profiles.get(normalize_symbol(symbol or ""))
+    if isinstance(strategy_profile, dict):
+        merged.update(strategy_profile)
+    if isinstance(symbol_profile, dict):
+        merged.update(symbol_profile)
+    tuned_strategy_profile = tuned_strategy_profiles.get(str(strategy or "").strip().upper()) if isinstance(tuned_strategy_profiles, dict) else None
+    tuned_symbol_profile = tuned_symbol_profiles.get(normalize_symbol(symbol or "")) if isinstance(tuned_symbol_profiles, dict) else None
+    if isinstance(tuned_strategy_profile, dict):
+        merged.update(tuned_strategy_profile)
+    if isinstance(tuned_symbol_profile, dict):
+        merged.update(tuned_symbol_profile)
+    return merged
+
+
+def _evaluate_candidate_symbol_strategy_gate(candidate):
+    if not isinstance(candidate, dict):
+        return False, "candidate_profile_missing", {}
+    signal = str(candidate.get("signal") or "").upper().strip()
+    if signal not in ("BUY", "SELL"):
+        return True, "candidate_profile_not_directional", {}
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    strategy = str(candidate.get("strategy") or "").upper().strip()
+    profile = _merge_telegram_candidate_quality_profile(symbol, strategy)
+    if not profile:
+        return True, "candidate_profile_pass", {}
+
+    metrics = _candidate_edge_metrics(candidate)
+    confidence = _normalize_confidence(candidate.get("confidence"))
+    score = _safe_float(candidate.get("score"), None)
+    win_rate = metrics.get("win_rate_pct")
+    expectancy = metrics.get("expectancy_rr")
+    trades = metrics.get("trades")
+
+    min_confidence = _profile_side_value(profile, signal, "min_confidence", None)
+    min_score = _profile_side_value(profile, signal, "min_score", None)
+    min_win_rate = _profile_side_value(profile, signal, "min_win_rate_pct", None)
+    min_expectancy = _profile_side_value(profile, signal, "min_expectancy_rr", None)
+    min_trades = _profile_side_value(profile, signal, "min_trades", None)
+    min_sources = _profile_side_value(profile, signal, "min_source_count", None)
+    single_source_min_confidence = _profile_side_value(profile, signal, "single_source_min_confidence", None)
+    min_robustness = _profile_side_value(profile, signal, "min_robustness_score", None)
+
+    try:
+        min_confidence = float(min_confidence) if min_confidence is not None else None
+    except Exception:
+        min_confidence = None
+    try:
+        min_score = float(min_score) if min_score is not None else None
+    except Exception:
+        min_score = None
+    try:
+        min_win_rate = float(min_win_rate) if min_win_rate is not None else None
+    except Exception:
+        min_win_rate = None
+    try:
+        min_expectancy = float(min_expectancy) if min_expectancy is not None else None
+    except Exception:
+        min_expectancy = None
+    try:
+        min_trades = int(min_trades) if min_trades is not None else None
+    except Exception:
+        min_trades = None
+    try:
+        min_sources = int(min_sources) if min_sources is not None else None
+    except Exception:
+        min_sources = None
+    try:
+        single_source_min_confidence = float(single_source_min_confidence) if single_source_min_confidence is not None else None
+    except Exception:
+        single_source_min_confidence = None
+    try:
+        min_robustness = float(min_robustness) if min_robustness is not None else None
+    except Exception:
+        min_robustness = None
+
+    if isinstance(min_confidence, (int, float)) and (
+        not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence)
+    ):
+        return False, "candidate_profile_confidence_below_min", metrics
+    if isinstance(min_score, (int, float)) and (
+        not isinstance(score, (int, float)) or float(score) < float(min_score)
+    ):
+        return False, "candidate_profile_score_below_min", metrics
+    if isinstance(min_win_rate, (int, float)) and (
+        not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate)
+    ):
+        return False, "candidate_profile_win_rate_below_min", metrics
+    if isinstance(min_expectancy, (int, float)) and (
+        not isinstance(expectancy, (int, float)) or float(expectancy) < float(min_expectancy)
+    ):
+        return False, "candidate_profile_expectancy_below_min", metrics
+    if isinstance(min_trades, int) and (
+        not isinstance(trades, (int, float)) or int(trades) < int(min_trades)
+    ):
+        return False, "candidate_profile_trades_below_min", metrics
+
+    if isinstance(min_sources, int) and min_sources > 0:
+        source_count = candidate.get("source_count")
+        if not isinstance(source_count, (int, float)):
+            source_count = metrics.get("source_count")
+        if not isinstance(source_count, (int, float)):
+            source_count = 1
+        if int(source_count) < int(min_sources):
+            if not (
+                isinstance(single_source_min_confidence, (int, float))
+                and isinstance(confidence, (int, float))
+                and float(confidence) >= float(single_source_min_confidence)
+            ):
+                return False, "candidate_profile_sources_below_min", metrics
+
+    if isinstance(min_robustness, (int, float)):
+        optimizer_key = "sell_optimizer" if signal == "SELL" else "optimizer"
+        wf_metrics = _extract_walkforward_metrics(candidate.get("plan"), optimizer_key=optimizer_key)
+        robustness = wf_metrics.get("robustness_score")
+        if isinstance(robustness, (int, float)) and float(robustness) < float(min_robustness):
+            merged = metrics.copy()
+            merged.update(wf_metrics)
+            return False, "candidate_profile_robustness_below_min", merged
+
+    return True, "candidate_profile_pass", metrics
+
+
 def _extract_walkforward_metrics(plan, optimizer_key="optimizer"):
     if not isinstance(plan, dict):
         return {}
@@ -1847,15 +1992,9 @@ def _candidate_mode_label(candidate):
     strategy = str(candidate.get("strategy") or "").strip().upper()
     if strategy == "DAILY_BEST":
         mode = str(candidate.get("daily_best_mode") or "").strip().lower()
-        if mode == "baseline":
-            return "Baseline Trend Pick"
         if mode == "relaxed":
             return "Trend Pick"
         return "Strict Pick"
-    if strategy == "CDCVIX15":
-        mode = str(candidate.get("cdc_mode") or "").strip().lower()
-        if mode == "daily_trend":
-            return "Daily Trend"
     return None
 
 
@@ -2620,6 +2759,19 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
     trend_bias = str(plan.get("trend_bias") or "").strip()
     if trend_bias:
         lines.append("<b>📐 โครงสร้าง:</b> " + _html_escape(trend_bias))
+
+    red_to_green_score = plan.get("red_to_green_quality_score")
+    green_flip_bars_since = plan.get("green_flip_bars_since")
+    red_to_green_setup = str(plan.get("red_to_green_setup") or "").strip().upper()
+    if isinstance(red_to_green_score, (int, float)):
+        reversal_bits = [f"score {float(red_to_green_score):.0f}/100"]
+        if isinstance(green_flip_bars_since, (int, float)):
+            reversal_bits.append(f"flip มาแล้ว {int(green_flip_bars_since)} แท่ง")
+        if bool(plan.get("green_flip_reclaim")):
+            reversal_bits.append("ราคา reclaim เหนือแท่งกลับตัว")
+        elif red_to_green_setup == "FOLLOW_THROUGH":
+            reversal_bits.append("โมเมนตัมยัง follow-through")
+        lines.append("<b>🔄 Red->Green:</b> " + _html_escape(" | ".join(reversal_bits)))
 
     reason = plan.get("reason")
     if isinstance(reason, str) and reason.strip():
@@ -3464,11 +3616,11 @@ def _pipeline_module_helpers():
         "pick_plan_value": _pick_plan_value,
         "build_telegram_message": _build_telegram_message,
         "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
+        "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_alert_profile": _candidate_alert_profile,
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
         "build_telegram_candidates": _build_telegram_candidates,
-        "build_cdc_daily_trend_candidates": _build_cdc_daily_trend_candidates,
         "is_daily_best_pick_window": _is_daily_best_pick_window,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
         "build_daily_summary_message": _build_daily_summary_message,
@@ -3493,6 +3645,7 @@ def _daily_alert_module_helpers():
         "pick_plan_value": _pick_plan_value,
         "build_daily_best_pick_message": _build_daily_best_pick_message,
         "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
+        "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_edge_metrics": _candidate_edge_metrics,
         "plan_trade_direction": _plan_trade_direction,
         "build_cdc_vixfix_message": _build_cdc_vixfix_message,
@@ -3509,17 +3662,6 @@ def _build_daily_best_pick_candidates(results):
         config=config,
         helpers=_daily_alert_module_helpers(),
         get_now=get_thai_now,
-    )
-
-
-def _build_cdc_daily_trend_candidates(results, existing_candidates=None, min_conf=None):
-    return _alerts_build_cdc_daily_trend_candidates(
-        results,
-        config=config,
-        helpers=_daily_alert_module_helpers(),
-        get_now=get_thai_now,
-        existing_candidates=existing_candidates,
-        min_conf=min_conf,
     )
 
 
@@ -3799,6 +3941,88 @@ def _alert_run_report_log_path():
     return os.path.join(_alert_history_dir(), "run_reports.jsonl")
 
 
+def _alert_auto_tune_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_ENABLE", True))
+
+
+def _alert_auto_tune_file_path():
+    raw_path = str(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_OUTPUT_PATH", "") or "").strip()
+    if raw_path:
+        if os.path.isabs(raw_path):
+            return raw_path
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), raw_path)
+    return os.path.join(_alert_history_dir(), "auto_tuned_thresholds.json")
+
+
+def _load_auto_tuned_thresholds():
+    if not _alert_auto_tune_enabled():
+        return {}
+    path = _alert_auto_tune_file_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = None
+    cached_path = _ALERT_AUTO_TUNE_CACHE.get("path")
+    cached_mtime = _ALERT_AUTO_TUNE_CACHE.get("mtime")
+    if cached_path == path and cached_mtime == mtime and isinstance(_ALERT_AUTO_TUNE_CACHE.get("payload"), dict):
+        return _ALERT_AUTO_TUNE_CACHE.get("payload") or {}
+    payload = _alerts_auto_tuning_load_auto_tuned_profiles(path)
+    if not isinstance(payload, dict):
+        payload = {}
+    _ALERT_AUTO_TUNE_CACHE.update({"path": path, "mtime": mtime, "payload": payload})
+    return payload
+
+
+def _refresh_auto_tuned_thresholds(history_days=None):
+    if not _alert_auto_tune_enabled():
+        return None
+    path = _alert_auto_tune_file_path()
+    if history_days is None:
+        history_days = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_HISTORY_DAYS", 45)
+    min_alerts_per_symbol = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_SYMBOL", 12)
+    min_alerts_per_strategy = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_STRATEGY", 20)
+    target_alerts_per_day = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_TARGET_ALERTS_PER_DAY", 2.0)
+    target_daily_picks_per_day = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_TARGET_DAILY_PICKS_PER_DAY", 1.0)
+    try:
+        history_days = max(1, int(history_days))
+    except Exception:
+        history_days = 45
+    try:
+        min_alerts_per_symbol = max(4, int(min_alerts_per_symbol))
+    except Exception:
+        min_alerts_per_symbol = 12
+    try:
+        min_alerts_per_strategy = max(8, int(min_alerts_per_strategy))
+    except Exception:
+        min_alerts_per_strategy = 20
+    try:
+        target_alerts_per_day = max(0.25, float(target_alerts_per_day))
+    except Exception:
+        target_alerts_per_day = 2.0
+    try:
+        target_daily_picks_per_day = max(0.10, float(target_daily_picks_per_day))
+    except Exception:
+        target_daily_picks_per_day = 1.0
+    entries = _alerts_auto_tuning_read_alert_history_entries(_alert_history_file_path(), days=history_days)
+    payload = _alerts_auto_tuning_build_auto_tuned_thresholds(
+        entries=entries,
+        base_strategy_profiles=getattr(config, "TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES", {}) or {},
+        base_symbol_profiles=getattr(config, "TELEGRAM_ALERT_SYMBOL_QUALITY_PROFILES", {}) or {},
+        base_cdc_profiles=getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {}) or {},
+        history_days=history_days,
+        min_alerts_per_symbol=min_alerts_per_symbol,
+        min_alerts_per_strategy=min_alerts_per_strategy,
+        target_alerts_per_day=target_alerts_per_day,
+        target_daily_pick_alerts_per_day=target_daily_picks_per_day,
+    )
+    saved = _alerts_auto_tuning_write_auto_tuned_thresholds(path, payload)
+    if saved:
+        _ALERT_AUTO_TUNE_CACHE.update({"path": path, "mtime": os.path.getmtime(saved), "payload": payload})
+    return payload
+
+
 def _alert_history_export_csv_enabled():
     return bool(getattr(config, "TELEGRAM_ALERT_HISTORY_EXPORT_CSV", True))
 
@@ -3948,7 +4172,6 @@ def _reporting_module_helpers():
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
         "build_telegram_candidates": _build_telegram_candidates,
-        "build_cdc_daily_trend_candidates": _build_cdc_daily_trend_candidates,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
     }
 
@@ -5570,6 +5793,11 @@ def _get_cdc_vixfix_15m_symbol_profile(symbol):
     profiles = getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {}) or {}
     raw_profile = profiles.get(sym)
     profile = dict(raw_profile) if isinstance(raw_profile, dict) else {}
+    tuned_profiles = _load_auto_tuned_thresholds()
+    tuned_cdc_profiles = tuned_profiles.get("cdc_vixfix_symbol_profiles") if isinstance(tuned_profiles, dict) else {}
+    tuned_profile = tuned_cdc_profiles.get(sym) if isinstance(tuned_cdc_profiles, dict) else None
+    if isinstance(tuned_profile, dict):
+        profile.update(tuned_profile)
     disabled_symbols = getattr(config, "CDC_VIXFIX_15M_DISABLED_SYMBOLS", set()) or set()
     normalized_disabled = {normalize_symbol(item) for item in disabled_symbols if item}
     profile["enabled"] = sym not in normalized_disabled
@@ -7591,6 +7819,7 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         forecast_score = float(forecast.get("score") or 50.0)
         fast_slope_up = fast.diff(forecast_lookback) > 0
         fast_slope_down = fast.diff(forecast_lookback) < 0
+        slow_slope_up = slow.diff(forecast_lookback) > 0
         ema200_buy_ok = (close > ema200) if require_ema200_alignment else pd.Series(True, index=df.index)
         strict_buy_condition = buycond & recent_vixfix_spike & (storsi_buy_sig > 0) & ema200_buy_ok.fillna(False)
         relaxed_long_condition = (
@@ -7621,6 +7850,114 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 entry_pos = int(df.index.get_loc(entry_idx))
             except Exception:
                 entry_pos = None
+        green_flip_idx = None
+        if bool(buycond.any()):
+            green_flip_idx = buycond[buycond].index[-1]
+        green_flip_pos = None
+        green_flip_bars_since = None
+        green_flip_time = None
+        green_flip_high = None
+        green_flip_low = None
+        green_flip_close = None
+        green_flip_recent_vixfix = False
+        green_flip_cross_up = False
+        green_flip_stoch_d = None
+        green_flip_reclaim = False
+        red_to_green_quality_score = None
+        red_to_green_setup = None
+        current_ema_gap_pct = None
+        current_price_preview = float(close.iloc[-1]) if pd.notna(close.iloc[-1]) else None
+        if pd.notna(slow.iloc[-1]) and float(slow.iloc[-1]) != 0:
+            current_ema_gap_pct = ((float(fast.iloc[-1]) - float(slow.iloc[-1])) / abs(float(slow.iloc[-1]))) * 100.0
+        if green_flip_idx is not None:
+            try:
+                green_flip_pos = int(df.index.get_loc(green_flip_idx))
+            except Exception:
+                green_flip_pos = None
+        if isinstance(green_flip_pos, int):
+            green_flip_bars_since = max(0, len(df) - green_flip_pos - 1)
+            green_flip_time = green_flip_idx.strftime("%Y-%m-%d %H:%M")
+            if pd.notna(high.loc[green_flip_idx]):
+                green_flip_high = float(high.loc[green_flip_idx])
+            flip_low_val = low.iloc[max(0, green_flip_pos - 4):green_flip_pos + 1].min()
+            if pd.notna(flip_low_val):
+                green_flip_low = float(flip_low_val)
+            if pd.notna(close.loc[green_flip_idx]):
+                green_flip_close = float(close.loc[green_flip_idx])
+            green_flip_recent_vixfix = bool(recent_vixfix_spike.loc[green_flip_idx])
+            green_flip_cross_up = bool(cross_up.loc[green_flip_idx])
+            if pd.notna(d.loc[green_flip_idx]):
+                green_flip_stoch_d = float(d.loc[green_flip_idx])
+            if (
+                isinstance(current_price_preview, (int, float))
+                and isinstance(green_flip_high, (int, float))
+                and bool(green.iloc[-1])
+            ):
+                green_flip_reclaim = float(current_price_preview) > float(green_flip_high)
+            score = 35.0
+            if green_flip_recent_vixfix:
+                score += 12.0
+            else:
+                score -= 4.0
+            if green_flip_cross_up:
+                score += 10.0
+            else:
+                score -= 4.0
+            if isinstance(green_flip_stoch_d, (int, float)):
+                if float(green_flip_stoch_d) < 40.0:
+                    score += 10.0
+                elif float(green_flip_stoch_d) < 45.0:
+                    score += 6.0
+                elif float(green_flip_stoch_d) > 55.0:
+                    score -= 5.0
+            if green_flip_reclaim:
+                score += 10.0
+                red_to_green_setup = "POST_FLIP_RECLAIM"
+            elif (
+                isinstance(current_price_preview, (int, float))
+                and isinstance(green_flip_close, (int, float))
+                and float(current_price_preview) > float(green_flip_close)
+            ):
+                score += 4.0
+                red_to_green_setup = "FOLLOW_THROUGH"
+            else:
+                red_to_green_setup = "EARLY_FLIP"
+            if bool(fast_slope_up.iloc[-1]):
+                score += 8.0
+            else:
+                score -= 6.0
+            if bool(slow_slope_up.iloc[-1]):
+                score += 4.0
+            if bool(ema200_buy_ok.iloc[-1]):
+                score += 6.0
+            elif require_ema200_alignment:
+                score -= 4.0
+            if isinstance(current_ema_gap_pct, (int, float)):
+                if 0.01 <= float(current_ema_gap_pct) <= 0.35:
+                    score += 4.0
+                elif float(current_ema_gap_pct) > 0.60:
+                    score -= 3.0
+            if isinstance(green_flip_bars_since, int):
+                if green_flip_bars_since == 0:
+                    score += 4.0
+                elif green_flip_bars_since == 1:
+                    score += 6.0
+                elif green_flip_bars_since == 2:
+                    score += 3.0
+                elif green_flip_bars_since == 3:
+                    score += 1.0
+                else:
+                    score -= 6.0
+            if forecast_dir == "BUY":
+                score += 6.0
+            elif forecast_dir == "SELL":
+                score -= 4.0
+            score += max(0.0, min(5.0, (forecast_score - 55.0) * 0.20))
+            if bool(green.iloc[-1]):
+                score += 4.0
+            else:
+                score -= 6.0
+            red_to_green_quality_score = max(0.0, min(95.0, float(score)))
         buy_pattern_ok = False
         buy_pattern_name = "None"
         buy_pattern_idx = None
@@ -7764,6 +8101,13 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                     analysis_points.append(f"StochRSI ตัดขึ้นใหม่ โดย K/D = {float(k.iloc[-1]):.1f}/{float(d.iloc[-1]):.1f}")
                 else:
                     analysis_points.append(f"โมเมนตัมยังหนุนฝั่งซื้อ โดย K/D = {float(k.iloc[-1]):.1f}/{float(d.iloc[-1]):.1f}")
+        if isinstance(red_to_green_quality_score, (int, float)) and isinstance(green_flip_bars_since, int) and green_flip_bars_since <= 4:
+            flip_text = f"Red->Green quality {float(red_to_green_quality_score):.0f}/100"
+            if isinstance(green_flip_bars_since, int):
+                flip_text += f", ห่างจุด flip {int(green_flip_bars_since)} แท่ง"
+            if green_flip_reclaim:
+                flip_text += ", ราคา reclaim เหนือแท่งกลับตัว"
+            analysis_points.append(flip_text)
         elif signal == "SELL":
             if bool(sellcond.iloc[-1]):
                 analysis_points.append(f"CDC พลิกเป็น RED แท่งแรก และราคาปิดต่ำกว่า EMA {fast_len}")
@@ -7823,6 +8167,18 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "forecast_direction": forecast_dir,
             "forecast_score": forecast_score,
             "forecast_reason": forecast.get("reason"),
+            "green_flip_time": green_flip_time,
+            "green_flip_bars_since": green_flip_bars_since,
+            "green_flip_high": green_flip_high,
+            "green_flip_low": green_flip_low,
+            "green_flip_close": green_flip_close,
+            "green_flip_recent_vixfix": bool(green_flip_recent_vixfix),
+            "green_flip_cross_up": bool(green_flip_cross_up),
+            "green_flip_stoch_d": green_flip_stoch_d,
+            "green_flip_reclaim": bool(green_flip_reclaim),
+            "red_to_green_quality_score": red_to_green_quality_score,
+            "red_to_green_setup": red_to_green_setup,
+            "ema_gap_pct": current_ema_gap_pct,
             "stoch_k": float(k.iloc[-1]) if pd.notna(k.iloc[-1]) else None,
             "stoch_d": float(d.iloc[-1]) if pd.notna(d.iloc[-1]) else None,
             "wvf": float(wvf.iloc[-1]) if pd.notna(wvf.iloc[-1]) else None,
@@ -8559,17 +8915,27 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
 
 
 def _build_health_snapshot():
+    tuned = _load_auto_tuned_thresholds()
     return {
         "status": "ok",
         "server_time": get_thai_now().strftime("%Y-%m-%d %H:%M:%S (Asia/Bangkok)"),
         "warnings": _get_config_warnings(),
         "data_sources": _data_source_health_snapshot(),
+        "auto_tune": {
+            "enabled": _alert_auto_tune_enabled(),
+            "file_path": _alert_auto_tune_file_path(),
+            "loaded": bool(tuned),
+            "generated_at": tuned.get("generated_at") if isinstance(tuned, dict) else None,
+        },
     }
 
 
 def _get_primary_plan_source_label(item, plan):
     if not isinstance(item, dict) or not isinstance(plan, dict):
         return "AI Summary"
+    custom_label = str(plan.get("source_label") or "").strip()
+    if custom_label:
+        return custom_label
     if plan is item.get("cdc_vixfix_15m"):
         return "CDC+VixFix 15m"
     if plan is item.get("actionzone_15m"):
@@ -8832,6 +9198,7 @@ def report_telegram_alerts():
             "alert_history_csv": _alert_history_csv_path() if _alert_history_export_csv_enabled() else None,
             "latest_run_json": _alert_run_report_file_path() if _alert_run_report_enabled() else None,
             "run_reports_jsonl": _alert_run_report_log_path() if _alert_run_report_enabled() else None,
+            "auto_tuned_thresholds_json": _alert_auto_tune_file_path() if _alert_auto_tune_enabled() else None,
         },
     }
     if include_latest_run:

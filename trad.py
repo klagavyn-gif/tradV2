@@ -50,6 +50,7 @@ from alerts.regime import (
     build_regime_alert_budget as _alerts_regime_build_regime_alert_budget,
     build_regime_context as _alerts_regime_build_regime_context,
     build_market_regime_snapshot as _alerts_regime_build_market_regime_snapshot,
+    build_regime_summary as _alerts_regime_build_regime_summary,
     build_symbol_regime as _alerts_regime_build_symbol_regime,
 )
 from alerts.reporting import (
@@ -3625,6 +3626,17 @@ def _apply_regime_to_candidate(candidate, regime_payload=None):
         candidate,
         regime_payload=regime_payload or {},
         config=config,
+    )
+
+
+def _build_regime_summary(results):
+    return _alerts_regime_build_regime_summary(
+        results,
+        config=config,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+            "get_now": get_thai_now,
+        },
     )
 
 

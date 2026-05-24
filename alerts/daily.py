@@ -142,7 +142,7 @@ def _build_daily_best_cdc_followthrough_plan(item, *, config, helpers, signal):
     return synthetic_plan
 
 
-def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
+def build_daily_best_pick_candidates(results, *, config, helpers, get_now, runtime_context=None):
     normalize_symbol = helpers["normalize_symbol"]
     pick_primary_trade_plan = helpers["pick_primary_trade_plan"]
     get_best_confidence = helpers["get_best_confidence"]
@@ -156,6 +156,9 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
     evaluate_candidate_backtest_gate = helpers["evaluate_candidate_backtest_gate"]
     evaluate_candidate_symbol_strategy_gate = helpers["evaluate_candidate_symbol_strategy_gate"]
     candidate_edge_metrics = helpers["candidate_edge_metrics"]
+    build_market_regime_snapshot = helpers["build_market_regime_snapshot"]
+    build_symbol_regime = helpers["build_symbol_regime"]
+    apply_regime_to_candidate = helpers["apply_regime_to_candidate"]
     symbol_allowlist = _normalize_symbol_allowlist(
         getattr(config, "TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST", ()),
         normalize_symbol,
@@ -210,6 +213,23 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
     candidates = []
     relaxed_candidates = []
     today_key = get_now().strftime("%Y%m%d")
+    regime_context = (runtime_context or {}).get("regime_context") if isinstance(runtime_context, dict) else {}
+    market_regime = (regime_context or {}).get("market")
+    if not isinstance(market_regime, dict):
+        market_regime = build_market_regime_snapshot(results or [])
+    symbol_regime_cache = dict((regime_context or {}).get("symbol_map") or {})
+
+    def get_symbol_regime(item):
+        symbol = normalize_symbol((item or {}).get("symbol") or "")
+        if not symbol:
+            return {}
+        cached = symbol_regime_cache.get(symbol)
+        if isinstance(cached, dict):
+            return cached
+        payload = build_symbol_regime(item, market_snapshot=market_regime)
+        symbol_regime_cache[symbol] = payload if isinstance(payload, dict) else {}
+        return symbol_regime_cache[symbol]
+
     for item in results or []:
         if not isinstance(item, dict) or item.get("error"):
             continue
@@ -317,18 +337,6 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 if bool(primary_plan.get("green_flip_reclaim")):
                     score += 5.0
             score += min(6.0, float(len(sources)) * 1.5)
-            message = build_daily_best_pick_message(
-                item,
-                signal,
-                float(best_conf),
-                sources,
-                primary_plan=primary_plan,
-                strategy_label=strategy_label,
-                selection_score=score,
-                mode_label="Strict Daily Pick",
-            )
-            if not isinstance(message, str) or not message.strip():
-                continue
             candidate = {
                 "symbol": symbol,
                 "signal": signal,
@@ -339,11 +347,37 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 "item": item,
                 "edge_metrics": edge,
                 "source_count": len(sources),
-                "message": message,
                 "strategy_label": strategy_label,
+                "cache_key": f"DAILYBEST|{symbol}|{signal}|{today_key}",
             }
+            regime_payload = get_symbol_regime(item)
+            candidate, regime_meta = apply_regime_to_candidate(candidate, regime_payload=regime_payload)
+            if isinstance(regime_meta, dict) and regime_meta.get("blocked"):
+                continue
+            regime_uplift = 0.0
+            if isinstance(regime_meta, dict):
+                try:
+                    regime_uplift = float(regime_meta.get("min_confidence_uplift") or 0.0)
+                except Exception:
+                    regime_uplift = 0.0
+            strict_required_conf = max(float(min_conf), float(relaxed_min_conf)) + float(regime_uplift)
+            if float(best_conf) < float(strict_required_conf):
+                continue
+            message = build_daily_best_pick_message(
+                item,
+                signal,
+                float(best_conf),
+                sources,
+                primary_plan=primary_plan,
+                strategy_label=strategy_label,
+                selection_score=float(candidate.get("score", score)),
+                mode_label="Strict Daily Pick",
+            )
+            if not isinstance(message, str) or not message.strip():
+                continue
+            candidate["message"] = message
             gate_ok, _, normalized_edge = evaluate_candidate_backtest_gate(candidate)
-            if gate_ok and float(best_conf) >= float(min_conf):
+            if gate_ok and float(best_conf) >= float(strict_required_conf):
                 candidate["edge_metrics"] = normalized_edge
                 profile_ok, _, profile_edge = evaluate_candidate_symbol_strategy_gate(candidate)
                 if profile_ok:
@@ -357,7 +391,10 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
             relaxed_wr = relaxed_edge.get("win_rate_pct")
             relaxed_exp = relaxed_edge.get("expectancy_rr")
             relaxed_trades = relaxed_edge.get("trades")
-            if float(score) < float(relaxed_min_score):
+            relaxed_required_conf = float(relaxed_min_conf) + float(regime_uplift)
+            if float(best_conf) < float(relaxed_required_conf):
+                continue
+            if float(candidate.get("score", score)) < float(relaxed_min_score):
                 continue
             if not isinstance(relaxed_wr, (int, float)) or float(relaxed_wr) < float(relaxed_min_wr):
                 continue
@@ -375,7 +412,7 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
                 relaxed_sources,
                 primary_plan=primary_plan,
                 strategy_label=strategy_label,
-                selection_score=score,
+                selection_score=float(candidate.get("score", score)),
                 mode_label="Trend Pick",
             )
             if not isinstance(relaxed_message, str) or not relaxed_message.strip():
@@ -383,7 +420,7 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now):
             relaxed_candidate = dict(candidate)
             relaxed_candidate["message"] = relaxed_message
             relaxed_candidate["edge_metrics"] = relaxed_edge
-            relaxed_candidate["score"] = float(score)
+            relaxed_candidate["score"] = float(candidate.get("score", score))
             relaxed_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Trend Pick").strip(" |")
             relaxed_candidate["cache_key"] = f"DAILYBESTRELAX|{symbol}|{signal}|{today_key}"
             relaxed_candidate["daily_best_mode"] = "relaxed"

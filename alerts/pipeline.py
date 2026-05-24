@@ -2,7 +2,43 @@ import json
 from collections import Counter
 
 
-def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
+def build_alert_runtime_context(results, min_conf, *, config, helpers, get_now):
+    telegram_kill_switch_state = helpers["telegram_kill_switch_state"]
+    telegram_dynamic_conf_threshold = helpers["telegram_dynamic_conf_threshold"]
+    build_regime_context = helpers["build_regime_context"]
+
+    kill, reason = telegram_kill_switch_state(results)
+    regime_context = build_regime_context(results or [])
+    alert_budget = (regime_context or {}).get("alert_budget") if isinstance(regime_context, dict) else {}
+    budget_conf_uplift = 0.0
+    if isinstance(alert_budget, dict):
+        try:
+            budget_conf_uplift = float(alert_budget.get("confidence_uplift") or 0.0)
+        except Exception:
+            budget_conf_uplift = 0.0
+    dynamic_min_conf = float(telegram_dynamic_conf_threshold(min_conf, results)) + float(budget_conf_uplift)
+    return {
+        "generated_at": get_now().strftime("%Y-%m-%d %H:%M:%S"),
+        "kill": bool(kill),
+        "kill_reason": str(reason or "") if kill else None,
+        "min_confidence": float(min_conf),
+        "dynamic_min_confidence": float(dynamic_min_conf),
+        "budget_confidence_uplift": float(budget_conf_uplift),
+        "regime_context": regime_context if isinstance(regime_context, dict) else {},
+        "regime_summary": {
+            "enabled": (regime_context or {}).get("enabled"),
+            "generated_at": (regime_context or {}).get("generated_at"),
+            "market": (regime_context or {}).get("market"),
+            "symbols": (regime_context or {}).get("symbols"),
+            "by_symbol_regime": (regime_context or {}).get("by_symbol_regime"),
+            "by_side_bias": (regime_context or {}).get("by_side_bias"),
+            "alert_budget": (regime_context or {}).get("alert_budget"),
+        },
+        "alert_budget": alert_budget if isinstance(alert_budget, dict) else {},
+    }
+
+
+def build_telegram_candidates(results, min_conf, *, config, helpers, get_now, runtime_context=None):
     actionzone_precision60_profile = helpers["actionzone_precision60_profile"]
     strict_60_mode_enabled = helpers["strict_60_mode_enabled"]
     strict_60_allow_cdc = helpers["strict_60_allow_cdc"]
@@ -30,6 +66,10 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
     evaluate_candidate_backtest_gate = helpers["evaluate_candidate_backtest_gate"]
     evaluate_candidate_symbol_strategy_gate = helpers["evaluate_candidate_symbol_strategy_gate"]
     candidate_alert_profile = helpers["candidate_alert_profile"]
+    build_market_regime_snapshot = helpers["build_market_regime_snapshot"]
+    build_symbol_regime = helpers["build_symbol_regime"]
+    build_regime_alert_budget = helpers["build_regime_alert_budget"]
+    apply_regime_to_candidate = helpers["apply_regime_to_candidate"]
 
     candidates = []
     quality_drop_counts = Counter()
@@ -37,6 +77,46 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
     strict_60 = strict_60_mode_enabled()
     allow_cdc = strict_60_allow_cdc()
     hour_key = get_now().strftime("%Y%m%d%H")
+    regime_context = (runtime_context or {}).get("regime_context") if isinstance(runtime_context, dict) else {}
+    market_regime = (regime_context or {}).get("market")
+    if not isinstance(market_regime, dict):
+        market_regime = build_market_regime_snapshot(results or [])
+    symbol_regime_cache = dict((regime_context or {}).get("symbol_map") or {})
+
+    def get_symbol_regime(item):
+        symbol = normalize_symbol((item or {}).get("symbol") or "")
+        if not symbol:
+            return {}
+        cached = symbol_regime_cache.get(symbol)
+        if isinstance(cached, dict):
+            return cached
+        payload = build_symbol_regime(item, market_snapshot=market_regime)
+        symbol_regime_cache[symbol] = payload if isinstance(payload, dict) else {}
+        return symbol_regime_cache[symbol]
+
+    def append_candidate(row):
+        if not isinstance(row, dict):
+            return
+        regime_payload = get_symbol_regime(row.get("item"))
+        adjusted, regime_meta = apply_regime_to_candidate(row, regime_payload=regime_payload)
+        if isinstance(regime_meta, dict) and regime_meta.get("blocked"):
+            quality_drop_counts[str(regime_meta.get("block_reason") or "regime_blocked")] += 1
+            return
+        uplift = 0.0
+        if isinstance(regime_meta, dict):
+            try:
+                uplift = float(regime_meta.get("min_confidence_uplift") or 0.0)
+            except Exception:
+                uplift = 0.0
+        confidence = adjusted.get("confidence") if isinstance(adjusted, dict) else row.get("confidence")
+        try:
+            confidence = float(confidence)
+        except Exception:
+            confidence = None
+        if isinstance(confidence, float) and confidence < float(min_conf) + float(uplift):
+            quality_drop_counts["regime_min_confidence_not_met"] += 1
+            return
+        candidates.append(adjusted if isinstance(adjusted, dict) else row)
 
     for item in results:
         if not isinstance(item, dict) or item.get("error"):
@@ -57,7 +137,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                 ss_message = build_super_signal_message(item, sig, ss_meta, primary_plan=ss_plan)
                 if ss_message:
                     score = 1000.0 + (float(ss_meta.get("avg_wr", 0)) * 2.0)
-                    candidates.append(
+                    append_candidate(
                         {
                             "symbol": symbol,
                             "strategy": "SS15",
@@ -76,7 +156,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
         if isinstance(aw_signal, dict):
             aw_message = build_all_weather_message(item, aw_signal)
             if aw_message:
-                candidates.append(
+                append_candidate(
                     {
                         "symbol": symbol,
                         "strategy": "AW15",
@@ -122,7 +202,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                     if cdc_signal == "SELL" and cdc_conf >= 85.0:
                         score += 8.0
                     context_key = last_signal_time or trigger or (format_price_value(cdc_plan.get("entry_price")) or "na")
-                    candidates.append(
+                    append_candidate(
                         {
                             "symbol": symbol,
                             "strategy": "CDCVIX15",
@@ -196,7 +276,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                         zone = str(az_plan.get("zone") or "").upper().strip()
                         entry_bucket = format_price_value(az_plan.get("entry_price")) or "na"
                         context_key = last_signal_time or f"{zone}|{entry_bucket}"
-                        candidates.append(
+                        append_candidate(
                             {
                                 "symbol": symbol,
                                 "strategy": "AZ15",
@@ -245,7 +325,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                                 str(pa_plan.get("chart_pattern") or pa_plan.get("detected_pattern") or ""),
                             ]
                         ).strip("|") or (format_price_value(pa_plan.get("entry_price")) or "na")
-                        candidates.append(
+                        append_candidate(
                             {
                                 "symbol": symbol,
                                 "strategy": "PA15",
@@ -294,7 +374,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                                 str(tcb_plan.get("breakout_level") or ""),
                             ]
                         ).strip("|") or (format_price_value(tcb_plan.get("entry_price")) or "na")
-                        candidates.append(
+                        append_candidate(
                             {
                                 "symbol": symbol,
                                 "strategy": "TCB15",
@@ -370,7 +450,7 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
                     pattern_bucket = str(primary_plan.get("detected_pattern") or "").strip().upper() if isinstance(primary_plan, dict) else ""
                     source_bucket = get_primary_plan_source_label(item, primary_plan) if isinstance(primary_plan, dict) else "PRIMARY"
                     context_key = last_signal_time or "|".join([source_bucket, entry_bucket or "na", pattern_bucket or "NOPATTERN"])
-                    candidates.append(
+                    append_candidate(
                         {
                             "symbol": symbol,
                             "strategy": "PRIMARY",
@@ -402,15 +482,28 @@ def build_telegram_candidates(results, min_conf, *, config, helpers, get_now):
         candidate["alert_profile"] = candidate_alert_profile(candidate)
         filtered_candidates.append(candidate)
 
+    regime_summary = {
+        "enabled": (regime_context or {}).get("enabled"),
+        "generated_at": (regime_context or {}).get("generated_at"),
+        "market": market_regime,
+        "symbols": list((regime_context or {}).get("symbols") or list(symbol_regime_cache.values())),
+        "by_symbol_regime": (regime_context or {}).get("by_symbol_regime") or {},
+        "by_side_bias": (regime_context or {}).get("by_side_bias") or {},
+        "alert_budget": (regime_context or {}).get("alert_budget") or {},
+    }
+    alert_budget = (regime_context or {}).get("alert_budget")
+    if not isinstance(alert_budget, dict) or not alert_budget:
+        alert_budget = build_regime_alert_budget(regime_summary=regime_summary)
     stats = {
         "quality_drop_counts": dict(quality_drop_counts),
+        "regime_summary": regime_summary,
+        "alert_budget": alert_budget if isinstance(alert_budget, dict) else {},
     }
     return filtered_candidates, stats
 
 
-def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
-    telegram_kill_switch_state = helpers["telegram_kill_switch_state"]
-    telegram_dynamic_conf_threshold = helpers["telegram_dynamic_conf_threshold"]
+def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
+    build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
     is_daily_best_pick_window = helpers["is_daily_best_pick_window"]
     build_daily_best_pick_candidates = helpers["build_daily_best_pick_candidates"]
@@ -421,17 +514,14 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
     track_alert_performance = helpers["track_alert_performance"]
     record_telegram_run_report = helpers["record_telegram_run_report"]
 
-    kill, reason = telegram_kill_switch_state(results)
-    if kill:
-        logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
-    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 75.0)
+    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 69.0)
     max_per_run = getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5)
     max_per_symbol = getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1)
     cooldown_minutes = getattr(config, "TELEGRAM_ALERT_COOLDOWN_MINUTES", 30)
     try:
         min_conf = float(min_conf)
     except Exception:
-        min_conf = 75.0
+        min_conf = 69.0
     try:
         max_per_run = int(max_per_run)
     except Exception:
@@ -451,21 +541,46 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
     if cooldown_minutes < 1:
         cooldown_minutes = 1
 
-    dynamic_min_conf = telegram_dynamic_conf_threshold(min_conf, results)
+    if not isinstance(runtime_context, dict):
+        runtime_context = build_alert_runtime_context(results or [], min_conf, config=config, helpers=helpers, get_now=get_now)
+    else:
+        try:
+            min_conf = float((runtime_context or {}).get("min_confidence"))
+        except Exception:
+            pass
+    kill = bool((runtime_context or {}).get("kill"))
+    reason = (runtime_context or {}).get("kill_reason")
+    if kill:
+        logger.warning("Telegram kill switch active; skip alerts (%s)", reason)
+
+    alert_budget = (runtime_context or {}).get("alert_budget") or {}
+    if isinstance(alert_budget, dict):
+        try:
+            max_per_run = max(1, int(alert_budget.get("adjusted_run_cap") or max_per_run))
+        except Exception:
+            pass
+        try:
+            max_per_symbol = max(1, int(alert_budget.get("adjusted_per_symbol_cap") or max_per_symbol))
+        except Exception:
+            pass
+    dynamic_min_conf = float((runtime_context or {}).get("dynamic_min_confidence") or float(min_conf))
     candidates = []
     build_stats = {}
     if not kill:
-        candidates, build_stats = build_telegram_candidates(results, dynamic_min_conf)
+        candidates, build_stats = build_telegram_candidates(results, dynamic_min_conf, runtime_context=runtime_context)
 
     quality_drop_counts = {}
     if isinstance(build_stats, dict):
         quality_drop_counts = build_stats.get("quality_drop_counts") or {}
+        if not isinstance(alert_budget, dict) or not alert_budget:
+            alert_budget = build_stats.get("alert_budget") or {}
 
     if not candidates:
         logger.info(
-            "Telegram alerts: no primary candidates (min_conf=%.1f, dynamic_min_conf=%.1f, quality_drops=%s)",
+            "Telegram alerts: no primary candidates (min_conf=%.1f, dynamic_min_conf=%.1f, budget=%s quality_drops=%s)",
             min_conf,
             dynamic_min_conf,
+            json.dumps(alert_budget or {}, ensure_ascii=False),
             json.dumps(quality_drop_counts, ensure_ascii=False),
         )
         if kill and not is_daily_best_pick_window():
@@ -483,6 +598,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
                 dropped_by_symbol_cap=0,
                 dropped_by_run_cap=0,
                 quality_drop_counts=quality_drop_counts,
+                alert_budget=alert_budget,
             )
             return 0
 
@@ -523,13 +639,28 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
 
     daily_pick_sent = 0
     daily_summary_sent = 0
+    daily_pick_cap = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 1)
+    try:
+        daily_pick_cap = int(daily_pick_cap)
+    except Exception:
+        daily_pick_cap = 1
+    if isinstance(alert_budget, dict):
+        try:
+            daily_pick_cap = max(1, int(alert_budget.get("adjusted_daily_pick_cap") or daily_pick_cap))
+        except Exception:
+            pass
     if is_daily_best_pick_window():
-        daily_candidates = build_daily_best_pick_candidates(results)
+        daily_candidates = build_daily_best_pick_candidates(results, runtime_context=runtime_context)
         for daily_candidate in daily_candidates:
             if not isinstance(daily_candidate, dict):
                 continue
+            if daily_pick_sent >= daily_pick_cap:
+                break
             daily_key = f"DAILYBEST|{get_now().strftime('%Y%m%d')}|{daily_candidate.get('symbol')}|{daily_candidate.get('signal')}"
             if telegram_alert_cache.get(daily_key):
+                continue
+            daily_symbol = str(daily_candidate.get("symbol") or "")
+            if daily_symbol and int(per_symbol_sent.get(daily_symbol, 0)) >= max_per_symbol:
                 continue
             daily_message = daily_candidate.get("message")
             if isinstance(daily_message, str) and daily_message.strip() and send_telegram_alert(daily_message):
@@ -537,6 +668,8 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
                 sent += 1
                 daily_pick_sent += 1
                 sent_candidates.append(daily_candidate)
+                if daily_symbol:
+                    per_symbol_sent[daily_symbol] = int(per_symbol_sent.get(daily_symbol, 0)) + 1
                 record_telegram_alert_history(daily_candidate, min_conf=min_conf, dynamic_min_conf=dynamic_min_conf, daily_pick=True)
         else:
             if not daily_pick_sent:
@@ -560,7 +693,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
                     logger.info("Daily Best Pick window active but no directional candidate or summary was sent")
 
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f",
+        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f budget=%s",
         sent,
         len(candidates),
         daily_pick_sent,
@@ -571,6 +704,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
         json.dumps(quality_drop_counts, ensure_ascii=False),
         min_conf,
         dynamic_min_conf,
+        json.dumps(alert_budget or {}, ensure_ascii=False),
     )
 
     if sent_candidates:
@@ -590,6 +724,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger):
         dropped_by_symbol_cap=dropped_by_symbol_cap,
         dropped_by_run_cap=dropped_by_run_cap,
         quality_drop_counts=quality_drop_counts,
+        alert_budget=alert_budget,
     )
 
     return sent

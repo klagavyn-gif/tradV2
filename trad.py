@@ -41,14 +41,23 @@ from alerts.messages import (
     build_trend_breakout_message as _alerts_build_trend_breakout_message,
 )
 from alerts.pipeline import (
+    build_alert_runtime_context as _alerts_pipeline_build_alert_runtime_context,
     build_telegram_candidates as _alerts_pipeline_build_telegram_candidates,
     notify_telegram_from_results as _alerts_pipeline_notify_telegram_from_results,
+)
+from alerts.regime import (
+    apply_regime_to_candidate as _alerts_regime_apply_regime_to_candidate,
+    build_regime_alert_budget as _alerts_regime_build_regime_alert_budget,
+    build_regime_context as _alerts_regime_build_regime_context,
+    build_market_regime_snapshot as _alerts_regime_build_market_regime_snapshot,
+    build_symbol_regime as _alerts_regime_build_symbol_regime,
 )
 from alerts.reporting import (
     alert_history_csv_fieldnames as _alerts_reporting_alert_history_csv_fieldnames,
     alert_history_trim_locked as _alerts_reporting_alert_history_trim_locked,
     build_telegram_alert_live_preview as _alerts_reporting_build_telegram_alert_live_preview,
     build_telegram_alert_report as _alerts_reporting_build_telegram_alert_report,
+    build_telegram_alert_realized_report as _alerts_reporting_build_telegram_alert_realized_report,
     candidate_backtest_snapshot as _alerts_reporting_candidate_backtest_snapshot,
     candidate_message_preview as _alerts_reporting_candidate_message_preview,
     candidate_ops_snapshot as _alerts_reporting_candidate_ops_snapshot,
@@ -3579,14 +3588,81 @@ def _build_backtest_rulebook(results):
     }
 
 
-def _build_telegram_candidates(results, min_conf):
+def _build_telegram_candidates(results, min_conf, runtime_context=None):
     return _alerts_pipeline_build_telegram_candidates(
         results,
         min_conf,
         config=config,
         helpers=_pipeline_module_helpers(),
         get_now=get_thai_now,
+        runtime_context=runtime_context,
     )
+
+
+def _build_market_regime_snapshot(results):
+    return _alerts_regime_build_market_regime_snapshot(
+        results,
+        config=config,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+        },
+    )
+
+
+def _build_symbol_regime(item, market_snapshot=None):
+    return _alerts_regime_build_symbol_regime(
+        item,
+        market_snapshot=market_snapshot or {},
+        config=config,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+        },
+    )
+
+
+def _apply_regime_to_candidate(candidate, regime_payload=None):
+    return _alerts_regime_apply_regime_to_candidate(
+        candidate,
+        regime_payload=regime_payload or {},
+        config=config,
+    )
+
+
+def _build_regime_context(results):
+    return _alerts_regime_build_regime_context(
+        results,
+        config=config,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+            "get_now": get_thai_now,
+        },
+    )
+
+
+def _build_regime_alert_budget(regime_summary=None):
+    return _alerts_regime_build_regime_alert_budget(
+        regime_summary=regime_summary or {},
+        config=config,
+    )
+
+
+def _build_alert_runtime_context(results, min_conf):
+    return _alerts_pipeline_build_alert_runtime_context(
+        results,
+        min_conf,
+        config=config,
+        helpers=_pipeline_module_helpers(),
+        get_now=get_thai_now,
+    )
+
+
+def _get_telegram_alert_min_confidence(default=69.0):
+    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", default)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = float(default)
+    return float(min_conf)
 
 
 def _pipeline_module_helpers():
@@ -3618,6 +3694,12 @@ def _pipeline_module_helpers():
         "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
         "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_alert_profile": _candidate_alert_profile,
+        "build_market_regime_snapshot": _build_market_regime_snapshot,
+        "build_symbol_regime": _build_symbol_regime,
+        "build_regime_context": _build_regime_context,
+        "build_regime_summary": _build_regime_summary,
+        "build_regime_alert_budget": _build_regime_alert_budget,
+        "apply_regime_to_candidate": _apply_regime_to_candidate,
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
         "build_telegram_candidates": _build_telegram_candidates,
@@ -3649,6 +3731,10 @@ def _daily_alert_module_helpers():
         "candidate_edge_metrics": _candidate_edge_metrics,
         "plan_trade_direction": _plan_trade_direction,
         "build_cdc_vixfix_message": _build_cdc_vixfix_message,
+        "build_market_regime_snapshot": _build_market_regime_snapshot,
+        "build_symbol_regime": _build_symbol_regime,
+        "build_regime_context": _build_regime_context,
+        "apply_regime_to_candidate": _apply_regime_to_candidate,
     }
 
 
@@ -3656,12 +3742,13 @@ def _is_daily_best_pick_window():
     return _alerts_is_daily_best_pick_window(config=config, get_now=get_thai_now)
 
 
-def _build_daily_best_pick_candidates(results):
+def _build_daily_best_pick_candidates(results, runtime_context=None):
     return _alerts_build_daily_best_pick_candidates(
         results,
         config=config,
         helpers=_daily_alert_module_helpers(),
         get_now=get_thai_now,
+        runtime_context=runtime_context,
     )
 
 
@@ -3763,13 +3850,14 @@ def _build_daily_summary_message(results, existing_candidates=None, min_conf=Non
     }
 
 
-def _notify_telegram_from_results(results):
+def _notify_telegram_from_results(results, runtime_context=None):
     return _alerts_pipeline_notify_telegram_from_results(
         results,
         config=config,
         helpers=_pipeline_module_helpers(),
         get_now=get_thai_now,
         logger=logger,
+        runtime_context=runtime_context,
     )
 
 
@@ -3941,6 +4029,34 @@ def _alert_run_report_log_path():
     return os.path.join(_alert_history_dir(), "run_reports.jsonl")
 
 
+def _alert_realized_enabled():
+    return bool(getattr(config, "TELEGRAM_ALERT_REALIZED_ENABLED", True))
+
+
+def _alert_realized_interval():
+    return str(getattr(config, "TELEGRAM_ALERT_REALIZED_INTERVAL", "15m") or "15m")
+
+
+def _alert_realized_max_hold_bars():
+    return int(getattr(config, "TELEGRAM_ALERT_REALIZED_MAX_HOLD_BARS", 64) or 64)
+
+
+def _alert_realized_report_days():
+    return int(getattr(config, "TELEGRAM_ALERT_REALIZED_REPORT_DAYS", 45) or 45)
+
+
+def _alert_realized_export_outcomes():
+    return bool(getattr(config, "TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES", True))
+
+
+def _alert_outcomes_file_path():
+    return os.path.join(_alert_history_dir(), "realized_outcomes.json")
+
+
+def _alert_realized_summary_file_path():
+    return os.path.join(_alert_history_dir(), "realized_summary.json")
+
+
 def _alert_auto_tune_enabled():
     return bool(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_ENABLE", True))
 
@@ -4064,6 +4180,7 @@ def _record_telegram_run_report(
     dropped_by_symbol_cap,
     dropped_by_run_cap,
     quality_drop_counts,
+    alert_budget,
 ):
     return _alerts_reporting_record_telegram_run_report(
         results=results,
@@ -4079,6 +4196,7 @@ def _record_telegram_run_report(
         dropped_by_symbol_cap=dropped_by_symbol_cap,
         dropped_by_run_cap=dropped_by_run_cap,
         quality_drop_counts=quality_drop_counts,
+        alert_budget=alert_budget,
         config=config,
         helpers=_reporting_module_helpers(),
         get_now=get_thai_now,
@@ -4138,7 +4256,19 @@ def _build_telegram_alert_report(days=30, strategies=None, symbols=None, limit_e
     )
 
 
-def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1):
+def _build_telegram_alert_realized_report(days=30, strategies=None, symbols=None):
+    return _alerts_reporting_build_telegram_alert_realized_report(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
+
+
+def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1, runtime_context=None):
     return _alerts_reporting_build_telegram_alert_live_preview(
         results,
         limit_examples_per_strategy=limit_examples_per_strategy,
@@ -4146,6 +4276,7 @@ def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1):
         helpers=_reporting_module_helpers(),
         get_now=get_thai_now,
         strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+        runtime_context=runtime_context,
     )
 
 
@@ -4157,6 +4288,12 @@ def _reporting_module_helpers():
         "alert_history_enabled": _alert_history_enabled,
         "alert_history_file_path": _alert_history_file_path,
         "alert_history_csv_path": _alert_history_csv_path,
+        "alert_realized_enabled": _alert_realized_enabled,
+        "alert_realized_interval": _alert_realized_interval,
+        "alert_realized_max_hold_bars": _alert_realized_max_hold_bars,
+        "alert_realized_export_outcomes": _alert_realized_export_outcomes,
+        "alert_outcomes_file_path": _alert_outcomes_file_path,
+        "alert_realized_summary_file_path": _alert_realized_summary_file_path,
         "normalize_symbol": normalize_symbol,
         "pick_plan_value": _pick_plan_value,
         "candidate_backtest_snapshot": _candidate_backtest_snapshot,
@@ -4169,8 +4306,14 @@ def _reporting_module_helpers():
         "alert_history_trim_locked": _alert_history_trim_locked,
         "timedelta": timedelta,
         "read_telegram_alert_history": _read_telegram_alert_history,
+        "history_store_read": _history_store_read,
+        "get_yf_history": get_yf_history,
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
+        "build_alert_runtime_context": _build_alert_runtime_context,
+        "build_regime_context": _build_regime_context,
+        "build_regime_summary": _build_regime_summary,
+        "build_regime_alert_budget": _build_regime_alert_budget,
         "build_telegram_candidates": _build_telegram_candidates,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
     }
@@ -4188,6 +4331,9 @@ def _write_verify_output(output_path, payload):
         health=payload.get("health"),
         latest_run=payload.get("latest_run"),
         live_preview=payload.get("live_preview"),
+        regime_summary=payload.get("regime_summary"),
+        realized_performance=payload.get("realized_performance"),
+        runtime_context=payload.get("alert_runtime_context"),
         include_results=bool(payload.get("include_results")),
         clean_json_value=_clean_json_value,
     )
@@ -9125,13 +9271,18 @@ def analyze():
         return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
 
     results = _analyze_symbols_batch(symbols, period, include_chart_data=include_chart_data)
+    alert_runtime_context = _build_alert_runtime_context(
+        results,
+        _get_telegram_alert_min_confidence(),
+    )
     notify = bool(data.get("notify_telegram"))
     if notify:
-        _notify_telegram_from_results(results)
+        _notify_telegram_from_results(results, runtime_context=alert_runtime_context)
 
     alert_backtest = _build_alert_backtest_summary(results)
     backtest_rules = _build_backtest_rulebook(results)
     all_weather = _build_all_weather_summary(results)
+    regime_summary = dict((alert_runtime_context or {}).get("regime_summary") or {})
     cleaned = [_clean_json_value(r) for r in results]
     meta = {
         "request": {
@@ -9143,6 +9294,7 @@ def analyze():
         "summary": _build_analysis_summary(results, requested_symbols=len(symbols), period=period),
         "telegram_alerts": alert_backtest,
         "all_weather": all_weather,
+        "regime_summary": regime_summary,
         "backtest_rules": backtest_rules,
         "health": _build_health_snapshot(),
     }
@@ -9198,6 +9350,8 @@ def report_telegram_alerts():
             "alert_history_csv": _alert_history_csv_path() if _alert_history_export_csv_enabled() else None,
             "latest_run_json": _alert_run_report_file_path() if _alert_run_report_enabled() else None,
             "run_reports_jsonl": _alert_run_report_log_path() if _alert_run_report_enabled() else None,
+            "realized_outcomes_json": _alert_outcomes_file_path() if _alert_realized_enabled() and _alert_realized_export_outcomes() else None,
+            "realized_summary_json": _alert_realized_summary_file_path() if _alert_realized_enabled() else None,
             "auto_tuned_thresholds_json": _alert_auto_tune_file_path() if _alert_auto_tune_enabled() else None,
         },
     }
@@ -9224,12 +9378,17 @@ def report_telegram_alerts():
             return jsonify({'error': 'Invalid period'}), 400
         preview_symbols = symbols[:_MAX_SYMBOLS_PER_REQUEST]
         preview_results = _analyze_symbols_batch(preview_symbols, period, include_chart_data=False)
+        preview_runtime_context = _build_alert_runtime_context(
+            preview_results,
+            _get_telegram_alert_min_confidence(),
+        )
         payload["live_preview"] = {
             "period": period,
             "symbols": preview_symbols,
             "report": _build_telegram_alert_live_preview(
                 preview_results,
                 limit_examples_per_strategy=limit_examples,
+                runtime_context=preview_runtime_context,
             ),
         }
     return jsonify(_clean_json_value(payload))
@@ -9274,14 +9433,23 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
     if period not in VALID_PERIODS:
         return 2
     results = _analyze_symbols_batch(uniq, period, include_chart_data=False)
-    live_preview = _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1)
+    base_min_conf = _get_telegram_alert_min_confidence()
+    alert_runtime_context = _build_alert_runtime_context(results, base_min_conf)
+    live_preview = _build_telegram_alert_live_preview(
+        results,
+        limit_examples_per_strategy=1,
+        runtime_context=alert_runtime_context,
+    )
     if notify_telegram:
-        _notify_telegram_from_results(results)
+        _notify_telegram_from_results(results, runtime_context=alert_runtime_context)
     alert_backtest = _build_alert_backtest_summary(results)
     backtest_rules = _build_backtest_rulebook(results)
     all_weather = _build_all_weather_summary(results)
+    regime_summary = dict((alert_runtime_context or {}).get("regime_summary") or {})
     health_snapshot = _build_health_snapshot()
     latest_run = _read_latest_telegram_run_report()
+    realized_report_days = _alert_realized_report_days()
+    realized_performance = _build_telegram_alert_realized_report(days=realized_report_days)
     verify_request = {
         "symbols": uniq,
         "period": period,
@@ -9305,6 +9473,9 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
                 "health": health_snapshot,
                 "latest_run": latest_run,
                 "live_preview": live_preview,
+                "regime_summary": regime_summary,
+                "alert_runtime_context": alert_runtime_context,
+                "realized_performance": realized_performance,
                 "include_results": bool(verify_include_results),
             },
         )
@@ -9323,6 +9494,9 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
                 "health": health_snapshot,
                 "latest_run": latest_run,
                 "live_preview": live_preview,
+                "regime_summary": regime_summary,
+                "alert_runtime_context": alert_runtime_context,
+                "realized_performance": realized_performance,
                 "verify_output_path": verify_path or None,
             }
         ),

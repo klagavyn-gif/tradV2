@@ -3714,6 +3714,7 @@ def _pipeline_module_helpers():
         "apply_regime_to_candidate": _apply_regime_to_candidate,
         "telegram_kill_switch_state": _telegram_kill_switch_state,
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
+        "build_alert_runtime_context": _build_alert_runtime_context,
         "build_telegram_candidates": _build_telegram_candidates,
         "is_daily_best_pick_window": _is_daily_best_pick_window,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,

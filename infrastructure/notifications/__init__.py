@@ -1,0 +1,1 @@
+﻿"""Notification infrastructure package skeleton."""

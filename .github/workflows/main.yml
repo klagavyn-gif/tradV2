@@ -294,7 +294,7 @@ jobs:
           python auto_tune_telegram_thresholds.py
       - name: Run analysis and notify
         run: |
-          python trad.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram --verify-output "$VERIFY_OUTPUT_PATH"
+          python alert_engine.py --symbols "$SYMBOLS" --period "$PERIOD" --notify-telegram --verify-output "$VERIFY_OUTPUT_PATH"
       - name: Upload Telegram alert data
         if: always()
         uses: actions/upload-artifact@v6

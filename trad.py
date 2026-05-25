@@ -22,6 +22,16 @@ from concurrent.futures import ThreadPoolExecutor
 from itertools import repeat
 from curl_cffi import requests as curl_requests
 import config
+from application.services.analysis_service import (
+    handle_analyze_request as _app_handle_analyze_request,
+    run_once as _app_run_once,
+)
+from application.services.report_service import (
+    handle_all_weather_report_request as _app_handle_all_weather_report_request,
+    handle_telegram_alert_report_request as _app_handle_telegram_alert_report_request,
+)
+from application.services import service_support as _service_support
+from domain.alerts.trend_1h import infer_1h_trend_snapshot
 from alerts.daily import (
     build_daily_best_pick_candidates as _alerts_build_daily_best_pick_candidates,
     is_daily_best_pick_window as _alerts_is_daily_best_pick_window,
@@ -184,94 +194,37 @@ _ALERT_HISTORY_LOCK = threading.Lock()
 _ALERT_AUTO_TUNE_CACHE = {"path": None, "mtime": None, "payload": {}}
 _TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "TCB15", "PRIMARY", "DAILY_BEST")
 
-try:
-    _MAX_SYMBOLS_PER_REQUEST = int(getattr(config, "MAX_SYMBOLS_PER_REQUEST", 30))
-except Exception:
-    _MAX_SYMBOLS_PER_REQUEST = 30
-if _MAX_SYMBOLS_PER_REQUEST < 1:
-    _MAX_SYMBOLS_PER_REQUEST = 1
+_MAX_SYMBOLS_PER_REQUEST = _service_support.max_symbols_per_request(config)
 
 
 def _get_config_warnings():
-    warnings = []
-    debug = bool(getattr(config, "FLASK_DEBUG", True))
-    if not debug and not getattr(config, "SECRET_KEY", ""):
-        warnings.append("SECRET_KEY ยังไม่ถูกตั้งค่า (ไม่ควรใช้ production)")
-    if getattr(config, "HTTP_VERIFY", True) is False:
-        warnings.append("HTTP_VERIFY=false (เสี่ยงด้านความปลอดภัย)")
-    max_workers = getattr(config, "ANALYZE_MAX_WORKERS", 5)
-    try:
-        max_workers = int(max_workers)
-        if max_workers < 1:
-            warnings.append("ANALYZE_MAX_WORKERS ควร >= 1")
-    except Exception:
-        warnings.append("ANALYZE_MAX_WORKERS ไม่ถูกต้อง")
-    return warnings
+    return _service_support.build_config_warnings(config)
 
 
 def _parse_symbols_input(raw_symbols, max_symbols=None):
-    max_count = _MAX_SYMBOLS_PER_REQUEST if max_symbols is None else int(max_symbols)
-    if max_count < 1:
-        max_count = 1
-    symbols_raw = str(raw_symbols or "").upper().replace("\n", ",").replace(";", ",").split(",")
-    unique_symbols = []
-    seen = set()
-    for raw in symbols_raw:
-        sym = normalize_symbol(raw)
-        if not sym or sym in seen:
-            continue
-        seen.add(sym)
-        unique_symbols.append(sym)
-        if len(unique_symbols) >= max_count:
-            break
-    return unique_symbols
+    return _service_support.parse_symbols_input(
+        raw_symbols,
+        normalize_symbol=normalize_symbol,
+        default_max_symbols=_MAX_SYMBOLS_PER_REQUEST,
+        max_symbols=max_symbols,
+    )
 
 
 def _parse_periods_input(raw_periods, default_periods=None, max_periods=6):
-    defaults = list(default_periods or ["1mo", "3mo", "6mo"])
-    if isinstance(raw_periods, (list, tuple)):
-        raw_tokens = [str(v or "").strip() for v in raw_periods]
-    else:
-        text = str(raw_periods or "").strip()
-        raw_tokens = text.replace("\n", ",").replace(";", ",").split(",") if text else defaults
-    periods = []
-    seen = set()
-    for raw in raw_tokens:
-        period = str(raw or "").strip()
-        if not period or period in seen or period not in VALID_PERIODS:
-            continue
-        seen.add(period)
-        periods.append(period)
-        if len(periods) >= int(max_periods):
-            break
-    return periods if periods else [p for p in defaults if p in VALID_PERIODS][: int(max_periods)]
+    return _service_support.parse_periods_input(
+        raw_periods,
+        valid_periods=VALID_PERIODS,
+        default_periods=default_periods,
+        max_periods=max_periods,
+    )
 
 
 def _parse_strategy_input(raw_strategies):
-    if isinstance(raw_strategies, (list, tuple)):
-        raw_tokens = [str(v or "").strip() for v in raw_strategies]
-    else:
-        text = str(raw_strategies or "").strip()
-        raw_tokens = text.replace("\n", ",").replace(";", ",").split(",") if text else []
-    values = []
-    seen = set()
-    for raw in raw_tokens:
-        strategy = str(raw or "").strip().upper()
-        if not strategy or strategy in seen:
-            continue
-        seen.add(strategy)
-        values.append(strategy)
-    return values
+    return _service_support.parse_strategy_input(raw_strategies)
 
 
 def _clean_json_value(v):
-    if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-        return None
-    if isinstance(v, (list, tuple)):
-        return [_clean_json_value(x) for x in v]
-    if isinstance(v, dict):
-        return {k: _clean_json_value(x) for k, x in v.items()}
-    return v
+    return _service_support.clean_json_value(v)
 
 
 def send_telegram_alert(message):
@@ -2607,6 +2560,23 @@ def _build_trend_breakout_message(item, plan):
     )
 
 
+def _append_hourly_bias_line_legacy(lines, item, *, label="🧭 1H Trend"):
+    snapshot = infer_1h_trend_snapshot(item)
+    if not isinstance(snapshot, dict):
+        return
+    trend = str(snapshot.get("trend") or "").upper()
+    if trend not in ("UP", "DOWN"):
+        return
+    parts = [trend]
+    strength = str(snapshot.get("strength") or "").upper()
+    if strength in ("STRONG", "WEAK"):
+        parts.append(strength)
+    source_labels = snapshot.get("source_labels") or []
+    if source_labels:
+        parts.append(", ".join([str(source_label) for source_label in source_labels[:2]]))
+    lines.append(f"<b>{label}:</b> " + " | ".join([_html_escape(part) for part in parts]))
+
+
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -2626,75 +2596,54 @@ def _build_actionzone_message(item, az_plan):
     entry_text = _format_price_value(entry_price)
     curr_text = _format_price_value(curr_price)
     
-    if entry_text:
-        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
+    snapshot_parts = []
     if curr_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        lines.append(f"<b>📍 ราคาปัจจุบัน:</b> {curr_text}{change_str}")
-        
-    zone = az_plan.get("zone")
-    trend = az_plan.get("trend_1h")
-    if zone or trend:
-        parts = []
-        if zone:
-            parts.append(f"โซน: {zone}")
-        if trend:
-            parts.append(f"เทรนด์ 1H: {trend}")
-        lines.append("<b>🧭 สภาวะตลาด:</b> " + " • ".join([_html_escape(p) for p in parts]))
-        
+        price_part = f"ราคา {curr_text}"
+        if isinstance(change, (int, float)):
+            price_part += f" ({change:+.2f}%)"
+        snapshot_parts.append(price_part)
+    elif entry_text:
+        snapshot_parts.append(f"ราคา {entry_text}")
     conf = az_plan.get("confidence")
     if isinstance(conf, (int, float)):
-        lines.append(f"<b>📊 โอกาสสำเร็จ:</b> {float(conf):.0f}%")
+        snapshot_parts.append(f"Conf {float(conf):.0f}%")
+    if snapshot_parts:
+        lines.append("<b>📍 Snapshot:</b> " + " | ".join([_html_escape(part) for part in snapshot_parts]))
+    _append_hourly_bias_line_legacy(lines, item)
+
+    zone = az_plan.get("zone")
+    trend = az_plan.get("trend_1h")
+    context_parts = []
+    if zone:
+        context_parts.append(f"Zone {zone}")
+    if trend:
+        context_parts.append(f"Trend 1H {trend}")
     best = {}
     optimizer = az_plan.get("optimizer")
     if isinstance(optimizer, dict) and isinstance(optimizer.get("best"), dict):
         best = optimizer.get("best") or {}
-    lines.extend(
-        _build_alert_profile_lines(
-            win_rate=best.get("win_rate_pct"),
-            confidence=conf,
-            expectancy=best.get("expectancy_rr"),
-            trades=best.get("trades"),
-        )
-    )
-    
+    edge_parts = []
+    win_rate = best.get("win_rate_pct") if isinstance(best, dict) else None
+    exp_rr = best.get("expectancy_rr") if isinstance(best, dict) else None
+    trades = best.get("trades") if isinstance(best, dict) else None
+    if isinstance(win_rate, (int, float)):
+        edge_parts.append(f"WR {float(win_rate):.1f}%")
+    if isinstance(exp_rr, (int, float)):
+        edge_parts.append(f"ExpRR {float(exp_rr):.2f}")
+    if isinstance(trades, (int, float)):
+        edge_parts.append(f"Trades {int(trades)}")
+    if edge_parts:
+        lines.append("<b>🧪 Edge:</b> " + " | ".join([_html_escape(part) for part in edge_parts]))
+
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
     if fast_len and slow_len:
-        lines.append(f"<b>⚙️ ค่าเฉลี่ย EMA:</b> {fast_len}/{slow_len}")
-    
+        context_parts.append(f"EMA {fast_len}/{slow_len}")
     pattern = az_plan.get("detected_pattern")
-    _append_pattern_context_lines(lines, pattern)
-    
-    avg_range = az_plan.get("avg_range_pct")
-    if isinstance(avg_range, (int, float)):
-        lines.append(f"<b>📈 ความผันผวน (20 แท่ง):</b> {avg_range:.2f}%")
-        
-    if isinstance(best, dict):
-        trades = best.get("trades")
-        exp_rr = best.get("expectancy_rr")
-        win_rate = best.get("win_rate_pct")
-        stats = []
-        if isinstance(trades, (int, float)):
-            stats.append(f"ย้อนหลัง {int(trades)} ไม้")
-        if isinstance(win_rate, (int, float)):
-            stats.append(f"Win {float(win_rate):.0f}%")
-        if isinstance(exp_rr, (int, float)):
-            stats.append(f"ExpRR {float(exp_rr):.2f}")
-        if stats:
-            lines.append("<b>🧪 สถิติ Backtest:</b> " + " | ".join([_html_escape(s) for s in stats]))
-        wf_stats = []
-        valid_trades = best.get("valid_trades")
-        valid_win = best.get("valid_win_rate_pct")
-        valid_exp = best.get("valid_expectancy_rr")
-        if isinstance(valid_trades, (int, float)):
-            wf_stats.append(f"Valid {int(valid_trades)} ไม้")
-        if isinstance(valid_win, (int, float)):
-            wf_stats.append(f"WF Win {float(valid_win):.0f}%")
-        if isinstance(valid_exp, (int, float)):
-            wf_stats.append(f"WF ExpRR {float(valid_exp):.2f}")
-        if wf_stats:
-            lines.append("<b>🧭 Walk-forward:</b> " + " | ".join([_html_escape(s) for s in wf_stats]))
+    if pattern and pattern != "None":
+        context_parts.append(f"Pattern {pattern}")
+    if context_parts:
+        lines.append("<b>🧠 Context:</b> " + " | ".join([_html_escape(part) for part in context_parts[:3]]))
     if signal == "SELL":
         sell_optimizer = az_plan.get("sell_optimizer")
         sell_best = sell_optimizer.get("best") if isinstance(sell_optimizer, dict) else None
@@ -2710,33 +2659,29 @@ def _build_actionzone_message(item, az_plan):
             if isinstance(sell_valid_exp, (int, float)):
                 sell_stats.append(f"Sell WF ExpRR {float(sell_valid_exp):.2f}")
             if sell_stats:
-                lines.append("<b>📉 Sell Whitelist:</b> " + " | ".join([_html_escape(s) for s in sell_stats]))
+                lines.append("<b>📉 Sell Gate:</b> " + " | ".join([_html_escape(s) for s in sell_stats[:3]]))
         sell_reason = str(az_plan.get("sell_whitelist_reason") or "").strip()
         if sell_reason:
             lines.append(f"<b>⚠️ Sell Gate:</b> {_html_escape(sell_reason)}")
-            
-    stop_lines = _build_stop_context_lines(item, az_plan, signal=signal, source_label="ActionZone 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-        
-    exit_lines = _format_exit_levels_lines(az_plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in exit_lines])
-        
-    forecast_lines = _format_price_forecast_lines(item.get("price_forecast"))
-    if forecast_lines:
-        lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in forecast_lines])
-        
+
+    level_parts = []
+    stop_text = _format_price_value(_pick_plan_value(az_plan, ["stop_loss", "entry_stop_loss", "trailing_stop"]))
+    take_profit_text = _format_price_value(_pick_plan_value(az_plan, ["take_profit", "take_profit_2", "exit_price"]))
+    if entry_text:
+        level_parts.append(f"Entry {entry_text}")
+    if stop_text:
+        level_parts.append(f"SL {stop_text}")
+    if take_profit_text:
+        level_parts.append(f"TP {take_profit_text}")
+    if level_parts:
+        lines.append("<b>📌 Plan:</b> " + " | ".join([_html_escape(part) for part in level_parts]))
+    risk_pct = az_plan.get("entry_risk_pct")
+    if isinstance(risk_pct, (int, float)):
+        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+
     lines.append("────────────────")
-    last_signal_time = az_plan.get("last_signal_time")
-    if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {_html_escape(last_signal_time)}")
-    lines.append("⏱️ <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 TradingView</a>")
     
     return "\n".join(lines)
 
@@ -2762,30 +2707,29 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
     stop_text = _format_price_value(plan.get("stop_loss"))
     change = item.get("change")
     move_parts = []
-    if entry_text:
-        move_parts.append(f"จุดอ้างอิง: {entry_text}")
     if curr_text:
-        move_parts.append(f"ราคาปัจจุบัน: {curr_text}")
-    if stop_text:
-        move_parts.append(f"SL: {stop_text}")
+        move_parts.append(f"ราคา {curr_text}")
+    elif entry_text:
+        move_parts.append(f"ราคา {entry_text}")
     if isinstance(change, (int, float)):
-        move_parts.append(f"เปลี่ยนแปลง: {change:+.2f}%")
+        move_parts[-1] = move_parts[-1] + f" ({change:+.2f}%)" if move_parts else f"เปลี่ยนแปลง {change:+.2f}%"
     if move_parts:
-        lines.append("<b>📍 " + " | ".join([_html_escape(m) for m in move_parts]) + "</b>")
+        lines.append("<b>📍 Snapshot:</b> " + " | ".join([_html_escape(m) for m in move_parts]))
+    _append_hourly_bias_line_legacy(lines, item)
 
     conf = _normalize_confidence(plan.get("confidence"))
-    if conf is not None:
-        lines.append(f"<b>📊 ความมั่นใจ:</b> {conf:.0f}%")
     edge = _extract_signal_edge_metrics(plan, signal)
-    lines.extend(
-        _build_alert_profile_lines(
-            win_rate=edge.get("win_rate_pct"),
-            confidence=conf,
-            expectancy=edge.get("expectancy_rr"),
-            trades=edge.get("trades"),
-            mode_label=mode_label,
-        )
-    )
+    edge_parts = []
+    if conf is not None:
+        edge_parts.append(f"Conf {conf:.0f}%")
+    if isinstance(edge.get("win_rate_pct"), (int, float)):
+        edge_parts.append(f"WR {float(edge.get('win_rate_pct')):.1f}%")
+    if isinstance(edge.get("expectancy_rr"), (int, float)):
+        edge_parts.append(f"ExpRR {float(edge.get('expectancy_rr')):.2f}")
+    if isinstance(edge.get("trades"), (int, float)):
+        edge_parts.append(f"Trades {int(round(float(edge.get('trades'))))}")
+    if edge_parts:
+        lines.append("<b>🧪 Edge:</b> " + " | ".join([_html_escape(part) for part in edge_parts]))
     action_guidance = _build_trade_action_guidance(
         signal,
         plan=plan,
@@ -2793,46 +2737,40 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         source_label="CDC+VixFix 15m",
     )
     if isinstance(action_guidance, dict):
-        lines.append(
-            "<b>🎯 ควรทำ:</b> "
-            + _html_escape(str(action_guidance.get("primary_text") or ""))
-        )
-        lines.append(
-            "<b>🧭 แปลสัญญาณ:</b> "
-            + _html_escape(str(action_guidance.get("action_code") or ""))
-        )
+        lines.append("<b>🎯 Action:</b> " + _html_escape(str(action_guidance.get("primary_text") or "")))
         note_text = str(action_guidance.get("note_text") or "").strip()
         if note_text:
-            lines.append("<b>⚠️ หมายเหตุ:</b> " + _html_escape(note_text))
+            lines.append("<b>⚠️ Note:</b> " + _html_escape(note_text))
 
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")
+    context_parts = []
     if forecast_dir:
-        forecast_line = f"<b>🧭 คาดทิศทาง:</b> {_html_escape(forecast_dir)}"
+        forecast_text = forecast_dir
         if isinstance(forecast_score, (int, float)):
-            forecast_line += f" ({float(forecast_score):.0f}/100)"
-        lines.append(forecast_line)
+            forecast_text += f" {float(forecast_score):.0f}/100"
+        context_parts.append(f"Forecast {forecast_text}")
 
     trend_bias = str(plan.get("trend_bias") or "").strip()
     if trend_bias:
-        lines.append("<b>📐 โครงสร้าง:</b> " + _html_escape(trend_bias))
+        context_parts.append(f"Trend {trend_bias}")
 
     red_to_green_score = plan.get("red_to_green_quality_score")
     green_flip_bars_since = plan.get("green_flip_bars_since")
     red_to_green_setup = str(plan.get("red_to_green_setup") or "").strip().upper()
     if isinstance(red_to_green_score, (int, float)):
-        reversal_bits = [f"score {float(red_to_green_score):.0f}/100"]
+        reversal_bits = [f"R>G {float(red_to_green_score):.0f}/100"]
         if isinstance(green_flip_bars_since, (int, float)):
-            reversal_bits.append(f"flip มาแล้ว {int(green_flip_bars_since)} แท่ง")
+            reversal_bits.append(f"flip {int(green_flip_bars_since)} bars")
         if bool(plan.get("green_flip_reclaim")):
-            reversal_bits.append("ราคา reclaim เหนือแท่งกลับตัว")
+            reversal_bits.append("reclaim")
         elif red_to_green_setup == "FOLLOW_THROUGH":
-            reversal_bits.append("โมเมนตัมยัง follow-through")
-        lines.append("<b>🔄 Red->Green:</b> " + _html_escape(" | ".join(reversal_bits)))
+            reversal_bits.append("follow-through")
+        context_parts.append(" | ".join(reversal_bits))
 
     reason = plan.get("reason")
     if isinstance(reason, str) and reason.strip():
-        lines.append("<b>🧠 มุมมองหลัก:</b> " + _html_escape(reason.strip()))
+        context_parts.append(reason.strip())
 
     sell_trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
     if sell_trigger:
@@ -2845,41 +2783,28 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
             trigger_text = "TAKE_PROFIT (แตะเป้าปิดทำกำไร)"
         elif sell_trigger == "TIME_STOP":
             trigger_text = "TIME_STOP (ถือครบอายุสัญญาณ)"
-        lines.append("<b>🚨 Trigger:</b> " + _html_escape(trigger_text))
+        context_parts.append(f"Trigger {trigger_text}")
 
-    stop_lines = _build_stop_context_lines(item, plan, signal=signal, source_label="CDC+VixFix 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-
-    exit_lines = _format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([_html_escape(line) for line in exit_lines])
-
-    analysis_points = plan.get("analysis_points")
-    if isinstance(analysis_points, list):
-        analysis_lines = []
-        for point in analysis_points:
-            text = str(point).strip()
-            if text:
-                analysis_lines.append("• " + _html_escape(text))
-        if analysis_lines:
-            lines.append("────────────────")
-            lines.append("<b>🔎 เหตุผลเชิงวิเคราะห์:</b>")
-            lines.extend(analysis_lines[:6])
-        
     pattern = plan.get("detected_pattern")
-    _append_pattern_context_lines(lines, pattern)
+    if pattern and pattern != "None":
+        context_parts.append(f"Pattern {pattern}")
+    if context_parts:
+        lines.append("<b>🧠 Context:</b> " + " | ".join([_html_escape(part) for part in context_parts[:3]]))
+
+    level_parts = []
+    take_profit_text = _format_price_value(_pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]))
+    if entry_text:
+        level_parts.append(f"Entry {entry_text}")
+    if stop_text:
+        level_parts.append(f"SL {stop_text}")
+    if take_profit_text:
+        level_parts.append(f"TP {take_profit_text}")
+    if level_parts:
+        lines.append("<b>📌 Plan:</b> " + " | ".join([_html_escape(part) for part in level_parts]))
 
     lines.append("────────────────")
-    last_signal_time = plan.get("last_signal_time")
-    if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {_html_escape(last_signal_time)}")
-
-    lines.append("⏱️ <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 TradingView</a>")
 
     return "\n".join(lines)
 
@@ -3716,12 +3641,7 @@ def _build_alert_runtime_context(results, min_conf):
 
 
 def _get_telegram_alert_min_confidence(default=69.0):
-    min_conf = getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", default)
-    try:
-        min_conf = float(min_conf)
-    except Exception:
-        min_conf = float(default)
-    return float(min_conf)
+    return _service_support.get_telegram_alert_min_confidence(config, default=default)
 
 
 def _pipeline_module_helpers():
@@ -9121,19 +9041,14 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
 
 
 def _build_health_snapshot():
-    tuned = _load_auto_tuned_thresholds()
-    return {
-        "status": "ok",
-        "server_time": get_thai_now().strftime("%Y-%m-%d %H:%M:%S (Asia/Bangkok)"),
-        "warnings": _get_config_warnings(),
-        "data_sources": _data_source_health_snapshot(),
-        "auto_tune": {
-            "enabled": _alert_auto_tune_enabled(),
-            "file_path": _alert_auto_tune_file_path(),
-            "loaded": bool(tuned),
-            "generated_at": tuned.get("generated_at") if isinstance(tuned, dict) else None,
-        },
-    }
+    return _service_support.build_health_snapshot(
+        config=config,
+        get_now=get_thai_now,
+        load_auto_tuned_thresholds=_load_auto_tuned_thresholds,
+        data_source_health_snapshot=_data_source_health_snapshot,
+        alert_auto_tune_enabled=_alert_auto_tune_enabled,
+        alert_auto_tune_file_path=_alert_auto_tune_file_path,
+    )
 
 
 def _get_primary_plan_source_label(item, plan):
@@ -9216,85 +9131,13 @@ def _build_ui_result_summary(item):
 
 
 def _build_analysis_summary(results, requested_symbols=None, period=None):
-    total_requested = int(requested_symbols or 0)
-    returned = results if isinstance(results, list) else []
-    success_count = 0
-    error_count = 0
-    buy_count = 0
-    sell_count = 0
-    wait_count = 0
-    actionable = []
-    errors = []
-    for item in returned:
-        if not isinstance(item, dict):
-            continue
-        symbol = normalize_symbol(item.get("symbol") or "")
-        if item.get("error"):
-            error_count += 1
-            errors.append({
-                "symbol": symbol,
-                "error": str(item.get("error") or "").strip(),
-            })
-            continue
-        success_count += 1
-        ui_summary = item.get("ui_summary")
-        if not isinstance(ui_summary, dict):
-            ui_summary = _build_ui_result_summary(item)
-        signal = str(ui_summary.get("signal") or "WAIT").upper()
-        if signal == "BUY":
-            buy_count += 1
-        elif signal == "SELL":
-            sell_count += 1
-        else:
-            wait_count += 1
-        if signal in ("BUY", "SELL"):
-            actionable.append(
-                {
-                    "symbol": symbol,
-                    "name": str(item.get("name") or "").strip(),
-                    "signal": signal,
-                    "source": str(ui_summary.get("source") or "AI Summary"),
-                    "confidence": float(ui_summary.get("confidence")) if isinstance(ui_summary.get("confidence"), (int, float)) else None,
-                    "pattern": ui_summary.get("pattern"),
-                    "price": float(item.get("price")) if isinstance(item.get("price"), (int, float)) else None,
-                    "change": float(item.get("change")) if isinstance(item.get("change"), (int, float)) else None,
-                }
-            )
-    actionable.sort(
-        key=lambda item: (
-            float(item.get("confidence") or 0.0),
-            abs(float(item.get("change") or 0.0)),
-            str(item.get("symbol") or ""),
-        ),
-        reverse=True,
+    return _service_support.build_analysis_summary(
+        results,
+        normalize_symbol=normalize_symbol,
+        build_ui_result_summary=_build_ui_result_summary,
+        requested_symbols=requested_symbols,
+        period=period,
     )
-    dominant_signal = "WAIT"
-    if buy_count and buy_count > sell_count:
-        dominant_signal = "BUY"
-    elif sell_count and sell_count > buy_count:
-        dominant_signal = "SELL"
-    elif buy_count or sell_count:
-        dominant_signal = "MIXED"
-    total_tracked = success_count + error_count
-    success_rate_pct = None
-    if total_tracked > 0:
-        success_rate_pct = round((success_count / total_tracked) * 100.0, 1)
-    return {
-        "requested_count": total_requested or len(returned),
-        "returned_count": len(returned),
-        "success_count": success_count,
-        "error_count": error_count,
-        "success_rate_pct": success_rate_pct,
-        "actionable_count": len(actionable),
-        "buy_count": buy_count,
-        "sell_count": sell_count,
-        "wait_count": wait_count,
-        "dominant_signal": dominant_signal,
-        "period": str(period or ""),
-        "top_signal": actionable[0] if actionable else None,
-        "action_queue": actionable[:5],
-        "errors": errors[:3],
-    }
 
 @app.route('/')
 def index():
@@ -9307,262 +9150,38 @@ def health():
 
 
 def _analyze_symbols_batch(symbols, period, include_chart_data=False):
-    symbols = list(symbols or [])
-    if len(symbols) == 1:
-        return [analyze_single_symbol(symbols[0], period, include_chart_data=include_chart_data)]
-    return list(_ANALYZE_EXECUTOR.map(analyze_single_symbol, symbols, repeat(period), repeat(include_chart_data)))
+    return _service_support.analyze_symbols_batch(
+        symbols,
+        period,
+        include_chart_data=include_chart_data,
+        analyze_single_symbol=analyze_single_symbol,
+        executor=_ANALYZE_EXECUTOR,
+        repeat_values=repeat,
+    )
 
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({'error': 'Invalid request body'}), 400
-    raw_symbols = data.get('symbols', '')
-    all_symbols = _parse_symbols_input(raw_symbols, max_symbols=10000)
-    symbols = all_symbols[:_MAX_SYMBOLS_PER_REQUEST]
-    period = data.get('period', '1mo')
-    include_chart_data = bool(data.get("include_chart_data", True))
-    if period not in VALID_PERIODS:
-        return jsonify({'error': 'Invalid period'}), 400
-    if not all_symbols:
-        return jsonify({'error': 'No symbols provided'}), 400
-    if len(all_symbols) > _MAX_SYMBOLS_PER_REQUEST:
-        return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
-
-    results = _analyze_symbols_batch(symbols, period, include_chart_data=include_chart_data)
-    alert_runtime_context = _build_alert_runtime_context(
-        results,
-        _get_telegram_alert_min_confidence(),
-    )
-    notify = bool(data.get("notify_telegram"))
-    if notify:
-        _notify_telegram_from_results(results, runtime_context=alert_runtime_context)
-
-    alert_backtest = _build_alert_backtest_summary(results)
-    backtest_rules = _build_backtest_rulebook(results)
-    all_weather = _build_all_weather_summary(results)
-    regime_summary = dict((alert_runtime_context or {}).get("regime_summary") or {})
-    cleaned = [_clean_json_value(r) for r in results]
-    meta = {
-        "request": {
-            "symbols": symbols,
-            "period": period,
-            "include_chart_data": include_chart_data,
-            "notify_telegram": notify,
-        },
-        "summary": _build_analysis_summary(results, requested_symbols=len(symbols), period=period),
-        "telegram_alerts": alert_backtest,
-        "all_weather": all_weather,
-        "regime_summary": regime_summary,
-        "backtest_rules": backtest_rules,
-        "health": _build_health_snapshot(),
-    }
-    return jsonify({'results': cleaned, 'meta': _clean_json_value(meta)})
+    return _app_handle_analyze_request()
 
 
 @app.route('/report/telegram-alerts', methods=['GET', 'POST'])
 def report_telegram_alerts():
-    if request.method == 'POST':
-        data = request.get_json(silent=True) or {}
-        if not isinstance(data, dict):
-            return jsonify({'error': 'Invalid request body'}), 400
-    else:
-        data = dict(request.args)
-    days = data.get("days", 30)
-    try:
-        days = float(days)
-    except Exception:
-        days = 30.0
-    if days <= 0:
-        days = 30.0
-    limit_examples = data.get("limit_examples_per_strategy", 1)
-    try:
-        limit_examples = max(1, int(limit_examples))
-    except Exception:
-        limit_examples = 1
-    strategies = _parse_strategy_input(data.get("strategies"))
-    raw_symbols = data.get("symbols", "")
-    symbols = _parse_symbols_input(raw_symbols, max_symbols=10000) if raw_symbols else []
-    include_presets = bool(data.get("include_presets", True))
-    include_live_preview = bool(data.get("include_live_preview", False))
-    include_latest_run = bool(data.get("include_latest_run", True))
-    report = _build_telegram_alert_report(
-        days=days,
-        strategies=strategies or None,
-        symbols=symbols or None,
-        limit_examples_per_strategy=limit_examples,
-    )
-    payload = {
-        "request": {
-            "days": days,
-            "strategies": strategies,
-            "symbols": symbols,
-            "limit_examples_per_strategy": limit_examples,
-            "include_presets": include_presets,
-            "include_live_preview": include_live_preview,
-            "include_latest_run": include_latest_run,
-        },
-        "report": report,
-        "health": _build_health_snapshot(),
-        "files": {
-            "alert_history_jsonl": _alert_history_file_path(),
-            "alert_history_csv": _alert_history_csv_path() if _alert_history_export_csv_enabled() else None,
-            "latest_run_json": _alert_run_report_file_path() if _alert_run_report_enabled() else None,
-            "run_reports_jsonl": _alert_run_report_log_path() if _alert_run_report_enabled() else None,
-            "realized_outcomes_json": _alert_outcomes_file_path() if _alert_realized_enabled() and _alert_realized_export_outcomes() else None,
-            "realized_summary_json": _alert_realized_summary_file_path() if _alert_realized_enabled() else None,
-            "auto_tuned_thresholds_json": _alert_auto_tune_file_path() if _alert_auto_tune_enabled() else None,
-        },
-    }
-    if include_latest_run:
-        payload["latest_run"] = _read_latest_telegram_run_report()
-    if include_presets:
-        payload["presets"] = {
-            "1d": _build_telegram_alert_report(
-                days=1,
-                strategies=strategies or None,
-                symbols=symbols or None,
-                limit_examples_per_strategy=limit_examples,
-            ),
-            "30d": _build_telegram_alert_report(
-                days=30,
-                strategies=strategies or None,
-                symbols=symbols or None,
-                limit_examples_per_strategy=limit_examples,
-            ),
-        }
-    if include_live_preview and symbols:
-        period = data.get("period", "15m")
-        if period not in VALID_PERIODS:
-            return jsonify({'error': 'Invalid period'}), 400
-        preview_symbols = symbols[:_MAX_SYMBOLS_PER_REQUEST]
-        preview_results = _analyze_symbols_batch(preview_symbols, period, include_chart_data=False)
-        preview_runtime_context = _build_alert_runtime_context(
-            preview_results,
-            _get_telegram_alert_min_confidence(),
-        )
-        payload["live_preview"] = {
-            "period": period,
-            "symbols": preview_symbols,
-            "report": _build_telegram_alert_live_preview(
-                preview_results,
-                limit_examples_per_strategy=limit_examples,
-                runtime_context=preview_runtime_context,
-            ),
-        }
-    return jsonify(_clean_json_value(payload))
+    return _app_handle_telegram_alert_report_request()
 
 
 @app.route('/report/all-weather', methods=['POST'])
 def report_all_weather():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({'error': 'Invalid request body'}), 400
-    raw_symbols = data.get('symbols', '')
-    all_symbols = _parse_symbols_input(raw_symbols, max_symbols=10000)
-    symbols = all_symbols[:_MAX_SYMBOLS_PER_REQUEST]
-    periods = _parse_periods_input(data.get('periods'), default_periods=["1mo", "3mo", "6mo"], max_periods=6)
-    if not all_symbols:
-        return jsonify({'error': 'No symbols provided'}), 400
-    if len(all_symbols) > _MAX_SYMBOLS_PER_REQUEST:
-        return jsonify({'error': f'Too many symbols (max {_MAX_SYMBOLS_PER_REQUEST})'}), 400
-    if not periods:
-        return jsonify({'error': 'No valid periods provided'}), 400
-
-    period_reports = {}
-    for period in periods:
-        results = _analyze_symbols_batch(symbols, period, include_chart_data=False)
-        period_reports[period] = _build_all_weather_summary(results)
-    readiness = _build_all_weather_readiness(period_reports)
-    payload = {
-        "request": {
-            "symbols": symbols,
-            "periods": periods,
-        },
-        "readiness": readiness,
-        "period_reports": period_reports,
-        "health": _build_health_snapshot(),
-    }
-    return jsonify(_clean_json_value(payload))
+    return _app_handle_all_weather_report_request()
 
 def _run_once(symbols, period, notify_telegram, verify_output=None, verify_include_results=None):
-    uniq = _parse_symbols_input(symbols, max_symbols=_MAX_SYMBOLS_PER_REQUEST)
-    if not uniq:
-        return 2
-    if period not in VALID_PERIODS:
-        return 2
-    results = _analyze_symbols_batch(uniq, period, include_chart_data=False)
-    base_min_conf = _get_telegram_alert_min_confidence()
-    alert_runtime_context = _build_alert_runtime_context(results, base_min_conf)
-    live_preview = _build_telegram_alert_live_preview(
-        results,
-        limit_examples_per_strategy=1,
-        runtime_context=alert_runtime_context,
+    return _app_run_once(
+        symbols,
+        period,
+        notify_telegram,
+        verify_output=verify_output,
+        verify_include_results=verify_include_results,
     )
-    if notify_telegram:
-        _notify_telegram_from_results(results, runtime_context=alert_runtime_context)
-    alert_backtest = _build_alert_backtest_summary(results)
-    backtest_rules = _build_backtest_rulebook(results)
-    all_weather = _build_all_weather_summary(results)
-    regime_summary = dict((alert_runtime_context or {}).get("regime_summary") or {})
-    health_snapshot = _build_health_snapshot()
-    latest_run = _read_latest_telegram_run_report()
-    realized_report_days = _alert_realized_report_days()
-    realized_performance = _build_telegram_alert_realized_report(days=realized_report_days)
-    verify_request = {
-        "symbols": uniq,
-        "period": period,
-        "include_chart_data": False,
-        "notify_telegram": bool(notify_telegram),
-    }
-    verify_summary = _build_analysis_summary(results, requested_symbols=len(uniq), period=period)
-    if verify_include_results is None:
-        verify_include_results = bool(getattr(config, "VERIFY_INCLUDE_RESULTS", False))
-    verify_path = str(verify_output or getattr(config, "VERIFY_OUTPUT_PATH", "") or "").strip()
-    if verify_path:
-        written_path = _write_verify_output(
-            verify_path,
-            {
-                "results": results,
-                "request": verify_request,
-                "summary": verify_summary,
-                "telegram_alerts": alert_backtest,
-                "all_weather": all_weather,
-                "backtest_rules": backtest_rules,
-                "health": health_snapshot,
-                "latest_run": latest_run,
-                "live_preview": live_preview,
-                "regime_summary": regime_summary,
-                "alert_runtime_context": alert_runtime_context,
-                "realized_performance": realized_performance,
-                "include_results": bool(verify_include_results),
-            },
-        )
-        if not written_path:
-            logger.error("Failed to write verify output to %s", verify_path)
-            return 1
-    payload = {
-        "results": [_clean_json_value(r) for r in results],
-        "meta": _clean_json_value(
-            {
-                "request": verify_request,
-                "summary": verify_summary,
-                "telegram_alerts": alert_backtest,
-                "all_weather": all_weather,
-                "backtest_rules": backtest_rules,
-                "health": health_snapshot,
-                "latest_run": latest_run,
-                "live_preview": live_preview,
-                "regime_summary": regime_summary,
-                "alert_runtime_context": alert_runtime_context,
-                "realized_performance": realized_performance,
-                "verify_output_path": verify_path or None,
-            }
-        ),
-    }
-    print(json.dumps(payload, ensure_ascii=False))
-    return 0
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

@@ -1,3 +1,127 @@
+from domain.alerts.trend_1h import infer_1h_trend_snapshot
+
+
+def _format_sources_compact(sources, html_escape, *, limit=3):
+    if not isinstance(sources, list) or not sources:
+        return None
+    cleaned = [str(source).strip() for source in sources if str(source).strip()]
+    if not cleaned:
+        return None
+    visible = cleaned[:limit]
+    text = ", ".join(html_escape(source) for source in visible)
+    if len(cleaned) > limit:
+        text += f" +{len(cleaned) - limit}"
+    return text
+
+
+def _append_snapshot_lines(lines, *, price_text=None, change=None, confidence=None, sources=None, html_escape):
+    snapshot_parts = []
+    if price_text:
+        price_part = f"ราคา {price_text}"
+        if isinstance(change, (int, float)):
+            price_part += f" ({change:+.2f}%)"
+        snapshot_parts.append(price_part)
+    if isinstance(confidence, (int, float)):
+        snapshot_parts.append(f"Conf {float(confidence):.0f}%")
+    if snapshot_parts:
+        lines.append("<b>📍 Snapshot:</b> " + " | ".join(html_escape(part) for part in snapshot_parts))
+    source_text = _format_sources_compact(sources, html_escape)
+    if source_text:
+        lines.append("<b>🧩 Source:</b> " + source_text)
+
+
+def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, html_escape, prefix="🧪 Edge"):
+    parts = []
+    if isinstance(win_rate, (int, float)):
+        parts.append(f"WR {float(win_rate):.1f}%")
+    if isinstance(expectancy, (int, float)):
+        parts.append(f"ExpRR {float(expectancy):.2f}")
+    if isinstance(trades, (int, float)) and float(trades) > 0:
+        parts.append(f"Trades {int(round(float(trades)))}")
+    if parts:
+        lines.append(f"<b>{prefix}:</b> " + " | ".join(html_escape(part) for part in parts))
+
+
+def _append_action_lines(lines, action_guidance, *, html_escape):
+    if not isinstance(action_guidance, dict):
+        return
+    action_text = str(action_guidance.get("primary_text") or "").strip()
+    if action_text:
+        lines.append("<b>🎯 Action:</b> " + html_escape(action_text))
+    note_text = str(action_guidance.get("note_text") or "").strip()
+    if note_text:
+        lines.append("<b>⚠️ Note:</b> " + html_escape(note_text))
+
+
+def _resolve_plan_value(plan, pick_plan_value, keys):
+    if callable(pick_plan_value):
+        return pick_plan_value(plan, keys)
+    if not isinstance(plan, dict):
+        return None
+    for key in keys:
+        value = plan.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _append_levels_lines(lines, *, plan, format_price_value, html_escape, pick_plan_value=None):
+    if not isinstance(plan, dict):
+        return
+    entry_value = _resolve_plan_value(plan, pick_plan_value, ["entry_price", "current_price", "price"])
+    stop_value = _resolve_plan_value(plan, pick_plan_value, ["stop_loss", "entry_stop_loss", "trailing_stop"])
+    take_profit_value = _resolve_plan_value(plan, pick_plan_value, ["take_profit", "take_profit_2", "exit_price"])
+    parts = []
+    entry_text = format_price_value(entry_value)
+    stop_text = format_price_value(stop_value)
+    take_profit_text = format_price_value(take_profit_value)
+    if entry_text:
+        parts.append(f"Entry {entry_text}")
+    if stop_text:
+        parts.append(f"SL {stop_text}")
+    if take_profit_text:
+        parts.append(f"TP {take_profit_text}")
+    if parts:
+        lines.append("<b>📌 Plan:</b> " + " | ".join(html_escape(part) for part in parts))
+    risk_pct = plan.get("entry_risk_pct")
+    if isinstance(risk_pct, (int, float)):
+        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+
+
+def _append_reason_line(lines, *, html_escape, parts=None, reasons=None, label="🧠 Context"):
+    compact_parts = []
+    if isinstance(parts, list):
+        compact_parts.extend([str(part).strip() for part in parts if str(part).strip()])
+    if isinstance(reasons, list):
+        compact_parts.extend([str(reason).strip() for reason in reasons if str(reason).strip()])
+    if not compact_parts:
+        return
+    lines.append(f"<b>{label}:</b> " + " | ".join(html_escape(part) for part in compact_parts[:3]))
+
+
+def _append_footer(lines, *, get_now, tv_symbol):
+    lines.append("────────────────")
+    lines.append("🕒 <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 TradingView</a>")
+
+
+def _append_hourly_bias_line(lines, *, item, html_escape, label="🧭 1H Trend"):
+    snapshot = infer_1h_trend_snapshot(item)
+    if not isinstance(snapshot, dict):
+        return
+    trend = str(snapshot.get("trend") or "").upper()
+    if trend not in ("UP", "DOWN"):
+        return
+    parts = [f"{trend}"]
+    strength = str(snapshot.get("strength") or "").upper()
+    if strength in ("STRONG", "WEAK"):
+        parts.append(strength)
+    source_labels = snapshot.get("source_labels") or []
+    if source_labels:
+        parts.append(", ".join(str(label_text) for label_text in source_labels[:2]))
+    lines.append(f"<b>{label}:</b> " + " | ".join(html_escape(part) for part in parts))
+
+
 def build_telegram_message(
     item,
     signal,
@@ -16,12 +140,8 @@ def build_telegram_message(
     strict_60_mode_enabled = helpers["strict_60_mode_enabled"]
     strict_60_allow_cdc = helpers["strict_60_allow_cdc"]
     extract_signal_edge_metrics = helpers["extract_signal_edge_metrics"]
-    build_alert_profile_lines = helpers["build_alert_profile_lines"]
-    append_pattern_context_lines = helpers["append_pattern_context_lines"]
-    build_stop_context_lines = helpers["build_stop_context_lines"]
     get_plan_label = helpers["get_plan_label"]
-    format_exit_levels_lines = helpers["format_exit_levels_lines"]
-    format_price_forecast_lines = helpers["format_price_forecast_lines"]
+    pick_plan_value = helpers["pick_plan_value"]
     build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -37,17 +157,15 @@ def build_telegram_message(
     price = item.get("price")
     change = item.get("change")
     price_text = format_price_value(price)
-    if price_text:
-        if isinstance(change, (int, float)):
-            lines.append(f"<b>ราคา:</b> {price_text} ({change:+.2f}%)")
-        else:
-            lines.append(f"<b>ราคา:</b> {price_text}")
-
-    if best_conf is not None:
-        lines.append(f"<b>ความมั่นใจ:</b> {best_conf:.0f}%")
-
-    if sources:
-        lines.append(f"<b>แหล่งสัญญาณ:</b> " + ", ".join([html_escape(s) for s in sources]))
+    _append_snapshot_lines(
+        lines,
+        price_text=price_text,
+        change=change,
+        confidence=best_conf,
+        sources=sources,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
 
     if not isinstance(primary_plan, dict):
         primary_plan = pick_primary_trade_plan(
@@ -57,14 +175,12 @@ def build_telegram_message(
             allow_cdc=strict_60_allow_cdc(),
         )
     edge_metrics = extract_signal_edge_metrics(primary_plan, signal) if isinstance(primary_plan, dict) else {}
-    lines.extend(
-        build_alert_profile_lines(
-            win_rate=edge_metrics.get("win_rate_pct"),
-            confidence=best_conf,
-            expectancy=edge_metrics.get("expectancy_rr"),
-            trades=edge_metrics.get("trades"),
-            mode_label=mode_label,
-        )
+    _append_edge_lines(
+        lines,
+        win_rate=edge_metrics.get("win_rate_pct"),
+        expectancy=edge_metrics.get("expectancy_rr"),
+        trades=edge_metrics.get("trades"),
+        html_escape=html_escape,
     )
     action_guidance = build_trade_action_guidance(
         signal,
@@ -72,39 +188,24 @@ def build_telegram_message(
         mode_label=mode_label,
         source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
     )
-    if isinstance(action_guidance, dict):
-        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
-        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
-        note_text = str(action_guidance.get("note_text") or "").strip()
-        if note_text:
-            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
-    pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
-    append_pattern_context_lines(lines, pattern)
+    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    context_parts = []
     if isinstance(primary_plan, dict):
-        stop_lines = build_stop_context_lines(
-            item,
-            primary_plan,
-            signal=signal,
-            source_label=get_plan_label(primary_plan, item),
-        )
-        if stop_lines:
-            lines.append("────────────────")
-            lines.extend(stop_lines)
-
-        exit_lines = format_exit_levels_lines(primary_plan)
-        if exit_lines:
-            if not stop_lines:
-                lines.append("────────────────")
-            lines.extend([html_escape(line) for line in exit_lines])
-
-    forecast_lines = format_price_forecast_lines(item.get("price_forecast"))
-    if forecast_lines:
-        lines.append("────────────────")
-        lines.extend([html_escape(line) for line in forecast_lines])
-
-    lines.append("────────────────")
-    lines.append("🕒 <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+        source_label = get_plan_label(primary_plan, item)
+        if source_label:
+            context_parts.append(str(source_label))
+        pattern = str(primary_plan.get("detected_pattern") or "").strip()
+        if pattern and pattern.upper() != "NONE":
+            context_parts.append(f"Pattern {pattern}")
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
+    _append_levels_lines(
+        lines,
+        plan=primary_plan,
+        format_price_value=format_price_value,
+        html_escape=html_escape,
+        pick_plan_value=pick_plan_value,
+    )
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
 
 
@@ -144,18 +245,19 @@ def build_daily_best_pick_message(
     insert_at = 1
     if len(lines) > 1 and lines[1].startswith("<i>"):
         insert_at = 2
-    daily_lines = [
-        "<b>🗓️ Daily Scan:</b> หนึ่งในตัวเด่นของวันจาก watchlist",
-    ]
+    daily_lines = ["<b>🗓️ Daily Pick:</b> ตัวเด่นของวันจาก watchlist"]
+    info_parts = []
     if mode_label:
-        daily_lines.append("<b>🧭 โหมด:</b> " + html_escape(str(mode_label)))
+        info_parts.append(str(mode_label))
         mode_hint = alert_mode_usage_hint(mode_label=mode_label)
         if mode_hint:
-            daily_lines.append("<b>🧠 บทบาท:</b> " + html_escape(mode_hint))
+            info_parts.append(mode_hint)
     if strategy_label:
-        daily_lines.append("<b>🎯 แผนหลัก:</b> " + html_escape(str(strategy_label)))
+        info_parts.append(f"แผน {strategy_label}")
     if isinstance(selection_score, (int, float)):
-        daily_lines.append(f"<b>⭐ คะแนนคัดเลือก:</b> {float(selection_score):.1f}")
+        info_parts.append(f"Score {float(selection_score):.1f}")
+    if info_parts:
+        daily_lines.append("<b>🧠 Context:</b> " + " | ".join(html_escape(str(part)) for part in info_parts[:3]))
     lines[insert_at:insert_at] = daily_lines
     return "\n".join(lines)
 
@@ -166,11 +268,6 @@ def build_price_action_message(item, plan, *, helpers, get_now):
     pick_plan_value = helpers["pick_plan_value"]
     format_price_value = helpers["format_price_value"]
     plan_confidence_value = helpers["plan_confidence_value"]
-    build_alert_profile_lines = helpers["build_alert_profile_lines"]
-    append_pattern_context_lines = helpers["append_pattern_context_lines"]
-    build_stop_context_lines = helpers["build_stop_context_lines"]
-    format_exit_levels_lines = helpers["format_exit_levels_lines"]
-    format_price_forecast_lines = helpers["format_price_forecast_lines"]
     build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     signal = str(plan.get("signal") or "").upper()
@@ -190,108 +287,46 @@ def build_price_action_message(item, plan, *, helpers, get_now):
     change = item.get("change")
     entry_text = format_price_value(entry_price)
     curr_text = format_price_value(curr_price)
-    if entry_text:
-        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
-    if curr_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        lines.append(f"<b>📍 ราคาปัจจุบัน:</b> {curr_text}{change_str}")
-
-    structure = str(plan.get("market_structure") or "").strip()
-    trend_1h = str(plan.get("trend_1h") or "").strip()
-    wyckoff = str(plan.get("wyckoff_phase") or "").strip()
-    if structure or trend_1h or wyckoff:
-        parts = []
-        if structure:
-            parts.append(f"Structure: {structure}")
-        if trend_1h:
-            parts.append(f"Trend 1H: {trend_1h}")
-        if wyckoff:
-            parts.append(f"Wyckoff: {wyckoff}")
-        lines.append("<b>🧭 บริบทกราฟ:</b> " + " • ".join([html_escape(part) for part in parts]))
-
-    chart_pattern = str(plan.get("chart_pattern") or "").strip()
-    role_reversal = str(plan.get("role_reversal") or "").strip()
-    setup_label = str(plan.get("setup_label") or "").strip()
-    if setup_label:
-        lines.append("<b>🧱 Setup:</b> " + html_escape(setup_label))
-    if chart_pattern:
-        lines.append("<b>📐 Chart Pattern:</b> " + html_escape(chart_pattern))
-    if role_reversal:
-        lines.append("<b>🔄 Role Reversal:</b> " + html_escape(role_reversal))
-
-    demand_zone = format_price_value(plan.get("demand_zone"))
-    supply_zone = format_price_value(plan.get("supply_zone"))
-    nearest_support = format_price_value(plan.get("nearest_support"))
-    nearest_resistance = format_price_value(plan.get("nearest_resistance"))
-    zone_parts = []
-    if demand_zone:
-        zone_parts.append(f"Demand {demand_zone}")
-    if supply_zone:
-        zone_parts.append(f"Supply {supply_zone}")
-    if nearest_support:
-        zone_parts.append(f"Support {nearest_support}")
-    if nearest_resistance:
-        zone_parts.append(f"Resistance {nearest_resistance}")
-    if zone_parts:
-        lines.append("<b>🗺️ โซนสำคัญ:</b> " + " | ".join([html_escape(part) for part in zone_parts]))
+    _append_snapshot_lines(
+        lines,
+        price_text=curr_text or entry_text,
+        change=change,
+        confidence=plan_confidence_value(plan),
+        sources=None,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
 
     conf = plan_confidence_value(plan)
-    lines.extend(
-        build_alert_profile_lines(
-            win_rate=plan.get("historical_win_rate"),
-            confidence=conf,
-            expectancy=plan.get("historical_avg_rr"),
-            trades=plan.get("historical_trades"),
-        )
+    _append_edge_lines(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        html_escape=html_escape,
     )
     action_guidance = build_trade_action_guidance(
         signal,
         plan=plan,
         source_label="Price Action 15m",
     )
-    if isinstance(action_guidance, dict):
-        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
-        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
-        note_text = str(action_guidance.get("note_text") or "").strip()
-        if note_text:
-            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
+    _append_action_lines(lines, action_guidance, html_escape=html_escape)
 
-    proxy_sources = plan.get("proxy_sources")
-    if isinstance(proxy_sources, list) and proxy_sources:
-        lines.append("<b>🤝 Backtest Proxy:</b> " + " | ".join([html_escape(str(src)) for src in proxy_sources[:4]]))
-
-    reasons = plan.get("reasons")
-    if isinstance(reasons, list) and reasons:
-        lines.append("<b>🔎 เหตุผลเชิงพฤติกรรมราคา:</b>")
-        for reason in reasons[:5]:
-            if reason:
-                lines.append("• " + html_escape(str(reason)))
-
-    pattern = plan.get("detected_pattern")
-    append_pattern_context_lines(lines, pattern)
-
-    stop_lines = build_stop_context_lines(item, plan, signal=signal, source_label="Price Action 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-
-    exit_lines = format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([html_escape(line) for line in exit_lines])
-
-    forecast_lines = format_price_forecast_lines(item.get("price_forecast"))
-    if forecast_lines:
-        lines.append("────────────────")
-        lines.extend([html_escape(line) for line in forecast_lines])
-
-    lines.append("────────────────")
-    last_signal_time = plan.get("last_signal_time")
-    if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {html_escape(last_signal_time)}")
-    lines.append("⏱️ <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    context_parts = [
+        str(plan.get("setup_label") or "").strip(),
+        str(plan.get("chart_pattern") or "").strip(),
+        str(plan.get("market_structure") or "").strip(),
+        str(plan.get("trend_1h") or "").strip(),
+    ]
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
+    _append_levels_lines(
+        lines,
+        plan=plan,
+        format_price_value=format_price_value,
+        html_escape=html_escape,
+        pick_plan_value=pick_plan_value,
+    )
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
 
 
@@ -300,12 +335,7 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
     normalize_symbol = helpers["normalize_symbol"]
     format_price_value = helpers["format_price_value"]
     plan_confidence_value = helpers["plan_confidence_value"]
-    build_alert_profile_lines = helpers["build_alert_profile_lines"]
-    build_stop_context_lines = helpers["build_stop_context_lines"]
-    format_exit_levels_lines = helpers["format_exit_levels_lines"]
-    format_price_forecast_lines = helpers["format_price_forecast_lines"]
     build_trade_action_guidance = helpers["build_trade_action_guidance"]
-    append_pattern_context_lines = helpers["append_pattern_context_lines"]
 
     signal = str(plan.get("signal") or "").upper()
     if signal not in ("BUY", "SELL"):
@@ -325,14 +355,15 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
     curr_text = format_price_value(plan.get("current_price", item.get("price")))
     breakout_text = format_price_value(plan.get("breakout_level"))
     change = item.get("change")
-    if entry_text:
-        lines.append(f"<b>📍 จุดเข้า:</b> {entry_text}")
-    if curr_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        lines.append(f"<b>📍 ราคาปัจจุบัน:</b> {curr_text}{change_str}")
-    if breakout_text:
-        level_label = "แนว breakout" if signal == "BUY" else "แนว breakdown"
-        lines.append(f"<b>🧱 {level_label}:</b> {breakout_text}")
+    _append_snapshot_lines(
+        lines,
+        price_text=curr_text or entry_text,
+        change=change,
+        confidence=plan_confidence_value(plan),
+        sources=None,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
 
     trend_1h = str(plan.get("trend_1h") or "").strip()
     market_bias = str(plan.get("market_bias") or "").strip()
@@ -347,59 +378,22 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         context_parts.append(f"ADX {float(adx):.1f}")
     if isinstance(rvol, (int, float)):
         context_parts.append(f"RVOL {float(rvol):.2f}")
-    if context_parts:
-        lines.append("<b>🧭 บริบท:</b> " + " | ".join([html_escape(part) for part in context_parts]))
+    if breakout_text:
+        context_parts.insert(0, f"Level {breakout_text}")
 
     conf = plan_confidence_value(plan)
-    lines.extend(
-        build_alert_profile_lines(
-            win_rate=plan.get("historical_win_rate"),
-            confidence=conf,
-            expectancy=plan.get("historical_avg_rr"),
-            trades=plan.get("historical_trades"),
-        )
+    _append_edge_lines(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        html_escape=html_escape,
     )
     action_guidance = build_trade_action_guidance(signal, plan=plan, source_label="Trend Breakout 15m")
-    if isinstance(action_guidance, dict):
-        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
-        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
-        note_text = str(action_guidance.get("note_text") or "").strip()
-        if note_text:
-            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
-
-    reasons = plan.get("reasons")
-    if isinstance(reasons, list) and reasons:
-        reason_header = "เหตุผล breakout" if signal == "BUY" else "เหตุผล breakdown"
-        lines.append(f"<b>🔎 {reason_header}:</b>")
-        for reason in reasons[:5]:
-            if reason:
-                lines.append("• " + html_escape(str(reason)))
-
-    pattern = plan.get("detected_pattern")
-    append_pattern_context_lines(lines, pattern)
-
-    stop_lines = build_stop_context_lines(item, plan, signal=signal, source_label="Trend Breakout 15m")
-    if stop_lines:
-        lines.append("────────────────")
-        lines.extend(stop_lines)
-
-    exit_lines = format_exit_levels_lines(plan)
-    if exit_lines:
-        if not stop_lines:
-            lines.append("────────────────")
-        lines.extend([html_escape(line) for line in exit_lines])
-
-    forecast_lines = format_price_forecast_lines(item.get("price_forecast"))
-    if forecast_lines:
-        lines.append("────────────────")
-        lines.extend([html_escape(line) for line in forecast_lines])
-
-    lines.append("────────────────")
-    last_signal_time = plan.get("last_signal_time")
-    if isinstance(last_signal_time, str) and last_signal_time:
-        lines.append(f"🕒 <b>สัญญาณล่าสุด:</b> {html_escape(last_signal_time)}")
-    lines.append("⏱️ <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 ดูชาร์ตบน TradingView</a>")
+    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
+    _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape)
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
 
 
@@ -448,7 +442,7 @@ def build_all_weather_message(item, aw_signal, *, helpers, get_now):
     if regime_stats:
         extra_lines[-1] += " | " + " | ".join(regime_stats)
     if confluence_labels:
-        extra_lines.append("<b>🤝 Confluence:</b> " + ", ".join([html_escape(s) for s in confluence_labels]))
+        extra_lines.append("<b>🤝 Confluence:</b> " + ", ".join([html_escape(s) for s in confluence_labels[:3]]))
     side_stats = []
     if isinstance(top_buy_score, (int, float)):
         side_stats.append(f"BUY {float(top_buy_score):.1f}")
@@ -478,12 +472,9 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
     html_escape = helpers["html_escape"]
     normalize_symbol = helpers["normalize_symbol"]
     format_price_value = helpers["format_price_value"]
-    build_alert_profile_lines = helpers["build_alert_profile_lines"]
     pick_primary_trade_plan = helpers["pick_primary_trade_plan"]
     strict_60_mode_enabled = helpers["strict_60_mode_enabled"]
     strict_60_allow_cdc = helpers["strict_60_allow_cdc"]
-    build_stop_context_lines = helpers["build_stop_context_lines"]
-    format_exit_levels_lines = helpers["format_exit_levels_lines"]
     build_trade_action_guidance = helpers["build_trade_action_guidance"]
 
     emoji = "🔥" if signal == "BUY" else "🧊" if signal == "SELL" else "⚪"
@@ -497,26 +488,28 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
     lines = [f"<b>{emoji} SUPER SIGNAL {signal} | {html_escape(symbol)}</b>"]
     if name:
         lines.append(f"<i>{name}</i>")
-    lines.append("🏆 <b>ความแม่นยำย้อนหลังสูงพิเศษ (High Accuracy)</b>")
     lines.append("────────────────")
-    lines.extend(
-        build_alert_profile_lines(
-            win_rate=avg_wr,
-            expectancy=avg_exp,
-            trades=super_meta.get("avg_trades"),
-        )
-    )
 
     price = item.get("price")
     change = item.get("change")
     price_text = format_price_value(price)
-    if price_text:
-        change_str = f" ({change:+.2f}%)" if isinstance(change, (int, float)) else ""
-        lines.append(f"<b>ราคาปัจจุบัน:</b> {price_text}{change_str}")
-
-    lines.append(f"<b>📊 Win Rate เฉลี่ย:</b> {avg_wr:.1f}%")
-    lines.append(f"<b>📈 คาดการณ์กำไร (ExpRR):</b> {avg_exp:.2f}")
-    lines.append(f"<b>🤝 Confluence:</b> " + ", ".join(confluence))
+    _append_snapshot_lines(
+        lines,
+        price_text=price_text,
+        change=change,
+        confidence=avg_wr,
+        sources=confluence,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
+    _append_edge_lines(
+        lines,
+        win_rate=avg_wr,
+        expectancy=avg_exp,
+        trades=super_meta.get("avg_trades"),
+        html_escape=html_escape,
+        prefix="🏆 Ensemble",
+    )
 
     if not isinstance(primary_plan, dict):
         primary_plan = pick_primary_trade_plan(
@@ -530,34 +523,12 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         plan=primary_plan,
         source_label="Super Signal Ensemble",
     )
-    if isinstance(action_guidance, dict):
-        lines.append("<b>🎯 ควรทำ:</b> " + html_escape(str(action_guidance.get("primary_text") or "")))
-        lines.append("<b>🧭 แปลสัญญาณ:</b> " + html_escape(str(action_guidance.get("action_code") or "")))
-        note_text = str(action_guidance.get("note_text") or "").strip()
-        if note_text:
-            lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
+    _append_action_lines(lines, action_guidance, html_escape=html_escape)
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
+    context_parts = []
     if pattern and pattern != "None":
-        lines.append(f"<b>🕯️ Confirmation Pattern:</b> {html_escape(pattern)}")
-
-    if isinstance(primary_plan, dict):
-        stop_lines = build_stop_context_lines(
-            item,
-            primary_plan,
-            signal=signal,
-            source_label="Super Signal Ensemble",
-        )
-        if stop_lines:
-            lines.append("────────────────")
-            lines.extend(stop_lines)
-
-        exit_lines = format_exit_levels_lines(primary_plan)
-        if exit_lines:
-            if not stop_lines:
-                lines.append("────────────────")
-            lines.extend([html_escape(line) for line in exit_lines])
-
-    lines.append("────────────────")
-    lines.append("🕒 <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
-    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 วิเคราะห์กราฟบน TradingView</a>")
+        context_parts.append(f"Pattern {pattern}")
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
+    _append_levels_lines(lines, plan=primary_plan, format_price_value=format_price_value, html_escape=html_escape)
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)

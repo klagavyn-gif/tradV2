@@ -4,12 +4,14 @@ from domain.alerts.dispatch.delivery import (
     dispatch_daily_candidates,
     dispatch_daily_summary,
     dispatch_primary_candidates,
+    dispatch_trend_state_candidates,
 )
 from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_dispatch_settings
 
 def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
     build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
+    build_trend_state_candidates = helpers["build_trend_state_candidates"]
     is_daily_best_pick_window = helpers["is_daily_best_pick_window"]
     build_daily_best_pick_candidates = helpers["build_daily_best_pick_candidates"]
     build_daily_summary_message = helpers["build_daily_summary_message"]
@@ -91,6 +93,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
 
     daily_pick_sent = 0
     daily_summary_sent = 0
+    trend_state_sent = 0
     daily_pick_cap = coerce_int(getattr(config, "TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY", 1), 1)
     if isinstance(alert_budget, dict):
         try:
@@ -127,12 +130,36 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             elif not daily_summary_sent:
                 logger.info("Daily Best Pick window active but no directional candidate or summary was sent")
 
+    trend_state_candidates = []
+    if not kill:
+        trend_state_candidates = build_trend_state_candidates(results, runtime_context=runtime_context)
+    if trend_state_candidates:
+        trend_state_max_per_run = coerce_int(getattr(config, "TREND_STATE_ALERT_MAX_PER_RUN", 2), 2)
+        trend_state_cooldown_minutes = coerce_int(getattr(config, "TREND_STATE_ALERT_COOLDOWN_MINUTES", 360), 360)
+        trend_state_dispatch = dispatch_trend_state_candidates(
+            trend_state_candidates,
+            send_telegram_alert=send_telegram_alert,
+            telegram_alert_cache=telegram_alert_cache,
+            record_telegram_alert_history=record_telegram_alert_history,
+            min_conf=min_conf,
+            dynamic_min_conf=dynamic_min_conf,
+            cooldown_ttl=max(60, int(trend_state_cooldown_minutes * 60)),
+            max_per_run=trend_state_max_per_run,
+            per_symbol_sent=per_symbol_sent,
+            suppress_if_symbol_sent=bool(getattr(config, "TREND_STATE_ALERT_SUPPRESS_IF_PRIMARY_SENT", True)),
+        )
+        trend_state_sent = int(trend_state_dispatch["sent"])
+        per_symbol_sent = dict(trend_state_dispatch["per_symbol_sent"])
+        sent_candidates.extend(trend_state_dispatch["sent_candidates"])
+        sent += trend_state_sent
+
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f budget=%s",
+        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s trend_state=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f budget=%s",
         sent,
         len(candidates),
         daily_pick_sent,
         daily_summary_sent,
+        trend_state_sent,
         dropped_by_cache,
         dropped_by_symbol_cap,
         dropped_by_run_cap,

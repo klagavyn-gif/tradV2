@@ -131,3 +131,65 @@ def dispatch_daily_summary(
         daily_pick=False,
     )
     return True
+
+
+def dispatch_trend_state_candidates(
+    trend_state_candidates,
+    *,
+    send_telegram_alert,
+    telegram_alert_cache,
+    record_telegram_alert_history,
+    min_conf,
+    dynamic_min_conf,
+    cooldown_ttl,
+    max_per_run,
+    per_symbol_sent,
+    suppress_if_symbol_sent,
+):
+    sent = 0
+    dropped_by_cache = 0
+    dropped_by_symbol_cap = 0
+    dropped_by_run_cap = 0
+    sent_candidates = []
+
+    for candidate in trend_state_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if sent >= int(max_per_run):
+            dropped_by_run_cap += 1
+            continue
+        symbol = str(candidate.get("symbol") or "")
+        if symbol and suppress_if_symbol_sent and int(per_symbol_sent.get(symbol, 0)) > 0:
+            dropped_by_symbol_cap += 1
+            continue
+        cache_key = str(candidate.get("cache_key") or "").strip()
+        if not cache_key:
+            continue
+        if cache_contains(telegram_alert_cache, cache_key):
+            dropped_by_cache += 1
+            continue
+        message = candidate.get("message")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        if not send_telegram_alert(message):
+            continue
+        cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=int(cooldown_ttl))
+        if symbol:
+            per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
+        sent += 1
+        sent_candidates.append(candidate)
+        record_telegram_alert_history(
+            candidate,
+            min_conf=min_conf,
+            dynamic_min_conf=dynamic_min_conf,
+            daily_pick=False,
+        )
+
+    return {
+        "sent": sent,
+        "sent_candidates": sent_candidates,
+        "per_symbol_sent": per_symbol_sent,
+        "dropped_by_cache": dropped_by_cache,
+        "dropped_by_symbol_cap": dropped_by_symbol_cap,
+        "dropped_by_run_cap": dropped_by_run_cap,
+    }

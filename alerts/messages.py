@@ -262,6 +262,77 @@ def build_daily_best_pick_message(
     return "\n".join(lines)
 
 
+def build_trend_state_message(item, state_snapshot, *, helpers, get_now):
+    html_escape = helpers["html_escape"]
+    normalize_symbol = helpers["normalize_symbol"]
+    format_price_value = helpers["format_price_value"]
+
+    if not isinstance(state_snapshot, dict):
+        return None
+    trend = str(state_snapshot.get("trend") or "").strip().upper()
+    signal = str(state_snapshot.get("signal") or "").strip().upper()
+    if trend not in ("UP", "DOWN") or signal not in ("BUY", "SELL"):
+        return None
+
+    symbol = normalize_symbol(item.get("symbol") or "")
+    if not symbol:
+        return None
+    name = html_escape(str(item.get("name") or "").strip())
+    tv_symbol = symbol.replace("-", "")
+    icon = "🟢" if signal == "BUY" else "🔴"
+    side_label = "ขาขึ้นแรง" if signal == "BUY" else "ขาลงแรง"
+
+    lines = [f"<b>{icon} Trend State | {html_escape(symbol)}</b>"]
+    if name:
+        lines.append(f"<i>{name}</i>")
+    lines.append("────────────────")
+
+    _append_snapshot_lines(
+        lines,
+        price_text=format_price_value(item.get("price")),
+        change=item.get("change"),
+        confidence=state_snapshot.get("score"),
+        sources=state_snapshot.get("supporting_sources"),
+        html_escape=html_escape,
+    )
+    lines.append(
+        "<b>🧭 State:</b> "
+        + " | ".join(
+            html_escape(part)
+            for part in [
+                side_label,
+                f"1H {trend}",
+                str(state_snapshot.get("trend_strength") or "WEAK").strip().upper(),
+            ]
+            if str(part).strip()
+        )
+    )
+
+    context_parts = []
+    symbol_regime = str(state_snapshot.get("symbol_regime") or "").strip().upper()
+    market_regime = str(state_snapshot.get("market_regime") or "").strip().upper()
+    if symbol_regime:
+        context_parts.append(f"Symbol Regime {symbol_regime}")
+    if market_regime:
+        context_parts.append(f"Market {market_regime}")
+    directional_sources = state_snapshot.get("directional_source_count")
+    if isinstance(directional_sources, (int, float)):
+        context_parts.append(f"Consensus {int(directional_sources)}")
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
+
+    tags = [str(tag).strip().upper() for tag in (state_snapshot.get("tags") or []) if str(tag).strip()]
+    if tags:
+        lines.append("<b>⚡ Tags:</b> " + " | ".join(html_escape(tag) for tag in tags[:3]))
+
+    support_labels = [str(label).strip() for label in (state_snapshot.get("supporting_sources") or []) if str(label).strip()]
+    if support_labels:
+        lines.append("<b>🤝 Sources:</b> " + " | ".join(html_escape(label) for label in support_labels[:3]))
+
+    lines.append("<b>⚠️ Note:</b> เป็นการแจ้งสถานะเทรนด์ ไม่ใช่จุดเข้าเทรดทันที")
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
+    return "\n".join(lines)
+
+
 def build_price_action_message(item, plan, *, helpers, get_now):
     html_escape = helpers["html_escape"]
     normalize_symbol = helpers["normalize_symbol"]

@@ -31,6 +31,7 @@ from application.services.report_service import (
     handle_telegram_alert_report_request as _app_handle_telegram_alert_report_request,
 )
 from application.services import service_support as _service_support
+from domain.alerts.trend_state import build_trend_state_candidates as _domain_build_trend_state_candidates
 from domain.alerts.trend_1h import infer_1h_trend_snapshot
 from alerts.daily import (
     build_daily_best_pick_candidates as _alerts_build_daily_best_pick_candidates,
@@ -48,6 +49,7 @@ from alerts.messages import (
     build_price_action_message as _alerts_build_price_action_message,
     build_super_signal_message as _alerts_build_super_signal_message,
     build_telegram_message as _alerts_build_telegram_message,
+    build_trend_state_message as _alerts_build_trend_state_message,
     build_trend_breakout_message as _alerts_build_trend_breakout_message,
 )
 from alerts.pipeline import (
@@ -2542,6 +2544,15 @@ def _build_daily_best_pick_message(item, signal, best_conf, sources, primary_pla
     )
 
 
+def _build_trend_state_message(item, state_snapshot):
+    return _alerts_build_trend_state_message(
+        item,
+        state_snapshot,
+        helpers=_message_module_helpers(),
+        get_now=get_thai_now,
+    )
+
+
 def _build_price_action_message(item, plan):
     return _alerts_build_price_action_message(
         item,
@@ -3683,6 +3694,7 @@ def _pipeline_module_helpers():
         "telegram_dynamic_conf_threshold": _telegram_dynamic_conf_threshold,
         "build_alert_runtime_context": _build_alert_runtime_context,
         "build_telegram_candidates": _build_telegram_candidates,
+        "build_trend_state_candidates": _build_trend_state_candidates,
         "is_daily_best_pick_window": _is_daily_best_pick_window,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
         "build_daily_summary_message": _build_daily_summary_message,
@@ -3718,6 +3730,15 @@ def _daily_alert_module_helpers():
     }
 
 
+def _trend_state_module_helpers():
+    return {
+        "normalize_symbol": normalize_symbol,
+        "build_symbol_regime": _build_symbol_regime,
+        "build_market_regime_snapshot": _build_market_regime_snapshot,
+        "build_trend_state_message": _build_trend_state_message,
+    }
+
+
 def _is_daily_best_pick_window():
     return _alerts_is_daily_best_pick_window(config=config, get_now=get_thai_now)
 
@@ -3727,6 +3748,16 @@ def _build_daily_best_pick_candidates(results, runtime_context=None):
         results,
         config=config,
         helpers=_daily_alert_module_helpers(),
+        get_now=get_thai_now,
+        runtime_context=runtime_context,
+    )
+
+
+def _build_trend_state_candidates(results, runtime_context=None):
+    return _domain_build_trend_state_candidates(
+        results,
+        config=config,
+        helpers=_trend_state_module_helpers(),
         get_now=get_thai_now,
         runtime_context=runtime_context,
     )

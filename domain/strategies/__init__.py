@@ -1,0 +1,1 @@
+﻿"""Strategies domain package skeleton."""

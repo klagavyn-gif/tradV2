@@ -3,6 +3,7 @@ __pycache__/
 
 .yf_cache/
 .data/telegram_alerts/
+.data/yf_history/
 .git.broken
 
 _probe_push.py

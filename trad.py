@@ -769,8 +769,8 @@ def _extract_plan_edge_metrics(plan):
         if not isinstance(obj, dict):
             return None
         for key in keys:
-            value = obj.get(key)
-            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            value = _safe_float(obj.get(key), None)
+            if isinstance(value, float) and math.isfinite(value):
                 return float(value)
         return None
 
@@ -823,8 +823,8 @@ def _extract_optimizer_trade_metrics(optimizer):
         if not isinstance(obj, dict):
             return None
         for key in keys:
-            value = obj.get(key)
-            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            value = _safe_float(obj.get(key), None)
+            if isinstance(value, float) and math.isfinite(value):
                 return float(value)
         return None
 
@@ -883,6 +883,17 @@ def _normalize_edge_metrics_payload(metrics):
 def _candidate_edge_metrics(candidate):
     if not isinstance(candidate, dict):
         return {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+
+    def merge_edge_metrics(base, override):
+        merged = dict(base) if isinstance(base, dict) else {}
+        if not isinstance(override, dict):
+            return merged
+        for key, value in override.items():
+            if value is None:
+                continue
+            merged[key] = value
+        return merged
+
     edge = candidate.get("edge_metrics")
     normalized = _normalize_edge_metrics_payload(edge)
     if all(isinstance(v, (int, float)) for v in normalized.values()):
@@ -891,15 +902,11 @@ def _candidate_edge_metrics(candidate):
     signal = str(candidate.get("signal") or "").upper()
     if isinstance(plan, dict):
         plan_metrics = _extract_signal_edge_metrics(plan, signal)
-        merged = dict(plan_metrics) if isinstance(plan_metrics, dict) else {}
-        if isinstance(edge, dict):
-            merged.update(edge)
+        merged = merge_edge_metrics(plan_metrics, edge)
         normalized = _normalize_edge_metrics_payload(merged)
     if not any(isinstance(v, (int, float)) for v in normalized.values()):
         fallback = _candidate_summary_fallback_metrics(candidate)
-        merged = dict(fallback) if isinstance(fallback, dict) else {}
-        if isinstance(edge, dict):
-            merged.update(edge)
+        merged = merge_edge_metrics(fallback, edge)
         normalized = _normalize_edge_metrics_payload(merged)
     return normalized
 
@@ -908,8 +915,8 @@ def _summary_pick_numeric(payload, keys):
     if not isinstance(payload, dict):
         return None
     for key in keys:
-        value = payload.get(key)
-        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        value = _safe_float(payload.get(key), None)
+        if isinstance(value, float) and math.isfinite(value):
             return float(value)
     return None
 
@@ -1129,9 +1136,14 @@ def _build_strategy_summary_observations(item, min_conf=None):
     cdc_plan = item.get("cdc_vixfix_15m")
     if isinstance(cdc_plan, dict):
         cdc_signal = _plan_trade_direction(cdc_plan)
+        cdc_metrics = _summary_strategy_edge_metrics(cdc_plan, signal=cdc_signal)
+        if not any(isinstance(cdc_metrics.get(k), (int, float)) for k in ("win_rate_pct", "expectancy_rr", "trades")):
+            cdc_proxy = _price_action_proxy_metrics(item, cdc_signal)
+            if any(isinstance(cdc_proxy.get(k), (int, float)) for k in ("win_rate_pct", "expectancy_rr", "trades")):
+                cdc_metrics = cdc_proxy
         summary["CDCVIX15"] = [
             _summary_edge_observation(
-                _summary_strategy_edge_metrics(cdc_plan, signal=cdc_signal),
+                cdc_metrics,
                 confidence=_plan_confidence_value(cdc_plan),
                 symbol=symbol,
                 signal=cdc_signal,
@@ -1264,6 +1276,7 @@ def _evaluate_candidate_backtest_gate(candidate):
     signal = str(candidate.get("signal") or "").upper()
     if signal not in ("BUY", "SELL"):
         return False, "non_directional_candidate", {"win_rate_pct": None, "expectancy_rr": None, "trades": None}
+    strategy = str(candidate.get("strategy") or "").upper().strip()
     require_edge = bool(getattr(config, "TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS", True))
     min_wr = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE", 58.0)
     min_trades = getattr(config, "TELEGRAM_ALERT_ENTRY_MIN_HIST_TRADES", 8)
@@ -1287,11 +1300,28 @@ def _evaluate_candidate_backtest_gate(candidate):
     has_edge = any(isinstance(v, (int, float)) for v in (wr, exp, trades))
     if require_edge and not has_edge:
         return False, "candidate_missing_edge_metrics", metrics
-    if not isinstance(trades, (int, float)) or float(trades) < float(min_trades):
+    cdc_allow_missing_trades = (
+        strategy == "CDCVIX15"
+        and (
+            not isinstance(trades, (int, float))
+            or float(trades) <= 0.0
+        )
+        and any(isinstance(v, (int, float)) for v in (wr, exp))
+    )
+    if (not cdc_allow_missing_trades) and (
+        not isinstance(trades, (int, float)) or float(trades) < float(min_trades)
+    ):
         return False, "candidate_trades_below_min", metrics
     if not isinstance(wr, (int, float)) or float(wr) < float(min_wr):
         return False, "candidate_win_rate_below_min", metrics
-    if not isinstance(exp, (int, float)) or float(exp) < float(min_exp):
+    cdc_allow_missing_expectancy = (
+        strategy == "CDCVIX15"
+        and not isinstance(exp, (int, float))
+        and isinstance(wr, (int, float))
+    )
+    if (not cdc_allow_missing_expectancy) and (
+        not isinstance(exp, (int, float)) or float(exp) < float(min_exp)
+    ):
         return False, "candidate_expectancy_below_min", metrics
     return True, "pass", metrics
 
@@ -1400,12 +1430,29 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
         not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate)
     ):
         return False, "candidate_profile_win_rate_below_min", metrics
+    cdc_allow_profile_missing_expectancy = (
+        strategy == "CDCVIX15"
+        and isinstance(min_expectancy, (int, float))
+        and not isinstance(expectancy, (int, float))
+        and isinstance(win_rate, (int, float))
+    )
     if isinstance(min_expectancy, (int, float)) and (
-        not isinstance(expectancy, (int, float)) or float(expectancy) < float(min_expectancy)
+        (not cdc_allow_profile_missing_expectancy)
+        and (not isinstance(expectancy, (int, float)) or float(expectancy) < float(min_expectancy))
     ):
         return False, "candidate_profile_expectancy_below_min", metrics
+    cdc_allow_profile_missing_trades = (
+        strategy == "CDCVIX15"
+        and isinstance(min_trades, int)
+        and (
+            not isinstance(trades, (int, float))
+            or float(trades) <= 0.0
+        )
+        and isinstance(win_rate, (int, float))
+    )
     if isinstance(min_trades, int) and (
-        not isinstance(trades, (int, float)) or int(trades) < int(min_trades)
+        (not cdc_allow_profile_missing_trades)
+        and (not isinstance(trades, (int, float)) or int(trades) < int(min_trades))
     ):
         return False, "candidate_profile_trades_below_min", metrics
 

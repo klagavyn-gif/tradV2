@@ -23,7 +23,7 @@ _MARKET_ALERT_BUDGETS = {
     "TREND_DOWN": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
     "BREAKOUT_EXPANSION": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
     "PANIC_REVERSAL": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
-    "RANGE_BALANCED": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
+    "RANGE_BALANCED": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
     "RANGE_HIGH_VOL": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 2.0},
     "LOW_LIQUIDITY_CHOP": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 3.0},
     "RISK_OFF_EVENT": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 4.0},

@@ -195,9 +195,9 @@ TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES = {
         "min_trades": 6,
     },
     "CDCVIX15": {
-        "buy_min_confidence": 66.0,
+        "buy_min_confidence": 68.0,
         "sell_min_confidence": 70.0,
-        "min_score": 74.0,
+        "min_score": 76.0,
         "buy_min_win_rate_pct": 58.0,
         "sell_min_win_rate_pct": 60.0,
         "buy_min_expectancy_rr": 0.04,
@@ -206,22 +206,22 @@ TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES = {
         "sell_min_robustness_score": 45.0,
     },
     "AZ15": {
-        "min_confidence": 76.0,
-        "min_score": 80.0,
+        "min_confidence": 74.0,
+        "min_score": 78.0,
         "min_win_rate_pct": 58.0,
         "min_expectancy_rr": 0.05,
         "min_trades": 8,
     },
     "PA15": {
-        "min_confidence": 67.0,
-        "min_score": 72.0,
+        "min_confidence": 66.0,
+        "min_score": 70.0,
         "min_win_rate_pct": 57.0,
         "min_expectancy_rr": 0.04,
         "min_trades": 8,
     },
     "TCB15": {
-        "min_confidence": 68.0,
-        "min_score": 73.0,
+        "min_confidence": 66.0,
+        "min_score": 71.0,
         "min_win_rate_pct": 57.0,
         "min_expectancy_rr": 0.04,
         "min_trades": 8,
@@ -233,7 +233,7 @@ TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES = {
         "min_expectancy_rr": 0.06,
         "min_trades": 8,
         "min_source_count": 2,
-        "single_source_min_confidence": 90.0,
+        "single_source_min_confidence": 87.0,
     },
     "DAILY_BEST": {
         "min_confidence": 64.0,
@@ -435,7 +435,7 @@ ACTIONZONE_15M_CANDLE_STOP_BUFFER_ATR = _env_float("ACTIONZONE_15M_CANDLE_STOP_B
 ACTIONZONE_15M_MAX_BARS_SINCE_SIGNAL = _env_int("ACTIONZONE_15M_MAX_BARS_SINCE_SIGNAL", 1)
 ACTIONZONE_15M_REQUIRE_STRONG_TREND = _env_bool("ACTIONZONE_15M_REQUIRE_STRONG_TREND", True)
 ACTIONZONE_15M_TP_MULT = _env_float("ACTIONZONE_15M_TP_MULT", 2.0)
-ACTIONZONE_15M_MIN_ALERT_CONFIDENCE = _env_float("ACTIONZONE_15M_MIN_ALERT_CONFIDENCE", 74.0)
+ACTIONZONE_15M_MIN_ALERT_CONFIDENCE = _env_float("ACTIONZONE_15M_MIN_ALERT_CONFIDENCE", 72.0)
 ACTIONZONE_15M_PRECISION60_ENABLED = _env_bool("ACTIONZONE_15M_PRECISION60_ENABLED", True)
 ACTIONZONE_15M_PRECISION60_MIN_ALERT_CONFIDENCE = _env_float("ACTIONZONE_15M_PRECISION60_MIN_ALERT_CONFIDENCE", 90.0)
 ACTIONZONE_15M_PRECISION60_MIN_RVOL = _env_float("ACTIONZONE_15M_PRECISION60_MIN_RVOL", 1.30)
@@ -452,8 +452,8 @@ ACTIONZONE_15M_MOVE_SL_TO_BE = _env_bool("ACTIONZONE_15M_MOVE_SL_TO_BE", True)
 ACTIONZONE_15M_TRAILING_ATR_MULT = _env_float("ACTIONZONE_15M_TRAILING_ATR_MULT", 2.2)
 
 PRICE_ACTION_15M_ENABLED = _env_bool("PRICE_ACTION_15M_ENABLED", True)
-PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE = _env_float("PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE", 64.0)
-PRICE_ACTION_15M_MIN_SCORE = _env_float("PRICE_ACTION_15M_MIN_SCORE", 66.0)
+PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE = _env_float("PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE", 63.0)
+PRICE_ACTION_15M_MIN_SCORE = _env_float("PRICE_ACTION_15M_MIN_SCORE", 64.0)
 PRICE_ACTION_15M_SWING_LOOKBACK = _env_int("PRICE_ACTION_15M_SWING_LOOKBACK", 3)
 PRICE_ACTION_15M_SR_LOOKBACK = _env_int("PRICE_ACTION_15M_SR_LOOKBACK", 24)
 PRICE_ACTION_15M_REQUIRE_PATTERN = _env_bool("PRICE_ACTION_15M_REQUIRE_PATTERN", True)
@@ -472,8 +472,8 @@ PRICE_ACTION_15M_MIN_PROXY_EXPECTANCY_RR = _env_float("PRICE_ACTION_15M_MIN_PROX
 PRICE_ACTION_15M_MIN_PROXY_SOURCE_COUNT = _env_int("PRICE_ACTION_15M_MIN_PROXY_SOURCE_COUNT", 1)
 
 TREND_BREAKOUT_15M_ENABLED = _env_bool("TREND_BREAKOUT_15M_ENABLED", True)
-TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE = _env_float("TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE", 65.0)
-TREND_BREAKOUT_15M_MIN_SCORE = _env_float("TREND_BREAKOUT_15M_MIN_SCORE", 66.0)
+TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE = _env_float("TREND_BREAKOUT_15M_MIN_ALERT_CONFIDENCE", 64.0)
+TREND_BREAKOUT_15M_MIN_SCORE = _env_float("TREND_BREAKOUT_15M_MIN_SCORE", 64.0)
 TREND_BREAKOUT_15M_LOOKBACK_BARS = _env_int("TREND_BREAKOUT_15M_LOOKBACK_BARS", 20)
 TREND_BREAKOUT_15M_ALERT_BARS = _env_int("TREND_BREAKOUT_15M_ALERT_BARS", 2)
 TREND_BREAKOUT_15M_MIN_ADX = _env_float("TREND_BREAKOUT_15M_MIN_ADX", 20.0)
@@ -512,7 +512,7 @@ CDC_VIXFIX_15M_VIX_PERCENTILE_FACTOR = _env_float("CDC_VIXFIX_15M_VIX_PERCENTILE
 CDC_VIXFIX_15M_VIX_LOW_PERCENTILE_FACTOR = _env_float("CDC_VIXFIX_15M_VIX_LOW_PERCENTILE_FACTOR", 1.01)
 CDC_VIXFIX_15M_VIX_SPIKE_LOOKBACK_BARS = _env_int("CDC_VIXFIX_15M_VIX_SPIKE_LOOKBACK_BARS", 2)
 CDC_VIXFIX_15M_ALERT_BARS = _env_int("CDC_VIXFIX_15M_ALERT_BARS", 2)
-CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE = _env_float("CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE", 61.0)
+CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE = _env_float("CDC_VIXFIX_15M_MIN_ALERT_CONFIDENCE", 64.0)
 CDC_VIXFIX_15M_MIN_STOP_PCT = _env_float("CDC_VIXFIX_15M_MIN_STOP_PCT", 1.2)
 CDC_VIXFIX_15M_SL_ATR_MULT = _env_float("CDC_VIXFIX_15M_SL_ATR_MULT", 2.5)
 CDC_VIXFIX_15M_REQUIRE_PATTERN = _env_bool("CDC_VIXFIX_15M_REQUIRE_PATTERN", False)

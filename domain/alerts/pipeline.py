@@ -10,12 +10,6 @@ from domain.alerts.dispatch.delivery import (
 from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_dispatch_settings
 
 
-def _debug_emit(hypothesis_id, location, msg, data):
-    # #region debug-point C:trend-radar-dispatch
-    import json, urllib.request; _p='.dbg/trend-radar-runtime.env'; _u,_s='http://127.0.0.1:7777/event','trend-radar-runtime'; exec("try:\n with open(_p, encoding='utf-8') as f: c=f.read(); _u=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SERVER_URL=')),_u); _s=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SESSION_ID=')),_s)\nexcept: pass"); urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({"sessionId":_s,"runId":"pre-fix","hypothesisId":hypothesis_id,"location":location,"msg":msg,"data":data}).encode(), headers={"Content-Type":"application/json"}), timeout=1).read()
-    # #endregion
-
-
 def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
     build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
@@ -143,7 +137,6 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     trend_radar_candidates = []
     if not kill:
         trend_radar_candidates = build_trend_radar_candidates(results, runtime_context=runtime_context)
-        _debug_emit("C", "pipeline.py:notify_telegram_from_results", "[DEBUG] trend radar candidates resolved", {"count": len(trend_radar_candidates), "kill": kill})
     if trend_radar_candidates:
         trend_radar_max_per_run = coerce_int(getattr(config, "TREND_RADAR_MAX_PER_RUN", 2), 2)
         trend_radar_cooldown_minutes = coerce_int(getattr(config, "TREND_RADAR_COOLDOWN_MINUTES", 240), 240)
@@ -163,7 +156,6 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])
         sent_candidates.extend(trend_radar_dispatch["sent_candidates"])
         sent += trend_radar_sent
-        _debug_emit("C", "pipeline.py:notify_telegram_from_results", "[DEBUG] trend radar dispatch completed", {"sent": trend_radar_sent, "dropped_by_cache": trend_radar_dispatch.get("dropped_by_cache"), "dropped_by_symbol_cap": trend_radar_dispatch.get("dropped_by_symbol_cap"), "dropped_by_run_cap": trend_radar_dispatch.get("dropped_by_run_cap")})
 
     trend_state_candidates = []
     if not kill:

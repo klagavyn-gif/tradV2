@@ -1,20 +1,6 @@
 from domain.alerts.trend_1h import infer_1h_trend_snapshot
 
 
-def _debug_emit(hypothesis_id, location, msg, data):
-    # #region debug-point A:trend-radar-runtime
-    import json, urllib.request; _p='.dbg/trend-radar-runtime.env'; _u,_s='http://127.0.0.1:7777/event','trend-radar-runtime'; exec("try:\n with open(_p, encoding='utf-8') as f: c=f.read(); _u=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SERVER_URL=')),_u); _s=next((l.split('=',1)[1] for l in c.split('\\n') if l.startswith('DEBUG_SESSION_ID=')),_s)\nexcept: pass"); urllib.request.urlopen(urllib.request.Request(_u, data=json.dumps({"sessionId":_s,"runId":"pre-fix","hypothesisId":hypothesis_id,"location":location,"msg":msg,"data":data}).encode(), headers={"Content-Type":"application/json"}), timeout=1).read()
-    # #endregion
-
-
-def _debug_skip(source, symbol, reason, **data):
-    payload = {"source": source, "symbol": symbol, "reason": reason}
-    for key, value in (data or {}).items():
-        if value is not None:
-            payload[key] = value
-    _debug_emit("D", "trend_radar.py:builder-skip", "[DEBUG] trend radar source skipped", payload)
-
-
 def _safe_float(value, default=None):
     try:
         number = float(value)
@@ -269,33 +255,26 @@ def _score_snapshot(snapshot, *, config):
 def _build_short_term_snapshot(item, *, symbol, trend_snapshot, regime_payload, config):
     plan = item.get("short_term_15m")
     if not isinstance(plan, dict):
-        _debug_skip("short_term_15m", symbol, "missing_plan")
         return None
     plan_trend_1h = str(plan.get("trend_1h") or "").strip().upper()
     if plan_trend_1h != "UP":
-        _debug_skip("short_term_15m", symbol, "trend_1h_not_up", plan_trend_1h=plan_trend_1h)
         return None
     direction_15m = str(plan.get("direction_15m") or "").strip().upper()
     if direction_15m != "UP":
-        _debug_skip("short_term_15m", symbol, "direction_15m_not_up", direction_15m=direction_15m)
         return None
     setup = str(plan.get("setup") or "").strip().upper()
     if not setup.startswith("BUY"):
-        _debug_skip("short_term_15m", symbol, "setup_not_buy", setup=setup)
         return None
     entry_type = str(plan.get("entry_type") or "").strip().upper()
     if entry_type == "BREAKOUT":
         subtype = "TREND_START"
         if not bool(getattr(config, "TREND_RADAR_START_ENABLED", True)):
-            _debug_skip("short_term_15m", symbol, "start_disabled", entry_type=entry_type)
             return None
     elif entry_type == "PULLBACK":
         subtype = "TREND_CONTINUE"
         if not bool(getattr(config, "TREND_RADAR_CONTINUE_ENABLED", True)):
-            _debug_skip("short_term_15m", symbol, "continue_disabled", entry_type=entry_type)
             return None
     else:
-        _debug_skip("short_term_15m", symbol, "unsupported_entry_type", entry_type=entry_type)
         return None
 
     snapshot = _base_snapshot(
@@ -324,29 +303,23 @@ def _build_short_term_snapshot(item, *, symbol, trend_snapshot, regime_payload, 
 def _build_trend_breakout_snapshot(item, *, symbol, trend_snapshot, regime_payload, config):
     plan = item.get("trend_breakout_15m")
     if not isinstance(plan, dict):
-        _debug_skip("trend_breakout_15m", symbol, "missing_plan")
         return None
     signal, signal_source = _resolve_signal_with_fallback(plan, "forecast_direction", "trend_1h", "market_bias")
     if signal not in ("BUY", "SELL"):
-        _debug_skip("trend_breakout_15m", symbol, "invalid_signal", raw_signal=plan.get("signal"))
         return None
     confidence = _resolve_plan_confidence(plan)
     min_plan_conf = _safe_float(getattr(config, "TREND_RADAR_MIN_PLAN_CONFIDENCE", 62.0), 62.0)
     if signal_source != "signal" and (not isinstance(confidence, (int, float)) or confidence < min_plan_conf):
         confidence = _synthetic_fallback_confidence(plan, signal, config=config)
     if signal_source == "signal" and not bool(plan.get("alert")):
-        _debug_skip("trend_breakout_15m", symbol, "alert_false", signal=signal)
         return None
     if signal_source != "signal" and (not isinstance(confidence, (int, float)) or confidence < min_plan_conf):
-        _debug_skip("trend_breakout_15m", symbol, "fallback_confidence_below_min", signal=signal, signal_source=signal_source, confidence=confidence, min_plan_conf=min_plan_conf)
         return None
     expected_trend = "UP" if signal == "BUY" else "DOWN"
     trend_1h = str(trend_snapshot.get("trend") or "").strip().upper()
     if trend_1h != expected_trend:
-        _debug_skip("trend_breakout_15m", symbol, "trend_mismatch", signal=signal, trend_1h=trend_1h, expected_trend=expected_trend)
         return None
     if not bool(getattr(config, "TREND_RADAR_START_ENABLED", True)):
-        _debug_skip("trend_breakout_15m", symbol, "start_disabled", signal=signal)
         return None
 
     snapshot = _base_snapshot(
@@ -377,26 +350,21 @@ def _build_trend_breakout_snapshot(item, *, symbol, trend_snapshot, regime_paylo
 def _build_price_action_snapshot(item, *, symbol, trend_snapshot, regime_payload, config):
     plan = item.get("price_action_15m")
     if not isinstance(plan, dict):
-        _debug_skip("price_action_15m", symbol, "missing_plan")
         return None
     signal, signal_source = _resolve_signal_with_fallback(plan, "forecast_direction", "trend_1h")
     if signal not in ("BUY", "SELL"):
-        _debug_skip("price_action_15m", symbol, "invalid_signal", raw_signal=plan.get("signal"))
         return None
     expected_trend = "UP" if signal == "BUY" else "DOWN"
     trend_1h = str(trend_snapshot.get("trend") or "").strip().upper()
     if trend_1h != expected_trend:
-        _debug_skip("price_action_15m", symbol, "trend_mismatch", signal=signal, trend_1h=trend_1h, expected_trend=expected_trend)
         return None
     if not bool(getattr(config, "TREND_RADAR_CONTINUE_ENABLED", True)):
-        _debug_skip("price_action_15m", symbol, "continue_disabled", signal=signal)
         return None
     confidence = _resolve_plan_confidence(plan, "forecast_probability")
     min_plan_conf = _safe_float(getattr(config, "TREND_RADAR_MIN_PLAN_CONFIDENCE", 62.0), 62.0)
     if signal_source != "signal" and (not isinstance(confidence, (int, float)) or confidence < min_plan_conf):
         confidence = _synthetic_fallback_confidence(plan, signal, config=config)
     if not isinstance(confidence, (int, float)) or confidence < min_plan_conf:
-        _debug_skip("price_action_15m", symbol, "confidence_below_min", signal=signal, signal_source=signal_source, confidence=confidence, min_plan_conf=min_plan_conf)
         return None
 
     snapshot = _base_snapshot(
@@ -462,25 +430,15 @@ def build_trend_radar_snapshot(item, *, config, helpers, market_snapshot=None):
         if not isinstance(snapshot, dict):
             continue
         if require_regime_confirmation and not _matching_regime(str(snapshot.get("signal") or "").strip().upper(), symbol_regime):
-            _debug_skip(
-                str(snapshot.get("source_label") or "post_builder"),
-                symbol,
-                "regime_rejected_signal",
-                signal=snapshot.get("signal"),
-                symbol_regime=symbol_regime,
-                trend=trend,
-            )
             continue
         snapshot["score"] = _score_snapshot(snapshot, config=config)
         candidates.append(snapshot)
 
     if not candidates:
-        _debug_emit("D", "trend_radar.py:build_trend_radar_snapshot", "[DEBUG] no trend radar snapshot candidate", {"symbol": symbol, "trend": trend, "trend_confidence": trend_confidence, "symbol_regime": symbol_regime})
         return None
     candidates.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("plan_confidence") or 0.0)), reverse=True)
     best = dict(candidates[0])
     best["trend_snapshot"] = trend_snapshot
-    _debug_emit("A", "trend_radar.py:build_trend_radar_snapshot", "[DEBUG] trend radar snapshot selected", {"symbol": symbol, "signal": best.get("signal"), "subtype": best.get("subtype"), "score": best.get("score"), "source_label": best.get("source_label"), "symbol_regime": best.get("symbol_regime")})
     return best
 
 
@@ -514,11 +472,9 @@ def build_trend_radar_candidates(results, *, config, helpers, get_now, runtime_c
             continue
         score = _safe_float(snapshot.get("score"), 0.0)
         if score < min_score:
-            _debug_emit("B", "trend_radar.py:build_trend_radar_candidates", "[DEBUG] trend radar candidate below min score", {"symbol": symbol, "source_label": snapshot.get("source_label"), "signal": snapshot.get("signal"), "subtype": snapshot.get("subtype"), "score": score, "min_score": min_score})
             continue
         message = build_trend_radar_message(item, snapshot)
         if not isinstance(message, str) or not message.strip():
-            _debug_emit("B", "trend_radar.py:build_trend_radar_candidates", "[DEBUG] trend radar message missing", {"symbol": symbol, "signal": snapshot.get("signal"), "subtype": snapshot.get("subtype"), "score": snapshot.get("score")})
             continue
         subtype = str(snapshot.get("subtype") or "TREND_CONTINUE").strip().upper()
         signal = str(snapshot.get("signal") or "").strip().upper()
@@ -539,7 +495,6 @@ def build_trend_radar_candidates(results, *, config, helpers, get_now, runtime_c
                 "cache_key": f"TRADAR15|{symbol}|{signal}|{subtype}|{source_key}|{entry_bucket}",
             }
         )
-        _debug_emit("B", "trend_radar.py:build_trend_radar_candidates", "[DEBUG] trend radar candidate built", {"symbol": symbol, "signal": signal, "subtype": subtype, "score": score, "cache_key": candidates[-1].get("cache_key")})
 
     candidates.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
     return candidates

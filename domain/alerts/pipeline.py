@@ -140,6 +140,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     if trend_radar_candidates:
         trend_radar_max_per_run = coerce_int(getattr(config, "TREND_RADAR_MAX_PER_RUN", 2), 2)
         trend_radar_cooldown_minutes = coerce_int(getattr(config, "TREND_RADAR_COOLDOWN_MINUTES", 240), 240)
+        trend_radar_max_total_per_symbol = coerce_int(getattr(config, "TREND_RADAR_MAX_TOTAL_PER_SYMBOL", 1), 1)
         trend_radar_dispatch = dispatch_trend_radar_candidates(
             trend_radar_candidates,
             send_telegram_alert=send_telegram_alert,
@@ -151,6 +152,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             max_per_run=trend_radar_max_per_run,
             per_symbol_sent=per_symbol_sent,
             suppress_if_symbol_sent=bool(getattr(config, "TREND_RADAR_SUPPRESS_IF_PRIMARY_SENT", True)),
+            max_total_per_symbol=trend_radar_max_total_per_symbol,
         )
         trend_radar_sent = int(trend_radar_dispatch["sent"])
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])

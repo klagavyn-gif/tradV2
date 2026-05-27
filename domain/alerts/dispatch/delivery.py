@@ -207,6 +207,7 @@ def dispatch_trend_radar_candidates(
     max_per_run,
     per_symbol_sent,
     suppress_if_symbol_sent,
+    max_total_per_symbol,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -221,7 +222,9 @@ def dispatch_trend_radar_candidates(
             dropped_by_run_cap += 1
             continue
         symbol = str(candidate.get("symbol") or "")
-        if symbol and suppress_if_symbol_sent and int(per_symbol_sent.get(symbol, 0)) > 0:
+        existing_symbol_alerts = int(per_symbol_sent.get(symbol, 0)) if symbol else 0
+        effective_symbol_cap = 1 if suppress_if_symbol_sent else max(1, int(max_total_per_symbol))
+        if symbol and existing_symbol_alerts >= effective_symbol_cap:
             dropped_by_symbol_cap += 1
             continue
         cache_key = str(candidate.get("cache_key") or "").strip()
@@ -237,7 +240,7 @@ def dispatch_trend_radar_candidates(
             continue
         cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=int(cooldown_ttl))
         if symbol:
-            per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
+            per_symbol_sent[symbol] = existing_symbol_alerts + 1
         sent += 1
         sent_candidates.append(candidate)
         record_telegram_alert_history(

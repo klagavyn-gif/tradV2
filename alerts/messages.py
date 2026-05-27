@@ -333,6 +333,94 @@ def build_trend_state_message(item, state_snapshot, *, helpers, get_now):
     return "\n".join(lines)
 
 
+def build_trend_radar_message(item, radar_snapshot, *, helpers, get_now):
+    html_escape = helpers["html_escape"]
+    normalize_symbol = helpers["normalize_symbol"]
+    format_price_value = helpers["format_price_value"]
+
+    if not isinstance(radar_snapshot, dict):
+        return None
+    signal = str(radar_snapshot.get("signal") or "").strip().upper()
+    subtype = str(radar_snapshot.get("subtype") or "").strip().upper()
+    if signal not in ("BUY", "SELL") or subtype not in ("TREND_START", "TREND_CONTINUE"):
+        return None
+
+    symbol = normalize_symbol(item.get("symbol") or "")
+    if not symbol:
+        return None
+    name = html_escape(str(item.get("name") or "").strip())
+    tv_symbol = symbol.replace("-", "")
+    icon = "🟢" if signal == "BUY" else "🔴"
+    direction_label = "UP STRONG" if signal == "BUY" else "DOWN STRONG"
+    subtype_label = "START" if subtype == "TREND_START" else "CONTINUE"
+
+    lines = [f"<b>{icon} Trend Radar | {html_escape(symbol)}</b>"]
+    if name:
+        lines.append(f"<i>{name}</i>")
+    lines.append("────────────────")
+    _append_snapshot_lines(
+        lines,
+        price_text=format_price_value(radar_snapshot.get("price") or item.get("price")),
+        change=radar_snapshot.get("change", item.get("change")),
+        confidence=radar_snapshot.get("score"),
+        sources=[radar_snapshot.get("source_label")] + list(radar_snapshot.get("supporting_sources") or []),
+        html_escape=html_escape,
+    )
+    lines.append(f"<b>🧭 State:</b> {html_escape(direction_label)} | {html_escape(subtype_label)}")
+
+    context_parts = []
+    trend_1h = str(radar_snapshot.get("trend_1h") or "").strip().upper()
+    trend_strength_1h = str(radar_snapshot.get("trend_strength_1h") or "").strip().upper()
+    if trend_1h:
+        if trend_strength_1h:
+            context_parts.append(f"1H {trend_1h} {trend_strength_1h}")
+        else:
+            context_parts.append(f"1H {trend_1h}")
+    symbol_regime = str(radar_snapshot.get("symbol_regime") or "").strip().upper()
+    if symbol_regime:
+        context_parts.append(f"Regime {symbol_regime}")
+    adx = radar_snapshot.get("adx")
+    if isinstance(adx, (int, float)):
+        context_parts.append(f"ADX {float(adx):.1f}")
+    rvol = radar_snapshot.get("rvol")
+    if isinstance(rvol, (int, float)):
+        context_parts.append(f"RVOL {float(rvol):.2f}")
+    _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
+
+    level_parts = []
+    entry_low = format_price_value(radar_snapshot.get("entry_zone_low"))
+    entry_high = format_price_value(radar_snapshot.get("entry_zone_high"))
+    entry_price = format_price_value(radar_snapshot.get("entry_price"))
+    if entry_low and entry_high:
+        level_parts.append(f"Entry {entry_low}-{entry_high}")
+    elif entry_price:
+        level_parts.append(f"Entry {entry_price}")
+    stop_text = format_price_value(radar_snapshot.get("stop_loss"))
+    if stop_text:
+        level_parts.append(f"Invalid {stop_text}")
+    tp1_text = format_price_value(radar_snapshot.get("take_profit_price"))
+    if tp1_text:
+        level_parts.append(f"TP1 {tp1_text}")
+    tp2_text = format_price_value(radar_snapshot.get("take_profit_price_2"))
+    if tp2_text:
+        level_parts.append(f"TP2 {tp2_text}")
+    if level_parts:
+        lines.append("<b>📌 Plan:</b> " + " | ".join(html_escape(part) for part in level_parts))
+
+    risk_pct = radar_snapshot.get("entry_risk_pct")
+    if isinstance(risk_pct, (int, float)):
+        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+    tags = [str(tag).strip().upper() for tag in (radar_snapshot.get("tags") or []) if str(tag).strip()]
+    if tags:
+        lines.append("<b>⚡ Tags:</b> " + " | ".join(html_escape(tag) for tag in tags[:3]))
+    reasons = [str(reason).strip() for reason in (radar_snapshot.get("reasons") or []) if str(reason).strip()]
+    if reasons:
+        lines.append("<b>🧠 Context:</b> " + " | ".join(html_escape(reason) for reason in reasons[:3]))
+    lines.append("<b>⚠️ Note:</b> trend-following setup ใช้เป็นแผนเฝ้าเข้า ไม่ใช่สัญญาณไล่ราคา")
+    _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
+    return "\n".join(lines)
+
+
 def build_price_action_message(item, plan, *, helpers, get_now):
     html_escape = helpers["html_escape"]
     normalize_symbol = helpers["normalize_symbol"]

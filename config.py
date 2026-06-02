@@ -196,9 +196,9 @@ TELEGRAM_KILL_SWITCH_HIGH_VOL_PCT = _env_float("TELEGRAM_KILL_SWITCH_HIGH_VOL_PC
 TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO = _env_float("TELEGRAM_KILL_SWITCH_HIGH_VOL_RATIO", 0.50)
 TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES = {
     "SS15": {
-        "min_confidence": 64.0,
-        "min_win_rate_pct": 65.0,
-        "min_expectancy_rr": 0.15,
+        "min_confidence": 62.0,
+        "min_win_rate_pct": 63.0,
+        "min_expectancy_rr": 0.12,
         "min_trades": 8,
     },
     "AW15": {

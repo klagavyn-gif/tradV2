@@ -1,3 +1,5 @@
+import math
+
 from domain.alerts.trend_1h import infer_1h_trend_snapshot
 
 
@@ -65,27 +67,216 @@ def _resolve_plan_value(plan, pick_plan_value, keys):
     return None
 
 
-def _append_levels_lines(lines, *, plan, format_price_value, html_escape, pick_plan_value=None):
+def _safe_float(value, default=None):
+    try:
+        value = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def _normalize_signal(value, default="BUY"):
+    text = str(value or "").strip().upper()
+    if "SELL" in text or "SHORT" in text or text == "DOWN":
+        return "SELL"
+    if "BUY" in text or "LONG" in text or text == "UP":
+        return "BUY"
+    return str(default or "BUY").strip().upper() or "BUY"
+
+
+def _compute_rr_value(entry, stop, target):
+    if not all(isinstance(v, (int, float)) for v in (entry, stop, target)):
+        return None
+    risk = abs(float(entry) - float(stop))
+    if risk <= 0:
+        return None
+    reward = abs(float(target) - float(entry))
+    if reward <= 0:
+        return None
+    return reward / risk
+
+
+def _generate_target_levels(entry_price, stop_loss, *, signal="BUY", take_profit=None):
+    entry = _safe_float(entry_price, None)
+    stop = _safe_float(stop_loss, None)
+    if entry is None or stop is None or entry == stop:
+        return None, []
+    risk_dist = abs(entry - stop)
+    if risk_dist <= 0:
+        return None, []
+    risk_pct = (risk_dist / abs(entry)) * 100.0 if entry else None
+    provided_rr = _compute_rr_value(entry, stop, _safe_float(take_profit, None))
+    if isinstance(provided_rr, (int, float)) and provided_rr >= 1.0:
+        r3 = max(3.0, float(provided_rr))
+        r2 = max(1.9, min(2.6, r3 * 0.72))
+        r1 = max(1.2, min(1.6, r2 - 0.7))
+        r_levels = [r1, r2, r3]
+    else:
+        if isinstance(risk_pct, (int, float)) and risk_pct < 0.8:
+            r_levels = [1.4, 2.4, 3.8]
+        elif isinstance(risk_pct, (int, float)) and risk_pct < 1.5:
+            r_levels = [1.2, 2.1, 3.2]
+        else:
+            r_levels = [1.0, 1.8, 2.8]
+    direction = -1.0 if _normalize_signal(signal, "BUY") == "SELL" else 1.0
+    levels = []
+    for idx, r_mult in enumerate(r_levels[:3], start=1):
+        levels.append(
+            {
+                "label": f"TP{idx}",
+                "target_price": float(entry + (direction * risk_dist * float(r_mult))),
+                "reward_r": float(r_mult),
+            }
+        )
+    return risk_pct, levels
+
+
+def _resolve_level_guidance(
+    plan,
+    *,
+    pick_plan_value=None,
+    entry_keys=None,
+    stop_keys=None,
+    tp_keys=None,
+    tp2_keys=None,
+    signal=None,
+):
     if not isinstance(plan, dict):
+        return None
+    entry_keys = entry_keys or ["entry_price", "current_price", "price"]
+    stop_keys = stop_keys or ["stop_loss", "entry_stop_loss", "trailing_stop"]
+    tp_keys = tp_keys or ["take_profit", "take_profit_2", "exit_price"]
+    tp2_keys = tp2_keys or ["take_profit_2", "tp2", "take_profit_price_2"]
+
+    entry_value = _resolve_plan_value(plan, pick_plan_value, entry_keys)
+    stop_value = _resolve_plan_value(plan, pick_plan_value, stop_keys)
+    tp1_value = _resolve_plan_value(plan, pick_plan_value, tp_keys)
+    tp2_value = _resolve_plan_value(plan, pick_plan_value, tp2_keys)
+    signal_text = _normalize_signal(signal or plan.get("signal") or plan.get("raw_signal") or plan.get("setup") or plan.get("recommendation"))
+
+    entry = _safe_float(entry_value, None)
+    stop = _safe_float(stop_value, None)
+    tp1 = _safe_float(tp1_value, None)
+    tp2 = _safe_float(tp2_value, None)
+    risk_pct = _safe_float(plan.get("entry_risk_pct"), None)
+
+    used_fallback = False
+    used_actual = any(isinstance(v, (int, float)) for v in (stop, tp1, tp2))
+    if entry is not None and stop is None and isinstance(risk_pct, (int, float)) and float(risk_pct) > 0:
+        risk_dist = abs(float(entry) * (float(risk_pct) / 100.0))
+        if risk_dist > 0:
+            used_fallback = True
+            stop = float(entry - risk_dist) if signal_text == "BUY" else float(entry + risk_dist)
+
+    generated_risk_pct, generated_levels = _generate_target_levels(entry, stop, signal=signal_text, take_profit=tp1)
+    if risk_pct is None and isinstance(generated_risk_pct, (int, float)):
+        risk_pct = float(generated_risk_pct)
+    if tp1 is None and generated_levels:
+        used_fallback = True
+        tp1 = _safe_float(generated_levels[0].get("target_price"), None)
+    if tp2 is None and len(generated_levels) >= 2:
+        used_fallback = True
+        fallback_candidates = [_safe_float(level.get("target_price"), None) for level in generated_levels[1:]]
+        for candidate in fallback_candidates:
+            if candidate is None:
+                continue
+            if tp1 is not None and math.isclose(float(candidate), float(tp1), rel_tol=1e-9, abs_tol=1e-9):
+                continue
+            current_rr = _compute_rr_value(entry, stop, tp1)
+            candidate_rr = _compute_rr_value(entry, stop, candidate)
+            if tp1 is not None and isinstance(current_rr, (int, float)) and isinstance(candidate_rr, (int, float)):
+                if float(candidate_rr) <= float(current_rr):
+                    continue
+            tp2 = float(candidate)
+            break
+
+    if not any(isinstance(v, (int, float)) for v in (entry, stop, tp1, tp2)):
+        return None
+
+    if used_fallback and used_actual:
+        level_source = "actual+fallback"
+    elif used_fallback:
+        level_source = "fallback"
+    else:
+        level_source = "actual"
+
+    return {
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "risk_pct": risk_pct,
+        "rr1": _compute_rr_value(entry, stop, tp1),
+        "rr2": _compute_rr_value(entry, stop, tp2),
+        "level_source": level_source,
+    }
+
+
+def _append_levels_lines(
+    lines,
+    *,
+    plan,
+    format_price_value,
+    html_escape,
+    pick_plan_value=None,
+    entry_keys=None,
+    stop_keys=None,
+    tp_keys=None,
+    tp2_keys=None,
+    signal=None,
+    entry_override_text=None,
+    stop_label="SL",
+):
+    guidance = _resolve_level_guidance(
+        plan,
+        pick_plan_value=pick_plan_value,
+        entry_keys=entry_keys,
+        stop_keys=stop_keys,
+        tp_keys=tp_keys,
+        tp2_keys=tp2_keys,
+        signal=signal,
+    )
+    if not isinstance(guidance, dict):
         return
-    entry_value = _resolve_plan_value(plan, pick_plan_value, ["entry_price", "current_price", "price"])
-    stop_value = _resolve_plan_value(plan, pick_plan_value, ["stop_loss", "entry_stop_loss", "trailing_stop"])
-    take_profit_value = _resolve_plan_value(plan, pick_plan_value, ["take_profit", "take_profit_2", "exit_price"])
     parts = []
-    entry_text = format_price_value(entry_value)
-    stop_text = format_price_value(stop_value)
-    take_profit_text = format_price_value(take_profit_value)
+    entry_text = entry_override_text or format_price_value(guidance.get("entry"))
+    stop_text = format_price_value(guidance.get("stop"))
+    tp1_text = format_price_value(guidance.get("tp1"))
+    tp2_text = format_price_value(guidance.get("tp2"))
     if entry_text:
         parts.append(f"Entry {entry_text}")
     if stop_text:
-        parts.append(f"SL {stop_text}")
-    if take_profit_text:
-        parts.append(f"TP {take_profit_text}")
+        parts.append(f"{stop_label} {stop_text}")
+    if tp1_text:
+        parts.append(f"TP1 {tp1_text}")
+    if tp2_text:
+        parts.append(f"TP2 {tp2_text}")
     if parts:
         lines.append("<b>📌 Plan:</b> " + " | ".join(html_escape(part) for part in parts))
-    risk_pct = plan.get("entry_risk_pct")
+    risk_parts = []
+    risk_pct = guidance.get("risk_pct")
+    rr1 = guidance.get("rr1")
+    rr2 = guidance.get("rr2")
     if isinstance(risk_pct, (int, float)):
-        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+        risk_parts.append(f"Risk {float(risk_pct):.2f}%")
+    rr_bits = []
+    if isinstance(rr1, (int, float)):
+        rr_bits.append(f"TP1 {float(rr1):.2f}R")
+    if isinstance(rr2, (int, float)):
+        rr_bits.append(f"TP2 {float(rr2):.2f}R")
+    if rr_bits:
+        risk_parts.append("RR " + " / ".join(rr_bits))
+    if risk_parts:
+        lines.append("<b>📏 Risk:</b> " + " | ".join(html_escape(part) for part in risk_parts))
+    level_source = str(guidance.get("level_source") or "").strip().lower()
+    if level_source == "actual":
+        lines.append("<b>🧭 Level Source:</b> actual plan")
+    elif level_source == "actual+fallback":
+        lines.append("<b>🧭 Level Source:</b> actual+fallback")
+    elif level_source == "fallback":
+        lines.append("<b>🧭 Level Source:</b> fallback risk model")
 
 
 def _append_reason_line(lines, *, html_escape, parts=None, reasons=None, label="🧠 Context"):
@@ -387,29 +578,26 @@ def build_trend_radar_message(item, radar_snapshot, *, helpers, get_now):
         context_parts.append(f"RVOL {float(rvol):.2f}")
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
 
-    level_parts = []
     entry_low = format_price_value(radar_snapshot.get("entry_zone_low"))
     entry_high = format_price_value(radar_snapshot.get("entry_zone_high"))
     entry_price = format_price_value(radar_snapshot.get("entry_price"))
+    entry_override_text = None
     if entry_low and entry_high:
-        level_parts.append(f"Entry {entry_low}-{entry_high}")
+        entry_override_text = f"{entry_low}-{entry_high}"
     elif entry_price:
-        level_parts.append(f"Entry {entry_price}")
-    stop_text = format_price_value(radar_snapshot.get("stop_loss"))
-    if stop_text:
-        level_parts.append(f"Invalid {stop_text}")
-    tp1_text = format_price_value(radar_snapshot.get("take_profit_price"))
-    if tp1_text:
-        level_parts.append(f"TP1 {tp1_text}")
-    tp2_text = format_price_value(radar_snapshot.get("take_profit_price_2"))
-    if tp2_text:
-        level_parts.append(f"TP2 {tp2_text}")
-    if level_parts:
-        lines.append("<b>📌 Plan:</b> " + " | ".join(html_escape(part) for part in level_parts))
-
-    risk_pct = radar_snapshot.get("entry_risk_pct")
-    if isinstance(risk_pct, (int, float)):
-        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+        entry_override_text = entry_price
+    _append_levels_lines(
+        lines,
+        plan=radar_snapshot,
+        format_price_value=format_price_value,
+        html_escape=html_escape,
+        entry_keys=["entry_price", "price"],
+        stop_keys=["stop_loss"],
+        tp_keys=["take_profit_price", "take_profit", "exit_price"],
+        tp2_keys=["take_profit_price_2", "take_profit_2"],
+        signal=signal,
+        entry_override_text=entry_override_text,
+    )
     tags = [str(tag).strip().upper() for tag in (radar_snapshot.get("tags") or []) if str(tag).strip()]
     if tags:
         lines.append("<b>⚡ Tags:</b> " + " | ".join(html_escape(tag) for tag in tags[:3]))

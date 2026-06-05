@@ -2599,6 +2599,134 @@ def _append_hourly_bias_line_legacy(lines, item, *, label="🧭 1H Trend"):
     lines.append(f"<b>{label}:</b> " + " | ".join([_html_escape(part) for part in parts]))
 
 
+def _compute_reward_multiple(entry, stop, target):
+    try:
+        entry = float(entry)
+        stop = float(stop)
+        target = float(target)
+    except Exception:
+        return None
+    if not all(math.isfinite(v) for v in (entry, stop, target)):
+        return None
+    risk = abs(entry - stop)
+    if risk <= 0:
+        return None
+    reward = abs(target - entry)
+    if reward <= 0:
+        return None
+    return reward / risk
+
+
+def _resolve_message_level_guidance(plan, signal=None, *, entry_keys=None, stop_keys=None, tp_keys=None, tp2_keys=None):
+    if not isinstance(plan, dict):
+        return None
+    entry_keys = entry_keys or ["entry_price", "current_price", "price"]
+    stop_keys = stop_keys or ["stop_loss", "entry_stop_loss", "trailing_stop"]
+    tp_keys = tp_keys or ["take_profit", "take_profit_2", "exit_price"]
+    tp2_keys = tp2_keys or ["take_profit_2", "tp2", "take_profit_price_2"]
+    signal = _infer_plan_signal(plan, signal or "BUY")
+    entry = _safe_float(_pick_plan_value(plan, entry_keys), None)
+    stop = _safe_float(_pick_plan_value(plan, stop_keys), None)
+    tp1 = _safe_float(_pick_plan_value(plan, tp_keys), None)
+    tp2 = _safe_float(_pick_plan_value(plan, tp2_keys), None)
+    risk_pct = _safe_float(plan.get("entry_risk_pct"), None)
+    used_actual = any(isinstance(v, (int, float)) for v in (stop, tp1, tp2))
+    used_fallback = False
+
+    if entry is not None and stop is None and isinstance(risk_pct, (int, float)) and float(risk_pct) > 0:
+        risk_dist = abs(float(entry) * (float(risk_pct) / 100.0))
+        if risk_dist > 0:
+            used_fallback = True
+            stop = float(entry - risk_dist) if signal == "BUY" else float(entry + risk_dist)
+
+    generated_risk_pct, generated_levels = _generate_exit_levels(entry, stop, signal=signal, take_profit=tp1)
+    if risk_pct is None and isinstance(generated_risk_pct, (int, float)):
+        risk_pct = float(generated_risk_pct)
+    if tp1 is None and generated_levels:
+        used_fallback = True
+        tp1 = _safe_float(generated_levels[0].get("target_price"), None)
+    if tp2 is None and len(generated_levels) >= 2:
+        used_fallback = True
+        for level in generated_levels[1:]:
+            candidate = _safe_float(level.get("target_price"), None)
+            if candidate is None:
+                continue
+            if tp1 is not None and math.isclose(float(candidate), float(tp1), rel_tol=1e-9, abs_tol=1e-9):
+                continue
+            current_rr = _compute_reward_multiple(entry, stop, tp1)
+            candidate_rr = _compute_reward_multiple(entry, stop, candidate)
+            if tp1 is not None and isinstance(current_rr, (int, float)) and isinstance(candidate_rr, (int, float)):
+                if float(candidate_rr) <= float(current_rr):
+                    continue
+            tp2 = float(candidate)
+            break
+    if not any(isinstance(v, (int, float)) for v in (entry, stop, tp1, tp2)):
+        return None
+    if used_fallback and used_actual:
+        level_source = "actual+fallback"
+    elif used_fallback:
+        level_source = "fallback"
+    else:
+        level_source = "actual"
+    return {
+        "entry": entry,
+        "stop": stop,
+        "tp1": tp1,
+        "tp2": tp2,
+        "risk_pct": risk_pct,
+        "rr1": _compute_reward_multiple(entry, stop, tp1),
+        "rr2": _compute_reward_multiple(entry, stop, tp2),
+        "level_source": level_source,
+    }
+
+
+def _append_message_level_guidance_lines(lines, plan, signal=None, *, entry_keys=None, stop_keys=None, tp_keys=None, tp2_keys=None):
+    guidance = _resolve_message_level_guidance(
+        plan,
+        signal=signal,
+        entry_keys=entry_keys,
+        stop_keys=stop_keys,
+        tp_keys=tp_keys,
+        tp2_keys=tp2_keys,
+    )
+    if not isinstance(guidance, dict):
+        return
+    parts = []
+    entry_text = _format_price_value(guidance.get("entry"))
+    stop_text = _format_price_value(guidance.get("stop"))
+    tp1_text = _format_price_value(guidance.get("tp1"))
+    tp2_text = _format_price_value(guidance.get("tp2"))
+    if entry_text:
+        parts.append(f"Entry {entry_text}")
+    if stop_text:
+        parts.append(f"SL {stop_text}")
+    if tp1_text:
+        parts.append(f"TP1 {tp1_text}")
+    if tp2_text:
+        parts.append(f"TP2 {tp2_text}")
+    if parts:
+        lines.append("<b>📌 Plan:</b> " + " | ".join([_html_escape(part) for part in parts]))
+    risk_parts = []
+    if isinstance(guidance.get("risk_pct"), (int, float)):
+        risk_parts.append(f"Risk {float(guidance.get('risk_pct')):.2f}%")
+    rr_bits = []
+    if isinstance(guidance.get("rr1"), (int, float)):
+        rr_bits.append(f"TP1 {float(guidance.get('rr1')):.2f}R")
+    if isinstance(guidance.get("rr2"), (int, float)):
+        rr_bits.append(f"TP2 {float(guidance.get('rr2')):.2f}R")
+    if rr_bits:
+        risk_parts.append("RR " + " / ".join(rr_bits))
+    if risk_parts:
+        lines.append("<b>📏 Risk:</b> " + " | ".join([_html_escape(part) for part in risk_parts]))
+    source = str(guidance.get("level_source") or "").strip().lower()
+    if source == "actual":
+        lines.append("<b>🧭 Level Source:</b> actual plan")
+    elif source == "actual+fallback":
+        lines.append("<b>🧭 Level Source:</b> actual+fallback")
+    elif source == "fallback":
+        lines.append("<b>🧭 Level Source:</b> fallback risk model")
+
+
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -2686,20 +2814,15 @@ def _build_actionzone_message(item, az_plan):
         if sell_reason:
             lines.append(f"<b>⚠️ Sell Gate:</b> {_html_escape(sell_reason)}")
 
-    level_parts = []
-    stop_text = _format_price_value(_pick_plan_value(az_plan, ["stop_loss", "entry_stop_loss", "trailing_stop"]))
-    take_profit_text = _format_price_value(_pick_plan_value(az_plan, ["take_profit", "take_profit_2", "exit_price"]))
-    if entry_text:
-        level_parts.append(f"Entry {entry_text}")
-    if stop_text:
-        level_parts.append(f"SL {stop_text}")
-    if take_profit_text:
-        level_parts.append(f"TP {take_profit_text}")
-    if level_parts:
-        lines.append("<b>📌 Plan:</b> " + " | ".join([_html_escape(part) for part in level_parts]))
-    risk_pct = az_plan.get("entry_risk_pct")
-    if isinstance(risk_pct, (int, float)):
-        lines.append(f"<b>📏 Risk:</b> {float(risk_pct):.2f}%")
+    _append_message_level_guidance_lines(
+        lines,
+        az_plan,
+        signal=signal,
+        entry_keys=["entry_price", "current_price", "price"],
+        stop_keys=["stop_loss", "entry_stop_loss", "trailing_stop"],
+        tp_keys=["take_profit", "take_profit_2", "exit_price"],
+        tp2_keys=["take_profit_2", "exit_price"],
+    )
 
     lines.append("────────────────")
     lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))
@@ -2813,16 +2936,15 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
     if context_parts:
         lines.append("<b>🧠 Context:</b> " + " | ".join([_html_escape(part) for part in context_parts[:3]]))
 
-    level_parts = []
-    take_profit_text = _format_price_value(_pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]))
-    if entry_text:
-        level_parts.append(f"Entry {entry_text}")
-    if stop_text:
-        level_parts.append(f"SL {stop_text}")
-    if take_profit_text:
-        level_parts.append(f"TP {take_profit_text}")
-    if level_parts:
-        lines.append("<b>📌 Plan:</b> " + " | ".join([_html_escape(part) for part in level_parts]))
+    _append_message_level_guidance_lines(
+        lines,
+        plan,
+        signal=signal,
+        entry_keys=["entry_price", "current_price", "price"],
+        stop_keys=["stop_loss", "entry_stop_loss", "trailing_stop"],
+        tp_keys=["take_profit", "take_profit_2", "exit_price"],
+        tp2_keys=["take_profit_2", "exit_price"],
+    )
 
     lines.append("────────────────")
     lines.append("🕒 <b>เวลา:</b> " + get_thai_now().strftime("%Y-%m-%d %H:%M"))

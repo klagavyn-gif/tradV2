@@ -10,6 +10,99 @@ from domain.alerts.dispatch.delivery import (
 from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_dispatch_settings
 
 
+def _primary_candidate_sort_key(candidate):
+    if not isinstance(candidate, dict):
+        return (0.0, 0.0)
+    try:
+        score = float(candidate.get("score", 0.0))
+    except Exception:
+        score = 0.0
+    try:
+        confidence = float(candidate.get("confidence", 0.0))
+    except Exception:
+        confidence = 0.0
+    return (score, confidence)
+
+
+def _tier_meets_minimum(tier, minimum):
+    order = {"A": 4, "B": 3, "C": 2, "D": 1}
+    return order.get(str(tier or "").upper(), 0) >= order.get(str(minimum or "").upper(), 0)
+
+
+def _is_preferred_primary_candidate(candidate, *, config, limits):
+    if not isinstance(candidate, dict):
+        return False
+    preferred = getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_STRATEGIES", {"PRIMARY", "SS15"})
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    if strategy not in preferred:
+        return False
+    profile = candidate.get("alert_profile")
+    if not isinstance(profile, dict):
+        return False
+    min_tier = getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_MIN_TIER", "B")
+    tier = str(profile.get("tier") or "").strip().upper()
+    if not _tier_meets_minimum(tier, min_tier):
+        return False
+    try:
+        min_profile_score = float(getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_MIN_COMPOSITE_SCORE", 80.0))
+    except Exception:
+        min_profile_score = 80.0
+    try:
+        profile_score = float(profile.get("composite_score") or 0.0)
+    except Exception:
+        profile_score = 0.0
+    if profile_score < min_profile_score:
+        return False
+    try:
+        confidence = float(candidate.get("confidence") or 0.0)
+    except Exception:
+        confidence = 0.0
+    try:
+        min_confidence = float(getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_MIN_CONFIDENCE", 78.0))
+    except Exception:
+        min_confidence = 78.0
+    baseline_confidence = max(float(limits.get("min_conf") or 0.0), float(min_confidence))
+    if confidence < baseline_confidence:
+        return False
+    return True
+
+
+def _rebalance_primary_candidates(candidates, *, config, limits):
+    if not isinstance(candidates, list) or len(candidates) <= 1:
+        return candidates
+    if not bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_ENABLE", True)):
+        return candidates
+    max_per_run = max(1, int(limits.get("max_per_run") or 1))
+    if max_per_run < 2:
+        return candidates
+    preferred = getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_STRATEGIES", {"PRIMARY", "SS15"})
+    if any(str(row.get("strategy") or "").strip().upper() in preferred for row in candidates[:max_per_run] if isinstance(row, dict)):
+        return candidates
+    insert_at = min(max_per_run - 1, len(candidates) - 1)
+    reserved_symbols = {
+        str(row.get("symbol") or "").strip().upper()
+        for row in candidates[:insert_at]
+        if isinstance(row, dict) and str(row.get("symbol") or "").strip()
+    }
+    selected_index = None
+    for idx, row in enumerate(candidates):
+        if idx < max_per_run and not _is_preferred_primary_candidate(row, config=config, limits=limits):
+            continue
+        if not _is_preferred_primary_candidate(row, config=config, limits=limits):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if symbol and symbol in reserved_symbols:
+            continue
+        selected_index = idx
+        break
+    if selected_index is None:
+        return candidates
+    reordered = list(candidates)
+    selected = reordered.pop(selected_index)
+    reordered.insert(insert_at, selected)
+    return reordered
+
+
 def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
     build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
@@ -79,7 +172,8 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             )
             return 0
 
-    candidates.sort(key=lambda c: (float(c.get("score", 0.0)), float(c.get("confidence", 0.0))), reverse=True)
+    candidates.sort(key=_primary_candidate_sort_key, reverse=True)
+    candidates = _rebalance_primary_candidates(candidates, config=config, limits=limits)
     primary_dispatch = dispatch_primary_candidates(
         candidates,
         send_telegram_alert=send_telegram_alert,

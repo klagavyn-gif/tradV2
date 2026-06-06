@@ -12,7 +12,13 @@ from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_
 
 def _primary_candidate_sort_key(candidate):
     if not isinstance(candidate, dict):
-        return (0.0, 0.0)
+        return (0.0, 0.0, 0.0)
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    intent_priority = 0.0
+    if intent == "entry":
+        intent_priority = 2.0
+    elif intent == "watch":
+        intent_priority = 1.0
     try:
         score = float(candidate.get("score", 0.0))
     except Exception:
@@ -21,7 +27,7 @@ def _primary_candidate_sort_key(candidate):
         confidence = float(candidate.get("confidence", 0.0))
     except Exception:
         confidence = 0.0
-    return (score, confidence)
+    return (intent_priority, score, confidence)
 
 
 def _tier_meets_minimum(tier, minimum):
@@ -31,6 +37,8 @@ def _tier_meets_minimum(tier, minimum):
 
 def _is_preferred_primary_candidate(candidate, *, config, limits):
     if not isinstance(candidate, dict):
+        return False
+    if str(candidate.get("alert_intent") or "").strip().lower() != "entry":
         return False
     preferred = getattr(config, "TELEGRAM_ALERT_PRIMARY_DIVERSITY_STRATEGIES", {"PRIMARY", "SS15"})
     strategy = str(candidate.get("strategy") or "").strip().upper()
@@ -103,6 +111,32 @@ def _rebalance_primary_candidates(candidates, *, config, limits):
     return reordered
 
 
+def _filter_candidates_by_intent(candidates, *, include_exit=False, include_watch=True, quality_drop_counts=None, prefix="intent"):
+    filtered = []
+    exit_filtered = 0
+    watch_filtered = 0
+    for row in candidates or []:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        intent = str(row.get("alert_intent") or "").strip().lower()
+        if intent == "exit" and not include_exit:
+            exit_filtered += 1
+            continue
+        if intent == "watch" and not include_watch:
+            watch_filtered += 1
+            continue
+        filtered.append(row)
+    if isinstance(quality_drop_counts, dict):
+        if exit_filtered > 0:
+            key = f"{prefix}_exit_intent_filtered"
+            quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + exit_filtered
+        if watch_filtered > 0:
+            key = f"{prefix}_watch_intent_filtered"
+            quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + watch_filtered
+    return filtered
+
+
 def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
     build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
@@ -172,10 +206,19 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             )
             return 0
 
+    raw_candidates = list(candidates or [])
     candidates.sort(key=_primary_candidate_sort_key, reverse=True)
     candidates = _rebalance_primary_candidates(candidates, config=config, limits=limits)
-    primary_dispatch = dispatch_primary_candidates(
+    include_exit_candidates = bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_INCLUDE_EXIT", False))
+    dispatch_candidates = _filter_candidates_by_intent(
         candidates,
+        include_exit=include_exit_candidates,
+        include_watch=True,
+        quality_drop_counts=quality_drop_counts,
+        prefix="primary",
+    )
+    primary_dispatch = dispatch_primary_candidates(
+        dispatch_candidates,
         send_telegram_alert=send_telegram_alert,
         telegram_alert_cache=telegram_alert_cache,
         record_telegram_alert_history=record_telegram_alert_history,
@@ -235,8 +278,17 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         trend_radar_max_per_run = coerce_int(getattr(config, "TREND_RADAR_MAX_PER_RUN", 2), 2)
         trend_radar_cooldown_minutes = coerce_int(getattr(config, "TREND_RADAR_COOLDOWN_MINUTES", 240), 240)
         trend_radar_max_total_per_symbol = coerce_int(getattr(config, "TREND_RADAR_MAX_TOTAL_PER_SYMBOL", 1), 1)
-        trend_radar_dispatch = dispatch_trend_radar_candidates(
+        trend_radar_include_watch = bool(getattr(config, "TREND_RADAR_INCLUDE_WATCH", False))
+        trend_radar_include_exit = bool(getattr(config, "TREND_RADAR_INCLUDE_EXIT", False))
+        trend_radar_dispatch_candidates = _filter_candidates_by_intent(
             trend_radar_candidates,
+            include_exit=trend_radar_include_exit,
+            include_watch=trend_radar_include_watch,
+            quality_drop_counts=quality_drop_counts,
+            prefix="trend_radar",
+        )
+        trend_radar_dispatch = dispatch_trend_radar_candidates(
+            trend_radar_dispatch_candidates,
             send_telegram_alert=send_telegram_alert,
             telegram_alert_cache=telegram_alert_cache,
             record_telegram_alert_history=record_telegram_alert_history,
@@ -302,7 +354,8 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         kill_reason=reason,
         min_conf=min_conf,
         dynamic_min_conf=dynamic_min_conf,
-        candidates=candidates,
+        candidates=dispatch_candidates,
+        raw_candidates=raw_candidates,
         sent_candidates=sent_candidates,
         daily_pick_sent=daily_pick_sent,
         daily_summary_sent=daily_summary_sent,

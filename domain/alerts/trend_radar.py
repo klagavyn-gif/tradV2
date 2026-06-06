@@ -486,6 +486,8 @@ def build_trend_radar_candidates(results, *, config, helpers, get_now, runtime_c
                 "strategy": "TRADAR15",
                 "strategy_label": "Trend Radar 15m",
                 "signal": signal,
+                "alert_intent": "watch",
+                "alert_intent_reason": f"trend_radar_{subtype.lower() or 'watch'}",
                 "score": float(score),
                 "confidence": float(score),
                 "plan": snapshot,

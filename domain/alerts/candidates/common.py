@@ -1,4 +1,107 @@
+import math
 from collections import Counter
+
+
+_EXIT_TRIGGERS = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
+_REVERSAL_TRIGGERS = {"CDC_RED_REVERSAL", "TREND_ROLLOVER"}
+_EXIT_REASON_PHRASES = (
+    "ถือครบ",
+    "ปิดรอบ",
+    "ลดการยืดเยื้อ",
+    "close round",
+    "time stop",
+    "take profit",
+    "ปิดกำไร",
+)
+
+
+def _safe_float(value, default=None):
+    try:
+        value = float(value)
+    except Exception:
+        return default
+    if not math.isfinite(value):
+        return default
+    return value
+
+
+def _pick_numeric(plan, keys):
+    if not isinstance(plan, dict):
+        return None
+    for key in keys or ():
+        if key in plan:
+            value = _safe_float(plan.get(key), None)
+            if isinstance(value, float):
+                return value
+    return None
+
+
+def _entry_distance_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return None, None
+    plan = candidate.get("plan")
+    item = candidate.get("item")
+    entry_price = _pick_numeric(plan, ["entry_price", "current_price", "price"])
+    current_price = _pick_numeric(plan, ["current_price", "price"])
+    if current_price is None and isinstance(item, dict):
+        current_price = _safe_float(item.get("price"), None)
+    stop_loss = _pick_numeric(plan, ["stop_loss", "entry_stop_loss", "trailing_stop"])
+    if entry_price is None or current_price is None or entry_price == 0:
+        return None, None
+    distance_pct = abs(float(current_price) - float(entry_price)) / abs(float(entry_price)) * 100.0
+    distance_r = None
+    if isinstance(stop_loss, float) and not math.isclose(float(stop_loss), float(entry_price), rel_tol=1e-9, abs_tol=1e-9):
+        risk = abs(float(entry_price) - float(stop_loss))
+        if risk > 0:
+            distance_r = abs(float(current_price) - float(entry_price)) / risk
+    return distance_pct, distance_r
+
+
+def _within_entry_window(candidate, *, config):
+    distance_pct, distance_r = _entry_distance_metrics(candidate)
+    max_distance_pct = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_PCT", 2.5), 2.5)
+    max_distance_r = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_R", 1.1), 1.1)
+    near_by_pct = isinstance(distance_pct, float) and distance_pct <= float(max_distance_pct)
+    near_by_r = isinstance(distance_r, float) and distance_r <= float(max_distance_r)
+    if near_by_pct or near_by_r:
+        return True, distance_pct, distance_r
+    if distance_pct is None and distance_r is None:
+        return None, None, None
+    return False, distance_pct, distance_r
+
+
+def classify_candidate_intent(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return "watch", "invalid_candidate"
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    signal = str(candidate.get("signal") or "").strip().upper()
+    plan = candidate.get("plan")
+    trigger = str((plan or {}).get("sell_trigger") or (plan or {}).get("exit_trigger") or "").strip().upper()
+    plan_reason = str((plan or {}).get("reason") or "").strip().lower()
+    if strategy in {"TRADAR15", "TRENDRADAR15", "TREND_RADAR", "TRENDSTATE15"}:
+        return "watch", "strategy_watch_only"
+    if trigger in _EXIT_TRIGGERS or any(phrase in plan_reason for phrase in _EXIT_REASON_PHRASES):
+        return "exit", f"trigger:{trigger.lower() or 'plan_reason_exit'}"
+    is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
+    if strategy == "CDCVIX15":
+        if is_entry_window is None:
+            return "watch", "cdc_unknown_entry_distance"
+        if trigger in _REVERSAL_TRIGGERS and is_entry_window:
+            return "entry", f"cdc_reversal_fresh:{trigger.lower()}"
+        if is_entry_window and signal in ("BUY", "SELL"):
+            return "entry", "cdc_fresh_signal"
+        return "watch", f"cdc_stretched:d_pct={distance_pct},d_r={distance_r}"
+    if strategy in {"PRIMARY", "SS15", "AZ15", "PA15", "TCB15", "AW15"}:
+        if is_entry_window is None:
+            return "watch", "unknown_entry_distance"
+        if is_entry_window:
+            return "entry", f"fresh_entry:d_pct={distance_pct},d_r={distance_r}"
+        return "watch", f"stretched_entry:d_pct={distance_pct},d_r={distance_r}"
+    if is_entry_window is None:
+        return "watch", "unknown_entry_distance"
+    if signal in ("BUY", "SELL") and is_entry_window:
+        return "entry", f"generic_entry:d_pct={distance_pct},d_r={distance_r}"
+    return "watch", f"generic_watch:d_pct={distance_pct},d_r={distance_r}"
 
 
 def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, runtime_context=None):
@@ -125,6 +228,9 @@ def finalize_candidates(context):
         if isinstance(profile_metrics, dict) and profile_metrics:
             candidate["edge_metrics"] = profile_metrics
         candidate["alert_profile"] = candidate_alert_profile(candidate)
+        alert_intent, alert_intent_reason = classify_candidate_intent(candidate, config=context["config"])
+        candidate["alert_intent"] = alert_intent
+        candidate["alert_intent_reason"] = alert_intent_reason
         filtered_candidates.append(candidate)
 
     regime_context = context["regime_context"]

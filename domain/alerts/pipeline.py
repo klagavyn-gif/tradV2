@@ -12,13 +12,21 @@ from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_
 
 def _primary_candidate_sort_key(candidate):
     if not isinstance(candidate, dict):
-        return (0.0, 0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
     intent = str(candidate.get("alert_intent") or "").strip().lower()
     intent_priority = 0.0
     if intent == "entry":
         intent_priority = 2.0
     elif intent == "watch":
         intent_priority = 1.0
+    short_trade_bucket = str(candidate.get("short_trade_bucket") or "").strip().lower()
+    short_trade_priority = 1.0
+    if short_trade_bucket == "premium_entry":
+        short_trade_priority = 3.0
+    elif short_trade_bucket == "standard_entry":
+        short_trade_priority = 2.0
+    elif short_trade_bucket == "watch":
+        short_trade_priority = 0.5
     ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
     ai_priority = 1.0
     if ai_bucket == "confirmed":
@@ -34,10 +42,14 @@ def _primary_candidate_sort_key(candidate):
     except Exception:
         pass
     try:
+        score += float(candidate.get("short_trade_score_adjustment", 0.0) or 0.0)
+    except Exception:
+        pass
+    try:
         confidence = float(candidate.get("confidence", 0.0))
     except Exception:
         confidence = 0.0
-    return (intent_priority, ai_priority, score, confidence)
+    return (intent_priority, short_trade_priority, ai_priority, score, confidence)
 
 
 def _tier_meets_minimum(tier, minimum):
@@ -147,6 +159,50 @@ def _filter_candidates_by_intent(candidates, *, include_exit=False, include_watc
     return filtered
 
 
+def _apply_short_trade_dispatch_policy(candidates, *, config, quality_drop_counts=None, prefix="primary"):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_ENABLE", True)):
+        return list(candidates or [])
+    rows = [row for row in (candidates or []) if isinstance(row, dict)]
+    if not rows:
+        return list(candidates or [])
+
+    entry_rows = [row for row in rows if str(row.get("alert_intent") or "").strip().lower() == "entry"]
+    min_entry_count = max(
+        1,
+        coerce_int(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_MIN_ENTRY_CANDIDATES_FOR_WATCH_SUPPRESSION", 2), 2),
+    )
+    max_watch_per_run = max(0, coerce_int(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_MAX_WATCH_PER_RUN", 1), 1))
+
+    dispatch_rows = list(rows)
+    watch_filtered = 0
+    if len(entry_rows) >= min_entry_count:
+        filtered = []
+        for row in dispatch_rows:
+            if str(row.get("alert_intent") or "").strip().lower() == "watch":
+                watch_filtered += 1
+                continue
+            filtered.append(row)
+        dispatch_rows = filtered
+    elif max_watch_per_run >= 0:
+        kept_watch = 0
+        filtered = []
+        for row in dispatch_rows:
+            if str(row.get("alert_intent") or "").strip().lower() != "watch":
+                filtered.append(row)
+                continue
+            if kept_watch < max_watch_per_run:
+                kept_watch += 1
+                filtered.append(row)
+            else:
+                watch_filtered += 1
+        dispatch_rows = filtered
+
+    if isinstance(quality_drop_counts, dict) and watch_filtered > 0:
+        key = f"{prefix}_short_trade_watch_suppressed"
+        quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + int(watch_filtered)
+    return dispatch_rows
+
+
 def notify_telegram_from_results(results, *, config, helpers, get_now, logger, runtime_context=None):
     build_alert_runtime_context = helpers["build_alert_runtime_context"]
     build_telegram_candidates = helpers["build_telegram_candidates"]
@@ -224,6 +280,12 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         candidates,
         include_exit=include_exit_candidates,
         include_watch=True,
+        quality_drop_counts=quality_drop_counts,
+        prefix="primary",
+    )
+    dispatch_candidates = _apply_short_trade_dispatch_policy(
+        dispatch_candidates,
+        config=config,
         quality_drop_counts=quality_drop_counts,
         prefix="primary",
     )

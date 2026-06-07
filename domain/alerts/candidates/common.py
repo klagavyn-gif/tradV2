@@ -130,6 +130,45 @@ def _pick_numeric(plan, keys):
     return None
 
 
+def _plan_numeric(candidate, keys):
+    if not isinstance(candidate, dict):
+        return None
+    return _pick_numeric(candidate.get("plan"), keys)
+
+
+def _candidate_source_count(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    value = candidate.get("source_count")
+    if isinstance(value, (int, float)):
+        try:
+            return max(0, int(float(value)))
+        except Exception:
+            return None
+    for key in ("sources", "supporting_sources", "source_labels"):
+        entries = candidate.get(key)
+        if isinstance(entries, (list, tuple, set)):
+            return len(entries)
+    plan = candidate.get("plan")
+    if isinstance(plan, dict):
+        for key in ("sources", "supporting_sources", "source_labels"):
+            entries = plan.get(key)
+            if isinstance(entries, (list, tuple, set)):
+                return len(entries)
+    return None
+
+
+def _bars_since_signal(candidate):
+    value = _plan_numeric(candidate, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
+    if isinstance(value, float):
+        return value
+    return None
+
+
+def _signal_side(candidate):
+    return str((candidate or {}).get("signal") or "").strip().upper()
+
+
 def _entry_distance_metrics(candidate):
     if not isinstance(candidate, dict):
         return None, None
@@ -196,6 +235,180 @@ def classify_candidate_intent(candidate, *, config):
     if signal in ("BUY", "SELL") and is_entry_window:
         return "entry", f"generic_entry:d_pct={distance_pct},d_r={distance_r}"
     return "watch", f"generic_watch:d_pct={distance_pct},d_r={distance_r}"
+
+
+def resolve_short_trade_profile(candidate, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    signal = _signal_side(candidate)
+    if signal not in ("BUY", "SELL"):
+        return None
+
+    profile = {
+        "bucket": "watch",
+        "label": "Watch Only",
+        "reason": "ยังไม่ผ่านคุณภาพจังหวะเข้าแบบเทรดสั้น",
+        "score_adjustment": 0.0,
+        "block": False,
+        "block_reason": None,
+    }
+
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    rr_value = _safe_float(plan.get("risk_reward"), None)
+    bars_since = _bars_since_signal(candidate)
+    source_count = _candidate_source_count(candidate)
+    confidence = _safe_float(candidate.get("confidence"), None)
+    is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+    market_regime = str(regime.get("market_regime") or "").strip().upper()
+    side_bias = str(regime.get("side_bias") or "").strip().upper()
+    require_regime_alignment = bool(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_REQUIRE_REGIME_ALIGNMENT", True))
+    regime_aligned = True
+    if signal in ("BUY", "SELL") and side_bias in ("BUY", "SELL") and signal != side_bias:
+        regime_aligned = False
+    if market_regime == "RISK_OFF_EVENT" and signal == "BUY":
+        regime_aligned = False
+
+    rr_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_RR_FLOOR", 1.0), 1.0)
+    premium_rr = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_PREMIUM_MIN_RR", 1.25), 1.25)
+    standard_max_bars = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_STANDARD_MAX_BARS", 3), 3))
+    hard_stale_bars = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_HARD_STALE_BARS", 6), 6))
+    standard_min_sources = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_STANDARD_MIN_SOURCE_COUNT", 1), 1))
+    premium_min_sources = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_PREMIUM_MIN_SOURCE_COUNT", 2), 2))
+    premium_min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_PREMIUM_MIN_CONFIDENCE", 78.0), 78.0)
+    premium_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_PREMIUM_SCORE_BONUS", 4.0), 4.0)
+    standard_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_STANDARD_SCORE_BONUS", 1.5), 1.5)
+    watch_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_WATCH_SCORE_PENALTY", 3.0), 3.0)
+    ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
+
+    if intent == "entry":
+        if isinstance(rr_value, float) and rr_value < float(rr_floor):
+            profile.update(
+                {
+                    "bucket": "avoid",
+                    "label": "Avoid Entry",
+                    "reason": f"RR ต่ำกว่า {rr_floor:.2f}R",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                    "block": True,
+                    "block_reason": "short_trade_rr_floor",
+                }
+            )
+        elif isinstance(bars_since, float) and bars_since > float(hard_stale_bars):
+            profile.update(
+                {
+                    "bucket": "avoid",
+                    "label": "Avoid Entry",
+                    "reason": f"สัญญาณเกิน {hard_stale_bars} แท่ง ไม่สดพอ",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                    "block": True,
+                    "block_reason": "short_trade_stale_entry",
+                }
+            )
+        elif is_entry_window is False:
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "Watch Only",
+                    "reason": "ราคาเริ่มห่าง entry zone",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+        elif require_regime_alignment and not regime_aligned:
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "Watch Only",
+                    "reason": "สวน market regime หรือ side bias หลัก",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+        elif ai_bucket == "low_conviction":
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "Watch Only",
+                    "reason": "AI ยังไม่มั่นใจพอสำหรับ short entry",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+        elif (
+            (is_entry_window is True or is_entry_window is None)
+            and (rr_value is None or rr_value >= float(premium_rr))
+            and (bars_since is None or bars_since <= float(standard_max_bars))
+            and (source_count is None or int(source_count) >= int(premium_min_sources))
+            and (confidence is not None and confidence >= float(premium_min_confidence))
+        ):
+            profile.update(
+                {
+                    "bucket": "premium_entry",
+                    "label": "Premium Entry",
+                    "reason": "เทรนด์ตรง, RR ดี, สัญญาณสด และคุณภาพเข้าเด่น",
+                    "score_adjustment": float(premium_bonus),
+                }
+            )
+        elif (
+            (is_entry_window is True or is_entry_window is None)
+            and (rr_value is None or rr_value >= float(rr_floor))
+            and (bars_since is None or bars_since <= float(standard_max_bars))
+            and (source_count is None or int(source_count) >= int(standard_min_sources))
+        ):
+            profile.update(
+                {
+                    "bucket": "standard_entry",
+                    "label": "Standard Entry",
+                    "reason": "เข้าได้ตามแผนเทรดสั้น แต่ยังไม่ถึงระดับพรีเมียม",
+                    "score_adjustment": float(standard_bonus),
+                }
+            )
+        else:
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "Watch Only",
+                    "reason": "คุณภาพจังหวะเข้าไม่ครบสำหรับ short trade",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+    elif intent == "watch":
+        profile.update(
+            {
+                "bucket": "watch",
+                "label": "Watch Only",
+                "reason": "เป็นแผนเฝ้ารอจังหวะ ไม่ใช่ entry ทันที",
+                "score_adjustment": -abs(float(watch_penalty)),
+            }
+        )
+
+    profile["risk_reward"] = rr_value
+    profile["bars_since_signal"] = bars_since
+    profile["source_count"] = source_count
+    profile["entry_distance_pct"] = distance_pct
+    profile["entry_distance_r"] = distance_r
+    profile["regime_aligned"] = regime_aligned
+    return profile
+
+
+def attach_short_trade_context(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return candidate
+    profile = resolve_short_trade_profile(candidate, config=config)
+    if not isinstance(profile, dict):
+        return candidate
+    candidate["short_trade_bucket"] = str(profile.get("bucket") or "").strip() or None
+    candidate["short_trade_label"] = str(profile.get("label") or "").strip() or None
+    candidate["short_trade_reason"] = str(profile.get("reason") or "").strip() or None
+    candidate["short_trade_score_adjustment"] = _safe_float(profile.get("score_adjustment"), 0.0)
+    candidate["short_trade_regime_aligned"] = bool(profile.get("regime_aligned")) if "regime_aligned" in profile else None
+    candidate["short_trade_entry_distance_pct"] = _safe_float(profile.get("entry_distance_pct"), None)
+    candidate["short_trade_entry_distance_r"] = _safe_float(profile.get("entry_distance_r"), None)
+    if profile.get("bucket") == "watch" and str(candidate.get("alert_intent") or "").strip().lower() == "entry":
+        candidate["alert_intent"] = "watch"
+        candidate["alert_intent_reason"] = f"short_trade_watch:{profile.get('reason')}"
+    return candidate
 
 
 def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, runtime_context=None):
@@ -329,6 +542,10 @@ def finalize_candidates(context):
         if callable(score_candidate_with_live_ai):
             candidate = score_candidate_with_live_ai(candidate)
         candidate = attach_ai_dispatch_context(candidate, config=context["config"])
+        candidate = attach_short_trade_context(candidate, config=context["config"])
+        if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
+            context["quality_drop_counts"][str(candidate.get("short_trade_reason") or "short_trade_avoid")] += 1
+            continue
         filtered_candidates.append(candidate)
 
     regime_context = context["regime_context"]

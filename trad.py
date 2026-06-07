@@ -144,6 +144,13 @@ EMA_CROSS_15M_OPT_CACHE = {}
 _YF_EMPTY_SENTINEL = object()
 
 _THREAD_LOCAL = threading.local()
+_LIVE_AI_MODEL_LOCK = threading.Lock()
+_LIVE_AI_MODEL_CACHE = {
+    "path": None,
+    "mtime": None,
+    "bundle": None,
+    "error": None,
+}
 
 
 class _TTLCache:
@@ -2727,6 +2734,59 @@ def _append_message_level_guidance_lines(lines, plan, signal=None, *, entry_keys
         lines.append("<b>🧭 Level Source:</b> fallback risk model")
 
 
+def _resolve_trade_decision_legacy(plan, *, signal=None, strategy_label=None, action_guidance=None, current_price=None):
+    plan = plan if isinstance(plan, dict) else {}
+    strategy_text = str(strategy_label or "").strip().upper()
+    action_code = str((action_guidance or {}).get("action_code") or "").strip().upper()
+    trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    plan_reason = str(plan.get("reason") or "").strip().lower()
+    exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
+    exit_reason_phrases = ("ถือครบ", "ปิดรอบ", "ลดการยืดเยื้อ", "close round", "time stop", "take profit", "ปิดกำไร")
+    if "TREND RADAR" in strategy_text or "TRADAR" in strategy_text:
+        return ("รอ", "เป็นแผนเฝ้าเข้า รอราคาเข้าโซนก่อน", "🟡")
+    if action_code.startswith("EXIT") or action_code == "SELL / RISK-OFF" or trigger in exit_triggers or any(phrase in plan_reason for phrase in exit_reason_phrases):
+        return ("ห้ามเข้า", "เป็นสัญญาณปิดรอบหรือลดความเสี่ยง ไม่ใช่จุดเปิดไม้ใหม่", "⛔")
+    guidance = _resolve_message_level_guidance(plan, signal=signal)
+    if not isinstance(guidance, dict):
+        return ("ห้ามเข้า", "ข้อมูลแผนยังไม่ครบสำหรับคำนวณ Entry/SL/TP", "⛔")
+    entry = _safe_float(guidance.get("entry"), None)
+    stop = _safe_float(guidance.get("stop"), None)
+    rr1 = _safe_float(guidance.get("rr1"), None)
+    if entry is None or stop is None:
+        return ("ห้ามเข้า", "ไม่มี Entry หรือ SL ที่ชัดพอสำหรับเข้าไม้", "⛔")
+    if rr1 is not None and rr1 < 1.0:
+        return ("ห้ามเข้า", "RR ถึง TP1 ต่ำกว่า 1R ไม่คุ้มสำหรับเล่นสั้น", "⛔")
+    current_value = _safe_float(current_price, None)
+    if current_value is None:
+        current_value = _safe_float(plan.get("current_price") or plan.get("price"), None)
+    distance_pct = None
+    if entry is not None and current_value is not None and abs(entry) > 0:
+        distance_pct = abs(float(current_value) - float(entry)) / abs(float(entry)) * 100.0
+    risk_dist = abs(float(entry) - float(stop)) if entry is not None and stop is not None else None
+    distance_r = None
+    if isinstance(risk_dist, (int, float)) and risk_dist > 0 and current_value is not None:
+        distance_r = abs(float(current_value) - float(entry)) / float(risk_dist)
+    if isinstance(distance_pct, (int, float)) and float(distance_pct) > 2.5:
+        return ("รอ", f"ราคาห่างจากจุดเข้า {float(distance_pct):.2f}% แล้ว ไม่ควรไล่ราคา", "🟡")
+    if isinstance(distance_r, (int, float)) and float(distance_r) > 1.0:
+        return ("รอ", f"ราคาห่างจากจุดเข้า {float(distance_r):.2f}R แล้ว รอจังหวะกลับเข้าโซน", "🟡")
+    return ("เข้าได้", "แผนยังใกล้จุดเข้าและมี SL/TP พร้อมใช้งาน", "🟢")
+
+
+def _append_trade_decision_lines_legacy(lines, plan, *, signal=None, strategy_label=None, action_guidance=None, current_price=None):
+    label, reason, icon = _resolve_trade_decision_legacy(
+        plan,
+        signal=signal,
+        strategy_label=strategy_label,
+        action_guidance=action_guidance,
+        current_price=current_price,
+    )
+    if label:
+        lines.append(f"<b>🚦 สถานะ:</b> {_html_escape(icon + ' ' + label)}")
+    if reason:
+        lines.append(f"<b>📝 Decision:</b> {_html_escape(reason)}")
+
+
 def _build_actionzone_message(item, az_plan):
     signal = str(az_plan.get("signal") or az_plan.get("raw_signal") or "").upper()
     emoji = "🟢" if signal == "BUY" else "🔴" if signal == "SELL" else "⚪"
@@ -2784,6 +2844,20 @@ def _build_actionzone_message(item, az_plan):
         edge_parts.append(f"Trades {int(trades)}")
     if edge_parts:
         lines.append("<b>🧪 Edge:</b> " + " | ".join([_html_escape(part) for part in edge_parts]))
+    action_guidance = _build_trade_action_guidance(signal, plan=az_plan, source_label="ActionZone 15m")
+    _append_trade_decision_lines_legacy(
+        lines,
+        az_plan,
+        signal=signal,
+        strategy_label="ActionZone 15m",
+        action_guidance=action_guidance,
+        current_price=curr_price,
+    )
+    if isinstance(action_guidance, dict):
+        lines.append("<b>🎯 Action:</b> " + _html_escape(str(action_guidance.get("primary_text") or "")))
+        note_text = str(action_guidance.get("note_text") or "").strip()
+        if note_text:
+            lines.append("<b>⚠️ Note:</b> " + _html_escape(note_text))
 
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
@@ -2880,6 +2954,14 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         plan=plan,
         mode_label=mode_label,
         source_label="CDC+VixFix 15m",
+    )
+    _append_trade_decision_lines_legacy(
+        lines,
+        plan,
+        signal=signal,
+        strategy_label="CDC+VixFix 15m",
+        action_guidance=action_guidance,
+        current_price=plan.get("current_price", item.get("price")),
     )
     if isinstance(action_guidance, dict):
         lines.append("<b>🎯 Action:</b> " + _html_escape(str(action_guidance.get("primary_text") or "")))
@@ -3110,6 +3192,262 @@ def _safe_float(value, default=None):
         return float(value)
     except Exception:
         return default
+
+
+def _safe_upper_text(value, default=""):
+    text = str(value or "").strip().upper()
+    return text if text else str(default or "").strip().upper()
+
+
+def _infer_candidate_group(candidate):
+    if not isinstance(candidate, dict):
+        return ""
+    raw = _safe_upper_text(candidate.get("candidate_group"), "")
+    if raw:
+        return raw
+    strategy = _safe_upper_text(candidate.get("strategy"), "")
+    if strategy == "DAILY_BEST":
+        return "DAILY"
+    if "TRADAR" in strategy or "TREND_RADAR" in strategy:
+        return "TREND_RADAR"
+    return "PRIMARY"
+
+
+def _tier_rank_from_label(tier):
+    mapping = {
+        "A": 4.0,
+        "B": 3.0,
+        "C": 2.0,
+        "D": 1.0,
+    }
+    return mapping.get(_safe_upper_text(tier, ""), None)
+
+
+def _candidate_source_count(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    direct = candidate.get("source_count")
+    if isinstance(direct, (int, float)):
+        try:
+            return max(0, int(float(direct)))
+        except Exception:
+            return None
+    for key in ("sources", "supporting_sources", "source_labels"):
+        value = candidate.get(key)
+        if isinstance(value, (list, tuple, set)):
+            return len(value)
+    plan = candidate.get("plan")
+    if isinstance(plan, dict):
+        for key in ("supporting_sources", "sources", "source_labels"):
+            value = plan.get(key)
+            if isinstance(value, (list, tuple, set)):
+                return len(value)
+    return None
+
+
+def _resolve_live_ai_model_path():
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    configured = str(getattr(config, "TELEGRAM_ALERT_AI_MODEL_PATH", "") or "").strip()
+    if configured:
+        if not os.path.isabs(configured):
+            configured = os.path.join(project_root, configured)
+        return os.path.normpath(configured)
+
+    candidate_paths = [
+        os.path.join(project_root, ".data", "research", "phase3", "phase3_meta_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase3_local_tiny", "phase3_meta_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase1_local", ".data", "research", "phase3_local_tiny", "phase3_meta_model.joblib"),
+    ]
+    existing = []
+    for path in candidate_paths:
+        try:
+            if os.path.exists(path):
+                existing.append((os.path.getmtime(path), os.path.normpath(path)))
+        except Exception:
+            continue
+    if not existing:
+        return None
+    existing.sort(reverse=True)
+    return existing[0][1]
+
+
+def _load_live_ai_model_bundle():
+    if not bool(getattr(config, "TELEGRAM_ALERT_AI_LIVE_ENABLE", True)):
+        return None
+    model_path = _resolve_live_ai_model_path()
+    if not model_path or not os.path.exists(model_path):
+        return None
+    try:
+        model_mtime = os.path.getmtime(model_path)
+    except Exception:
+        return None
+
+    with _LIVE_AI_MODEL_LOCK:
+        cached_path = _LIVE_AI_MODEL_CACHE.get("path")
+        cached_mtime = _LIVE_AI_MODEL_CACHE.get("mtime")
+        cached_bundle = _LIVE_AI_MODEL_CACHE.get("bundle")
+        if cached_bundle is not None and cached_path == model_path and cached_mtime == model_mtime:
+            return cached_bundle
+
+        try:
+            import joblib
+
+            bundle = joblib.load(model_path)
+            feature_columns = list(bundle.get("feature_columns") or [])
+            classifier = bundle.get("classifier")
+            if not feature_columns or classifier is None:
+                raise ValueError("missing classifier or feature_columns")
+            _LIVE_AI_MODEL_CACHE.update(
+                {
+                    "path": model_path,
+                    "mtime": model_mtime,
+                    "bundle": bundle,
+                    "error": None,
+                }
+            )
+            logger.info("Loaded live AI model from %s", model_path)
+            return bundle
+        except Exception as exc:
+            error_key = f"{model_path}|{exc}"
+            if _LIVE_AI_MODEL_CACHE.get("error") != error_key:
+                logger.warning("Live AI scorer disabled for this run: %s", exc)
+            _LIVE_AI_MODEL_CACHE.update(
+                {
+                    "path": model_path,
+                    "mtime": model_mtime,
+                    "bundle": None,
+                    "error": error_key,
+                }
+            )
+            return None
+
+
+def _candidate_ai_features(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+    profile = candidate.get("alert_profile")
+    if not isinstance(profile, dict):
+        profile = _candidate_alert_profile(candidate)
+    edge_metrics = candidate.get("edge_metrics") if isinstance(candidate.get("edge_metrics"), dict) else {}
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+
+    entry_price = _safe_float(_pick_plan_value(plan, ["entry_price", "current_price", "price"]), None)
+    stop_loss = _safe_float(_pick_plan_value(plan, ["stop_loss", "entry_stop_loss", "trailing_stop"]), None)
+    take_profit = _safe_float(_pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price", "trailing_stop"]), None)
+    price_at_checkpoint = _safe_float(
+        candidate.get("price_at_checkpoint")
+        or item.get("current_price")
+        or item.get("price")
+        or candidate.get("current_price"),
+        None,
+    )
+    source_count = _candidate_source_count(candidate)
+
+    return {
+        "strategy": _safe_upper_text(candidate.get("strategy"), ""),
+        "symbol": normalize_symbol(candidate.get("symbol") or ""),
+        "signal": _safe_upper_text(candidate.get("signal"), ""),
+        "candidate_group": _infer_candidate_group(candidate),
+        "market_regime": _safe_upper_text(candidate.get("market_regime") or regime.get("market_regime"), ""),
+        "market_trend_bias": _safe_upper_text(
+            candidate.get("market_trend_bias") or candidate.get("market_side_bias") or regime.get("market_side_bias"),
+            "",
+        ),
+        "side_bias": _safe_upper_text(candidate.get("side_bias") or regime.get("side_bias"), ""),
+        "alert_tier": _safe_upper_text(profile.get("tier") if isinstance(profile, dict) else "", ""),
+        "alert_intent": str(candidate.get("alert_intent") or "").strip().lower(),
+        "confidence": _safe_float(candidate.get("confidence"), None),
+        "score": _safe_float(candidate.get("score"), None),
+        "alert_tier_score": _safe_float(profile.get("composite_score") if isinstance(profile, dict) else None, None),
+        "tier_rank": _tier_rank_from_label(profile.get("tier") if isinstance(profile, dict) else None),
+        "source_count": source_count,
+        "backtest_win_rate_pct": _safe_float(edge_metrics.get("win_rate_pct"), None),
+        "backtest_expectancy_rr": _safe_float(edge_metrics.get("expectancy_rr"), None),
+        "backtest_trades": _safe_float(edge_metrics.get("trades"), None),
+        "risk_reward": _safe_float(plan.get("risk_reward"), None),
+        "adjusted_run_cap": _safe_float(candidate.get("adjusted_run_cap"), None),
+        "symbol_cap": _safe_float(candidate.get("symbol_cap"), None),
+        "quality_drop_confidence": _safe_float(candidate.get("quality_drop_confidence"), None),
+        "quality_drop_entry_window": _safe_float(candidate.get("quality_drop_entry_window"), None),
+        "price_at_checkpoint": price_at_checkpoint,
+        "entry_price": entry_price,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+    }
+
+
+def _candidate_allowed_for_live_ai(candidate, bundle):
+    if not isinstance(candidate, dict) or not isinstance(bundle, dict):
+        return False
+    strategy = _safe_upper_text(candidate.get("strategy"), "")
+    candidate_group = _infer_candidate_group(candidate)
+
+    configured_strategies = set(getattr(config, "TELEGRAM_ALERT_AI_LIVE_STRATEGIES", set()) or set())
+    if configured_strategies and strategy not in configured_strategies:
+        return False
+
+    configured_groups = set(getattr(config, "TELEGRAM_ALERT_AI_LIVE_GROUPS", set()) or set())
+    if configured_groups and candidate_group not in configured_groups:
+        return False
+
+    metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    trained_strategies = {_safe_upper_text(value, "") for value in list(metadata.get("strategies") or []) if _safe_upper_text(value, "")}
+    if trained_strategies and strategy not in trained_strategies:
+        return False
+
+    trained_groups = {_safe_upper_text(value, "") for value in list(metadata.get("groups") or []) if _safe_upper_text(value, "")}
+    if trained_groups and candidate_group not in trained_groups:
+        return False
+    return True
+
+
+def _score_candidate_with_live_ai(candidate):
+    if not bool(getattr(config, "TELEGRAM_ALERT_AI_LIVE_ENABLE", True)):
+        return candidate
+    if not isinstance(candidate, dict):
+        return candidate
+
+    bundle = _load_live_ai_model_bundle()
+    if not isinstance(bundle, dict) or not _candidate_allowed_for_live_ai(candidate, bundle):
+        return candidate
+
+    try:
+        feature_columns = list(bundle.get("feature_columns") or [])
+        if not feature_columns:
+            return candidate
+        row = _candidate_ai_features(candidate)
+        frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
+        classifier = bundle.get("classifier")
+        regressor = bundle.get("regressor")
+        if classifier is None:
+            return candidate
+        prob_win = _safe_float(classifier.predict_proba(frame)[0][1], None)
+        expected_return = None
+        if regressor is not None:
+            predicted = regressor.predict(frame)
+            if len(predicted):
+                expected_return = _safe_float(predicted[0], None)
+        confirmed_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_CONFIRMED_THRESHOLD", 0.60), 0.60)
+        neutral_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_NEUTRAL_THRESHOLD", 0.45), 0.45)
+        if prob_win is not None:
+            if prob_win >= confirmed_threshold:
+                ai_decision = "entry"
+            elif prob_win < neutral_threshold:
+                ai_decision = "avoid"
+            else:
+                ai_decision = "watch"
+            candidate["ai_prob_win"] = float(prob_win)
+            candidate["ai_decision"] = ai_decision
+        if expected_return is not None:
+            candidate["ai_expected_return_pct"] = float(expected_return)
+        candidate["ai_model_type"] = str(bundle.get("model_type") or "phase3_meta_trader")
+        candidate["ai_model_trained_at"] = str(bundle.get("trained_at") or "").strip() or None
+        return candidate
+    except Exception as exc:
+        logger.debug("Live AI scoring skipped for %s: %s", candidate.get("symbol"), exc)
+        return candidate
 
 
 def _telegram_dynamic_conf_threshold(base_min_conf, results):
@@ -3817,6 +4155,7 @@ def _pipeline_module_helpers():
         "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
         "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_alert_profile": _candidate_alert_profile,
+        "score_candidate_with_live_ai": _score_candidate_with_live_ai,
         "build_market_regime_snapshot": _build_market_regime_snapshot,
         "build_symbol_regime": _build_symbol_regime,
         "build_regime_context": _build_regime_context,

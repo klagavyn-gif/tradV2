@@ -25,6 +25,100 @@ def _safe_float(value, default=None):
     return value
 
 
+def _normalize_ai_decision(value):
+    text = str(value or "").strip().lower().replace("_", "-")
+    if text in {"entry", "confirmed", "ai-confirmed"}:
+        return "entry"
+    if text in {"watch", "neutral", "ai-neutral"}:
+        return "watch"
+    if text in {"avoid", "low-conviction", "low conviction", "reject"}:
+        return "avoid"
+    return None
+
+
+def resolve_ai_dispatch_profile(candidate, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_AI_FILTER_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    prob_win = _safe_float(candidate.get("ai_prob_win"), None)
+    expected_return = _safe_float(candidate.get("ai_expected_return_pct"), None)
+    explicit_decision = _normalize_ai_decision(candidate.get("ai_decision"))
+    if explicit_decision is None and prob_win is None and expected_return is None:
+        return None
+
+    confirmed_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_CONFIRMED_THRESHOLD", 0.60), 0.60)
+    neutral_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_NEUTRAL_THRESHOLD", 0.45), 0.45)
+    confirmed_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_CONFIRMED_SCORE_BONUS", 6.0), 6.0)
+    low_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_LOW_CONVICTION_SCORE_PENALTY", 2.5), 2.5)
+
+    bucket = "neutral"
+    label = "Neutral"
+    icon = "🟡"
+    reason = "AI มองเป็นตัวกลาง ใช้ประกอบกับ score เดิม"
+    rank_adjustment = 0.0
+
+    if explicit_decision == "entry" or (prob_win is not None and prob_win >= confirmed_threshold):
+        bucket = "confirmed"
+        label = "AI-Confirmed"
+        icon = "🟢"
+        reason = "AI ยืนยันสัญญาณ ใช้เพิ่มน้ำหนักการจัดอันดับได้"
+        if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
+            rank_adjustment = float(confirmed_bonus)
+    elif explicit_decision == "avoid" or (prob_win is not None and prob_win < neutral_threshold):
+        bucket = "low_conviction"
+        label = "Low-Conviction"
+        icon = "🟠"
+        reason = "AI ยังไม่มั่นใจพอ ควรลดอันดับแต่ไม่บล็อกทิ้งทันที"
+        if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
+            rank_adjustment = -abs(float(low_penalty))
+
+    return {
+        "bucket": bucket,
+        "label": label,
+        "icon": icon,
+        "reason": reason,
+        "prob_win": prob_win,
+        "expected_return_pct": expected_return,
+        "rank_adjustment": float(rank_adjustment),
+    }
+
+
+def _append_ai_message_line(message, profile, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_AI_MESSAGE_ENABLE", True)):
+        return message
+    if not isinstance(message, str) or not message.strip() or not isinstance(profile, dict):
+        return message
+    if "🤖 AI:" in message:
+        return message
+    parts = [str(profile.get("label") or "Neutral")]
+    prob_win = _safe_float(profile.get("prob_win"), None)
+    expected_return = _safe_float(profile.get("expected_return_pct"), None)
+    if prob_win is not None:
+        parts.append(f"pWin {prob_win * 100.0:.0f}%")
+    if expected_return is not None:
+        parts.append(f"Exp {expected_return:+.2f}%")
+    line = "<b>🤖 AI:</b> " + " | ".join(parts)
+    return message.rstrip() + "\n" + line
+
+
+def attach_ai_dispatch_context(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return candidate
+    profile = resolve_ai_dispatch_profile(candidate, config=config)
+    if not isinstance(profile, dict):
+        return candidate
+    candidate["ai_dispatch_bucket"] = str(profile.get("bucket") or "").strip() or None
+    candidate["ai_dispatch_label"] = str(profile.get("label") or "").strip() or None
+    candidate["ai_dispatch_icon"] = str(profile.get("icon") or "").strip() or None
+    candidate["ai_dispatch_reason"] = str(profile.get("reason") or "").strip() or None
+    candidate["ai_rank_adjustment"] = _safe_float(profile.get("rank_adjustment"), 0.0)
+    candidate["ai_prob_win"] = _safe_float(profile.get("prob_win"), None)
+    candidate["ai_expected_return_pct"] = _safe_float(profile.get("expected_return_pct"), None)
+    candidate["message"] = _append_ai_message_line(candidate.get("message"), profile, config=config)
+    return candidate
+
+
 def _pick_numeric(plan, keys):
     if not isinstance(plan, dict):
         return None
@@ -213,6 +307,7 @@ def finalize_candidates(context):
     evaluate_candidate_symbol_strategy_gate = context["helpers"]["evaluate_candidate_symbol_strategy_gate"]
     candidate_alert_profile = context["helpers"]["candidate_alert_profile"]
     build_regime_alert_budget = context["helpers"]["build_regime_alert_budget"]
+    score_candidate_with_live_ai = context["helpers"].get("score_candidate_with_live_ai")
 
     filtered_candidates = []
     for candidate in context["candidates"]:
@@ -231,6 +326,9 @@ def finalize_candidates(context):
         alert_intent, alert_intent_reason = classify_candidate_intent(candidate, config=context["config"])
         candidate["alert_intent"] = alert_intent
         candidate["alert_intent_reason"] = alert_intent_reason
+        if callable(score_candidate_with_live_ai):
+            candidate = score_candidate_with_live_ai(candidate)
+        candidate = attach_ai_dispatch_context(candidate, config=context["config"])
         filtered_candidates.append(candidate)
 
     regime_context = context["regime_context"]

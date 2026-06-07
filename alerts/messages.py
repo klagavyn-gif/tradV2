@@ -55,6 +55,112 @@ def _append_action_lines(lines, action_guidance, *, html_escape):
         lines.append("<b>⚠️ Note:</b> " + html_escape(note_text))
 
 
+def _resolve_trade_decision(plan, *, signal=None, strategy_label=None, action_guidance=None, current_price=None):
+    plan = plan if isinstance(plan, dict) else {}
+    strategy_text = str(strategy_label or "").strip().upper()
+    signal_text = _normalize_signal(signal or plan.get("signal") or "BUY")
+    action_code = str((action_guidance or {}).get("action_code") or "").strip().upper()
+    trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    plan_reason = str(plan.get("reason") or "").strip().lower()
+    exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
+    exit_reason_phrases = ("ถือครบ", "ปิดรอบ", "ลดการยืดเยื้อ", "close round", "time stop", "take profit", "ปิดกำไร")
+
+    if "TREND RADAR" in strategy_text or "TRADAR" in strategy_text:
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason": "เป็นแผนเฝ้าเข้า รอราคาเข้าโซนก่อน",
+        }
+    if "TREND STATE" in strategy_text:
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason": "เป็นการบอกสถานะเทรนด์ ยังไม่ใช่จุดเข้า",
+        }
+    if action_code.startswith("EXIT") or action_code == "SELL / RISK-OFF" or trigger in exit_triggers or any(phrase in plan_reason for phrase in exit_reason_phrases):
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason": "เป็นสัญญาณปิดรอบหรือลดความเสี่ยง ไม่ใช่จุดเปิดไม้ใหม่",
+        }
+    if action_code.startswith("BIAS"):
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason": "ใช้เป็น bias ของวัน ต้องรอระบบหลักยืนยันก่อน",
+        }
+
+    guidance = _resolve_level_guidance(plan, signal=signal_text)
+    if not isinstance(guidance, dict):
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason": "ข้อมูลแผนยังไม่ครบสำหรับคำนวณ Entry/SL/TP",
+        }
+    entry = _safe_float(guidance.get("entry"), None)
+    stop = _safe_float(guidance.get("stop"), None)
+    rr1 = _safe_float(guidance.get("rr1"), None)
+    if entry is None or stop is None:
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason": "ไม่มี Entry หรือ SL ที่ชัดพอสำหรับเข้าไม้",
+        }
+    if rr1 is not None and rr1 < 1.0:
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason": "RR ถึง TP1 ต่ำกว่า 1R ไม่คุ้มสำหรับเล่นสั้น",
+        }
+
+    current_value = _safe_float(current_price, None)
+    if current_value is None:
+        current_value = _safe_float(plan.get("current_price") or plan.get("price"), None)
+    distance_pct = None
+    if entry is not None and current_value is not None and abs(entry) > 0:
+        distance_pct = abs(float(current_value) - float(entry)) / abs(float(entry)) * 100.0
+    risk_dist = abs(float(entry) - float(stop)) if entry is not None and stop is not None else None
+    distance_r = None
+    if isinstance(risk_dist, (int, float)) and risk_dist > 0 and current_value is not None:
+        distance_r = abs(float(current_value) - float(entry)) / float(risk_dist)
+    if isinstance(distance_pct, (int, float)) and float(distance_pct) > 2.5:
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason": f"ราคาห่างจากจุดเข้า {float(distance_pct):.2f}% แล้ว ไม่ควรไล่ราคา",
+        }
+    if isinstance(distance_r, (int, float)) and float(distance_r) > 1.0:
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason": f"ราคาห่างจากจุดเข้า {float(distance_r):.2f}R แล้ว รอจังหวะกลับเข้าโซน",
+        }
+    return {
+        "label": "เข้าได้",
+        "icon": "🟢",
+        "reason": "แผนยังใกล้จุดเข้าและมี SL/TP พร้อมใช้งาน",
+    }
+
+
+def _append_trade_decision_lines(lines, *, plan, html_escape, signal=None, strategy_label=None, action_guidance=None, current_price=None):
+    decision = _resolve_trade_decision(
+        plan,
+        signal=signal,
+        strategy_label=strategy_label,
+        action_guidance=action_guidance,
+        current_price=current_price,
+    )
+    if not isinstance(decision, dict):
+        return
+    label = str(decision.get("label") or "").strip()
+    reason = str(decision.get("reason") or "").strip()
+    icon = str(decision.get("icon") or "🟡").strip()
+    if label:
+        lines.append(f"<b>🚦 สถานะ:</b> {html_escape(icon + ' ' + label)}")
+    if reason:
+        lines.append("<b>📝 Decision:</b> " + html_escape(reason))
+
+
 def _resolve_plan_value(plan, pick_plan_value, keys):
     if callable(pick_plan_value):
         return pick_plan_value(plan, keys)
@@ -379,6 +485,15 @@ def build_telegram_message(
         mode_label=mode_label,
         source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
     )
+    _append_trade_decision_lines(
+        lines,
+        plan=primary_plan,
+        html_escape=html_escape,
+        signal=signal,
+        strategy_label="PRIMARY",
+        action_guidance=action_guidance,
+        current_price=item.get("price"),
+    )
     _append_action_lines(lines, action_guidance, html_escape=html_escape)
     context_parts = []
     if isinstance(primary_plan, dict):
@@ -598,6 +713,14 @@ def build_trend_radar_message(item, radar_snapshot, *, helpers, get_now):
         signal=signal,
         entry_override_text=entry_override_text,
     )
+    _append_trade_decision_lines(
+        lines,
+        plan=radar_snapshot,
+        html_escape=html_escape,
+        signal=signal,
+        strategy_label="Trend Radar 15m",
+        current_price=radar_snapshot.get("price") or item.get("price"),
+    )
     tags = [str(tag).strip().upper() for tag in (radar_snapshot.get("tags") or []) if str(tag).strip()]
     if tags:
         lines.append("<b>⚡ Tags:</b> " + " | ".join(html_escape(tag) for tag in tags[:3]))
@@ -656,6 +779,15 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         signal,
         plan=plan,
         source_label="Price Action 15m",
+    )
+    _append_trade_decision_lines(
+        lines,
+        plan=plan,
+        html_escape=html_escape,
+        signal=signal,
+        strategy_label="Price Action 15m",
+        action_guidance=action_guidance,
+        current_price=item.get("price"),
     )
     _append_action_lines(lines, action_guidance, html_escape=html_escape)
 
@@ -737,6 +869,15 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         html_escape=html_escape,
     )
     action_guidance = build_trade_action_guidance(signal, plan=plan, source_label="Trend Breakout 15m")
+    _append_trade_decision_lines(
+        lines,
+        plan=plan,
+        html_escape=html_escape,
+        signal=signal,
+        strategy_label="Trend Breakout 15m",
+        action_guidance=action_guidance,
+        current_price=plan.get("current_price", item.get("price")),
+    )
     _append_action_lines(lines, action_guidance, html_escape=html_escape)
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
     _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape)

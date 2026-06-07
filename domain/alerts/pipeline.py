@@ -12,22 +12,32 @@ from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_
 
 def _primary_candidate_sort_key(candidate):
     if not isinstance(candidate, dict):
-        return (0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)
     intent = str(candidate.get("alert_intent") or "").strip().lower()
     intent_priority = 0.0
     if intent == "entry":
         intent_priority = 2.0
     elif intent == "watch":
         intent_priority = 1.0
+    ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
+    ai_priority = 1.0
+    if ai_bucket == "confirmed":
+        ai_priority = 2.0
+    elif ai_bucket == "low_conviction":
+        ai_priority = 0.0
     try:
         score = float(candidate.get("score", 0.0))
     except Exception:
         score = 0.0
     try:
+        score += float(candidate.get("ai_rank_adjustment", 0.0) or 0.0)
+    except Exception:
+        pass
+    try:
         confidence = float(candidate.get("confidence", 0.0))
     except Exception:
         confidence = 0.0
-    return (intent_priority, score, confidence)
+    return (intent_priority, ai_priority, score, confidence)
 
 
 def _tier_meets_minimum(tier, minimum):

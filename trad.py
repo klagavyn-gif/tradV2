@@ -4345,6 +4345,7 @@ def _record_telegram_run_report(
     dropped_by_run_cap,
     quality_drop_counts,
     alert_budget,
+    raw_candidates=None,
 ):
     return _alerts_reporting_record_telegram_run_report(
         results=results,
@@ -4353,6 +4354,7 @@ def _record_telegram_run_report(
         min_conf=min_conf,
         dynamic_min_conf=dynamic_min_conf,
         candidates=candidates,
+        raw_candidates=raw_candidates,
         sent_candidates=sent_candidates,
         daily_pick_sent=daily_pick_sent,
         daily_summary_sent=daily_summary_sent,

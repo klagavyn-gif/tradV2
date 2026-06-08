@@ -3254,6 +3254,7 @@ def _resolve_live_ai_model_path():
         return os.path.normpath(configured)
 
     candidate_paths = [
+        os.path.join(project_root, ".data", "research", "live", "phase3_meta_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3", "phase3_meta_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_local_tiny", "phase3_meta_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase1_local", ".data", "research", "phase3_local_tiny", "phase3_meta_model.joblib"),

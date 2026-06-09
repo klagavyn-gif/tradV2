@@ -6,3 +6,5 @@ certifi
 pytz
 curl_cffi
 requests
+joblib
+scikit-learn

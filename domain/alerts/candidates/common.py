@@ -36,6 +36,37 @@ def _normalize_ai_decision(value):
     return None
 
 
+def _runtime_ai_dispatch_profile(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    status = str(candidate.get("ai_runtime_status") or "").strip().lower()
+    reason_text = str(candidate.get("ai_runtime_reason") or "").strip()
+    if not status:
+        return None
+    if status == "scored":
+        return None
+
+    mapping = {
+        "disabled": ("disabled", "AI-Disabled", "⚪", "AI scorer ถูกปิดสำหรับรอบนี้"),
+        "model_unavailable": ("unavailable", "AI-Unavailable", "⚪", "รอบนี้ยังโหลด model ไม่สำเร็จ"),
+        "not_allowed": ("not_scored", "AI-Not-Scored", "⚪", "alert นี้อยู่นอก scope ของ model ปัจจุบัน"),
+        "score_failed": ("error", "AI-Score-Failed", "⚪", "รอบนี้ score ไม่สำเร็จ ใช้ rule เดิมแทน"),
+    }
+    bucket, label, icon, default_reason = mapping.get(
+        status,
+        ("unknown", "AI-Unknown", "⚪", "ยังไม่มีผล AI สำหรับ alert นี้"),
+    )
+    return {
+        "bucket": bucket,
+        "label": label,
+        "icon": icon,
+        "reason": reason_text or default_reason,
+        "prob_win": None,
+        "expected_return_pct": None,
+        "rank_adjustment": 0.0,
+    }
+
+
 def resolve_ai_dispatch_profile(candidate, *, config):
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_FILTER_ENABLE", True)):
         return None
@@ -45,7 +76,7 @@ def resolve_ai_dispatch_profile(candidate, *, config):
     expected_return = _safe_float(candidate.get("ai_expected_return_pct"), None)
     explicit_decision = _normalize_ai_decision(candidate.get("ai_decision"))
     if explicit_decision is None and prob_win is None and expected_return is None:
-        return None
+        return _runtime_ai_dispatch_profile(candidate)
 
     confirmed_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_CONFIRMED_THRESHOLD", 0.60), 0.60)
     neutral_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_NEUTRAL_THRESHOLD", 0.45), 0.45)
@@ -98,6 +129,10 @@ def _append_ai_message_line(message, profile, *, config):
         parts.append(f"pWin {prob_win * 100.0:.0f}%")
     if expected_return is not None:
         parts.append(f"Exp {expected_return:+.2f}%")
+    if prob_win is None and expected_return is None:
+        reason = str(profile.get("reason") or "").strip()
+        if reason:
+            parts.append(reason)
     line = "<b>🤖 AI:</b> " + " | ".join(parts)
     return message.rstrip() + "\n" + line
 

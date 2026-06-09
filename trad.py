@@ -3272,6 +3272,14 @@ def _resolve_live_ai_model_path():
     return existing[0][1]
 
 
+def _set_candidate_ai_runtime(candidate, status, reason=None):
+    if not isinstance(candidate, dict):
+        return candidate
+    candidate["ai_runtime_status"] = str(status or "").strip().lower() or None
+    candidate["ai_runtime_reason"] = str(reason or "").strip() or None
+    return candidate
+
+
 def _load_live_ai_model_bundle():
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_LIVE_ENABLE", True)):
         return None
@@ -3404,14 +3412,45 @@ def _candidate_allowed_for_live_ai(candidate, bundle):
     return True
 
 
+def _candidate_live_ai_scope_reason(candidate, bundle):
+    if not isinstance(candidate, dict) or not isinstance(bundle, dict):
+        return "invalid_candidate_or_bundle"
+    strategy = _safe_upper_text(candidate.get("strategy"), "")
+    candidate_group = _infer_candidate_group(candidate)
+
+    configured_strategies = set(getattr(config, "TELEGRAM_ALERT_AI_LIVE_STRATEGIES", set()) or set())
+    if configured_strategies and strategy not in configured_strategies:
+        return f"strategy_out_of_scope:{strategy.lower() or 'unknown'}"
+
+    configured_groups = set(getattr(config, "TELEGRAM_ALERT_AI_LIVE_GROUPS", set()) or set())
+    if configured_groups and candidate_group not in configured_groups:
+        return f"group_out_of_scope:{candidate_group.lower() or 'unknown'}"
+
+    metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    trained_strategies = {_safe_upper_text(value, "") for value in list(metadata.get("strategies") or []) if _safe_upper_text(value, "")}
+    if trained_strategies and strategy not in trained_strategies:
+        return f"strategy_not_in_model:{strategy.lower() or 'unknown'}"
+
+    trained_groups = {_safe_upper_text(value, "") for value in list(metadata.get("groups") or []) if _safe_upper_text(value, "")}
+    if trained_groups and candidate_group not in trained_groups:
+        return f"group_not_in_model:{candidate_group.lower() or 'unknown'}"
+    return None
+
+
 def _score_candidate_with_live_ai(candidate):
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_LIVE_ENABLE", True)):
+        _set_candidate_ai_runtime(candidate, "disabled", "live_ai_disabled")
         return candidate
     if not isinstance(candidate, dict):
         return candidate
 
     bundle = _load_live_ai_model_bundle()
-    if not isinstance(bundle, dict) or not _candidate_allowed_for_live_ai(candidate, bundle):
+    if not isinstance(bundle, dict):
+        _set_candidate_ai_runtime(candidate, "model_unavailable", "model_bundle_not_loaded")
+        return candidate
+    scope_reason = _candidate_live_ai_scope_reason(candidate, bundle)
+    if scope_reason:
+        _set_candidate_ai_runtime(candidate, "not_allowed", scope_reason)
         return candidate
 
     try:
@@ -3445,8 +3484,10 @@ def _score_candidate_with_live_ai(candidate):
             candidate["ai_expected_return_pct"] = float(expected_return)
         candidate["ai_model_type"] = str(bundle.get("model_type") or "phase3_meta_trader")
         candidate["ai_model_trained_at"] = str(bundle.get("trained_at") or "").strip() or None
+        _set_candidate_ai_runtime(candidate, "scored", "ok")
         return candidate
     except Exception as exc:
+        _set_candidate_ai_runtime(candidate, "score_failed", str(exc))
         logger.debug("Live AI scoring skipped for %s: %s", candidate.get("symbol"), exc)
         return candidate
 

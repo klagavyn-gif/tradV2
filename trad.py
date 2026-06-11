@@ -1907,6 +1907,8 @@ def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_labe
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
     reversal_triggers = {"CDC_RED_REVERSAL", "TREND_ROLLOVER"}
+    continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+    continuation_reason = str(plan.get("sell_continuation_override_reason") or "").strip()
 
     if "daily trend" in mode_text:
         action_code = f"BIAS {signal_text}"
@@ -1919,6 +1921,14 @@ def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_labe
             note_text = "แต่ Forecast ยังสวนทาง ควรรอแท่งยืนยันเพิ่มหรือใช้ขนาดไม้เล็กลง"
         else:
             note_text = "ถ้ามี Short เดิม ควรปิด Short ก่อนแล้วค่อยเปิด BUY"
+    elif continuation_mode == "entry":
+        action_code = "ENTRY SHORT"
+        primary_text = "โครงสร้างยังลงต่อ สามารถกด SELL/Short ตามแผนได้ถ้ารับความเสี่ยงตาม SL นี้ได้"
+        note_text = continuation_reason or "แม้ trigger เดิมเป็น time stop แต่ตลาดยังอยู่ใน sell continuation"
+    elif continuation_mode == "watch":
+        action_code = "WATCH SELL"
+        primary_text = "ยังไม่เข้า รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด SELL/Short"
+        note_text = continuation_reason or "ยังเป็น sell continuation แต่ราคาเริ่มห่างหรือจังหวะยังไม่คมพอ"
     elif trigger in exit_triggers:
         action_code = "EXIT SELL"
         primary_text = "ถ้ามี BUY/Long เดิม ให้ปิดกำไรหรือปิดลดความเสี่ยงตามแผนนี้"
@@ -2793,11 +2803,17 @@ def _resolve_trade_decision_legacy(plan, *, signal=None, strategy_label=None, ac
     action_code = str((action_guidance or {}).get("action_code") or "").strip().upper()
     trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
     plan_reason = str(plan.get("reason") or "").strip().lower()
+    continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
     exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
     exit_reason_phrases = ("ถือครบ", "ปิดรอบ", "ลดการยืดเยื้อ", "close round", "time stop", "take profit", "ปิดกำไร")
     if "TREND RADAR" in strategy_text or "TRADAR" in strategy_text:
         return ("รอ", "เป็นแผนเฝ้าเข้า รอราคาเข้าโซนก่อน", "🟡")
-    if action_code.startswith("EXIT") or action_code == "SELL / RISK-OFF" or trigger in exit_triggers or any(phrase in plan_reason for phrase in exit_reason_phrases):
+    if continuation_mode not in {"entry", "watch"} and (
+        action_code.startswith("EXIT")
+        or action_code == "SELL / RISK-OFF"
+        or trigger in exit_triggers
+        or any(phrase in plan_reason for phrase in exit_reason_phrases)
+    ):
         return ("ห้ามเข้า", "เป็นสัญญาณปิดรอบหรือลดความเสี่ยง ไม่ใช่จุดเปิดไม้ใหม่", "⛔")
     guidance = _resolve_message_level_guidance(plan, signal=signal)
     if not isinstance(guidance, dict):
@@ -8896,6 +8912,42 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             conf += 6.0
         if conf > 95:
             conf = 95.0
+        sell_continuation_override_mode = None
+        sell_continuation_override_reason = None
+        continuation_enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENABLE", True))
+        continuation_time_stop_enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TIME_STOP_ENABLE", True))
+        continuation_min_conf = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", 88.0), 88.0)
+        continuation_min_forecast = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_FORECAST_SCORE", 80.0), 80.0)
+        continuation_max_distance_pct = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_PCT", 3.6), 3.6)
+        continuation_max_distance_r = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_R", 1.5), 1.5)
+        if (
+            continuation_enabled
+            and continuation_time_stop_enabled
+            and signal == "SELL"
+            and sell_trigger == "TIME_STOP"
+            and trend_bias == "ขาลง"
+            and forecast_dir == "SELL"
+            and isinstance(conf, (int, float))
+            and float(conf) >= float(continuation_min_conf)
+            and isinstance(forecast_score, (int, float))
+            and float(forecast_score) >= float(continuation_min_forecast)
+            and isinstance(entry_price, (int, float))
+            and isinstance(current_price, (int, float))
+            and isinstance(stop_loss, (int, float))
+            and not math.isclose(float(entry_price), float(stop_loss), rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            continuation_distance_pct = abs(float(current_price) - float(entry_price)) / abs(float(entry_price)) * 100.0 if float(entry_price) != 0 else None
+            continuation_risk = abs(float(entry_price) - float(stop_loss))
+            continuation_distance_r = abs(float(current_price) - float(entry_price)) / continuation_risk if continuation_risk > 0 else None
+            in_entry_window = (
+                (isinstance(continuation_distance_pct, (int, float)) and float(continuation_distance_pct) <= float(continuation_max_distance_pct))
+                or (isinstance(continuation_distance_r, (int, float)) and float(continuation_distance_r) <= float(continuation_max_distance_r))
+            )
+            sell_continuation_override_mode = "entry" if in_entry_window else "watch"
+            if sell_continuation_override_mode == "entry":
+                sell_continuation_override_reason = "ครบอายุ CDC เดิม แต่ตลาดยังลงต่อและราคายังไม่ไกลจากจุดเข้าใหม่"
+            else:
+                sell_continuation_override_reason = "ครบอายุ CDC เดิม แต่ตลาดยังลงต่อ ให้รอราคาใกล้จุดเข้าใหม่ก่อน"
         return {
             "signal": signal,
             "setup": "CDC Action Zone + Williams Vix Fix 15m",
@@ -8905,6 +8957,8 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "confidence": conf,
             "last_signal_time": last_time_str,
             "bars_since_entry": bars_since_entry,
+            "sell_continuation_override_mode": sell_continuation_override_mode,
+            "sell_continuation_override_reason": sell_continuation_override_reason,
             "is_market_top": False,
             "is_vixfix_spike": bool(vixfix_spike.iloc[-1]) if len(vixfix_spike) else False,
             "sell_trigger": sell_trigger,

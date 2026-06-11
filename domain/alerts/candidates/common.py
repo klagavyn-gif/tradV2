@@ -253,6 +253,63 @@ def _sell_continuation_entry_window_override(candidate, *, config):
     }
 
 
+def _cdc_sell_continuation_override(candidate, *, config, is_entry_window=None, distance_pct=None, distance_r=None):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENABLE", True)):
+        return None
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TIME_STOP_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    if str(candidate.get("strategy") or "").strip().upper() != "CDCVIX15":
+        return None
+    if _signal_side(candidate) != "SELL":
+        return None
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    if not isinstance(plan, dict):
+        return None
+
+    plan_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+    plan_reason = str(plan.get("sell_continuation_override_reason") or "").strip()
+    trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    if plan_mode not in {"entry", "watch"} and trigger != "TIME_STOP":
+        return None
+
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+    market_regime = str(regime.get("market_regime") or "").strip().upper()
+    side_bias = str(regime.get("side_bias") or "").strip().upper()
+    if market_regime != "TREND_DOWN" or side_bias != "SELL":
+        return None
+
+    confidence = _safe_float(candidate.get("confidence"), None)
+    min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", 88.0), 88.0)
+    if confidence is None or confidence < float(min_confidence):
+        return None
+
+    forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
+    forecast_score = _safe_float(plan.get("forecast_score"), None)
+    min_forecast_score = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_FORECAST_SCORE", 80.0), 80.0)
+    if forecast_dir != "SELL":
+        return None
+    if forecast_score is not None and forecast_score < float(min_forecast_score):
+        return None
+
+    if is_entry_window is None:
+        is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
+    if plan_mode == "entry" and is_entry_window is False:
+        plan_mode = "watch"
+    if plan_mode == "watch" and is_entry_window is True:
+        plan_mode = "entry"
+    if plan_mode not in {"entry", "watch"}:
+        plan_mode = "entry" if is_entry_window else "watch"
+
+    reason = plan_reason or (
+        f"cdc_time_stop_sell_continuation:d_pct={distance_pct},d_r={distance_r}"
+        if plan_mode == "entry"
+        else f"cdc_time_stop_sell_watch:d_pct={distance_pct},d_r={distance_r}"
+    )
+    return plan_mode, reason
+
+
 def _signal_side(candidate):
     return str((candidate or {}).get("signal") or "").strip().upper()
 
@@ -305,9 +362,19 @@ def classify_candidate_intent(candidate, *, config):
     plan_reason = str((plan or {}).get("reason") or "").strip().lower()
     if strategy in {"TRADAR15", "TRENDRADAR15", "TREND_RADAR", "TRENDSTATE15"}:
         return "watch", "strategy_watch_only"
+    is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
+    if strategy == "CDCVIX15":
+        continuation_override = _cdc_sell_continuation_override(
+            candidate,
+            config=config,
+            is_entry_window=is_entry_window,
+            distance_pct=distance_pct,
+            distance_r=distance_r,
+        )
+        if isinstance(continuation_override, tuple):
+            return continuation_override
     if trigger in _EXIT_TRIGGERS or any(phrase in plan_reason for phrase in _EXIT_REASON_PHRASES):
         return "exit", f"trigger:{trigger.lower() or 'plan_reason_exit'}"
-    is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
     if strategy == "CDCVIX15":
         if is_entry_window is None:
             return "watch", "cdc_unknown_entry_distance"

@@ -108,6 +108,7 @@ def _resolve_trade_decision(plan, *, signal=None, strategy_label=None, action_gu
     action_code = str((action_guidance or {}).get("action_code") or "").strip().upper()
     trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
     plan_reason = str(plan.get("reason") or "").strip().lower()
+    continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
     exit_triggers = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
     exit_reason_phrases = ("ถือครบ", "ปิดรอบ", "ลดการยืดเยื้อ", "close round", "time stop", "take profit", "ปิดกำไร")
 
@@ -123,7 +124,12 @@ def _resolve_trade_decision(plan, *, signal=None, strategy_label=None, action_gu
             "icon": "🟡",
             "reason": "เป็นการบอกสถานะเทรนด์ ยังไม่ใช่จุดเข้า",
         }
-    if action_code.startswith("EXIT") or action_code == "SELL / RISK-OFF" or trigger in exit_triggers or any(phrase in plan_reason for phrase in exit_reason_phrases):
+    if continuation_mode not in {"entry", "watch"} and (
+        action_code.startswith("EXIT")
+        or action_code == "SELL / RISK-OFF"
+        or trigger in exit_triggers
+        or any(phrase in plan_reason for phrase in exit_reason_phrases)
+    ):
         return {
             "label": "ห้ามเข้า",
             "icon": "⛔",

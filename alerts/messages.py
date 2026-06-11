@@ -65,9 +65,9 @@ def _harmonize_action_guidance(action_guidance, decision, *, signal=None):
 
     if label == "รอ":
         if signal_text == "SELL":
-            primary_text = "รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด SELL/Short"
+            primary_text = "ยังไม่เข้า รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด SELL/Short"
         else:
-            primary_text = "รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด BUY/Long"
+            primary_text = "ยังไม่เข้า รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด BUY/Long"
         guidance["action_code"] = f"WATCH {signal_text}"
         guidance["primary_text"] = primary_text
         guidance["note_text"] = reason or "ยังไม่ใช่จังหวะเปิดไม้ใหม่ทันที"
@@ -76,10 +76,10 @@ def _harmonize_action_guidance(action_guidance, decision, *, signal=None):
     if label == "ห้ามเข้า":
         if action_code.startswith("EXIT"):
             guidance["primary_text"] = "ถ้ามีสถานะเดิม ให้ปิดกำไรหรือปิดลดความเสี่ยงตามแผนนี้"
-            guidance["note_text"] = "ยังไม่ใช่จุดเปิดไม้ใหม่จากข้อความนี้"
+            guidance["note_text"] = "ถ้าไม่มีสถานะอยู่แล้ว ให้ข้ามข้อความนี้ ยังไม่ใช่จุดเปิดไม้ใหม่"
         elif action_code == "SELL / RISK-OFF":
             guidance["primary_text"] = "ให้มองเป็นสัญญาณลดความเสี่ยงหรือปิดสถานะเดิมก่อนเป็นหลัก"
-            guidance["note_text"] = "ยังไม่ควรกลับฝั่งเปิดไม้ใหม่ทันที"
+            guidance["note_text"] = "ถ้าไม่มีสถานะอยู่แล้ว ให้ข้ามข้อความนี้ ยังไม่ควรกลับฝั่งเปิดไม้ใหม่ทันที"
         else:
             guidance["action_code"] = f"NO ENTRY {signal_text}"
             guidance["primary_text"] = "งดเปิดไม้ใหม่จากข้อความนี้ก่อน"
@@ -381,6 +381,7 @@ def _append_levels_lines(
     signal=None,
     entry_override_text=None,
     stop_label="SL",
+    plan_heading="📌 Plan",
 ):
     guidance = _resolve_level_guidance(
         plan,
@@ -407,7 +408,7 @@ def _append_levels_lines(
     if tp2_text:
         parts.append(f"TP2 {tp2_text}")
     if parts:
-        lines.append("<b>📌 Plan:</b> " + " | ".join(html_escape(part) for part in parts))
+        lines.append(f"<b>{html_escape(plan_heading)}:</b> " + " | ".join(html_escape(part) for part in parts))
     risk_parts = []
     risk_pct = guidance.get("risk_pct")
     rr1 = guidance.get("rr1")
@@ -551,12 +552,14 @@ def build_telegram_message(
         if pattern and pattern.upper() != "NONE":
             context_parts.append(f"Pattern {pattern}")
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
+    plan_heading = "📌 Plan" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 Reference Plan"
     _append_levels_lines(
         lines,
         plan=primary_plan,
         format_price_value=format_price_value,
         html_escape=html_escape,
         pick_plan_value=pick_plan_value,
+        plan_heading=plan_heading,
     )
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
@@ -598,7 +601,10 @@ def build_daily_best_pick_message(
     insert_at = 1
     if len(lines) > 1 and lines[1].startswith("<i>"):
         insert_at = 2
-    daily_lines = ["<b>🗓️ Daily Pick:</b> ตัวเด่นของวันจาก watchlist"]
+    daily_lines = [
+        "<b>🗓️ Daily Pick:</b> ตัวเด่นของวันจาก watchlist",
+        "<b>⚠️ Use:</b> เป็นตัวเด่นของรอบนี้ แต่ยังต้องยึดสถานะ เข้าได้/รอ/ห้ามเข้า ด้านล่างเป็นหลัก",
+    ]
     info_parts = []
     if mode_label:
         info_parts.append(str(mode_label))
@@ -845,12 +851,14 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         str(plan.get("trend_1h") or "").strip(),
     ]
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
+    plan_heading = "📌 Plan" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 Reference Plan"
     _append_levels_lines(
         lines,
         plan=plan,
         format_price_value=format_price_value,
         html_escape=html_escape,
         pick_plan_value=pick_plan_value,
+        plan_heading=plan_heading,
     )
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
@@ -927,7 +935,8 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
     )
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
-    _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape)
+    plan_heading = "📌 Plan" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 Reference Plan"
+    _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape, plan_heading=plan_heading)
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
 
@@ -1045,6 +1054,7 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         html_escape=html_escape,
         prefix="🏆 Ensemble",
     )
+    lines.append("<b>⚠️ Use:</b> เป็นสัญญาณที่ confluence สูง แต่ยังต้องยึดสถานะและแผนด้านล่าง ไม่ใช่คำสั่งเข้าอัตโนมัติ")
 
     if not isinstance(primary_plan, dict):
         primary_plan = pick_primary_trade_plan(
@@ -1058,12 +1068,22 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         plan=primary_plan,
         source_label="Super Signal Ensemble",
     )
-    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    decision = _append_trade_decision_lines(
+        lines,
+        plan=primary_plan,
+        html_escape=html_escape,
+        signal=signal,
+        strategy_label="Super Signal Ensemble",
+        action_guidance=action_guidance,
+        current_price=item.get("price"),
+    )
+    _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     context_parts = []
     if pattern and pattern != "None":
         context_parts.append(f"Pattern {pattern}")
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
-    _append_levels_lines(lines, plan=primary_plan, format_price_value=format_price_value, html_escape=html_escape)
+    plan_heading = "📌 Plan" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 Reference Plan"
+    _append_levels_lines(lines, plan=primary_plan, format_price_value=format_price_value, html_escape=html_escape, plan_heading=plan_heading)
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)

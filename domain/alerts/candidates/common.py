@@ -86,21 +86,21 @@ def resolve_ai_dispatch_profile(candidate, *, config):
     bucket = "neutral"
     label = "Neutral"
     icon = "🟡"
-    reason = "AI มองเป็นตัวกลาง ใช้ประกอบกับ score เดิม"
+    reason = "AI มองเป็นตัวกลาง ใช้ประกอบการตัดสินใจกับ score เดิม ไม่ใช่คำสั่งเข้าเอง"
     rank_adjustment = 0.0
 
     if explicit_decision == "entry" or (prob_win is not None and prob_win >= confirmed_threshold):
         bucket = "confirmed"
         label = "AI-Confirmed"
         icon = "🟢"
-        reason = "AI ยืนยันสัญญาณ ใช้เพิ่มน้ำหนักการจัดอันดับได้"
+        reason = "AI ช่วยยืนยันมุมมองของสัญญาณนี้ ใช้เพิ่มน้ำหนักการจัดอันดับได้ แต่ไม่ใช่คำสั่งเข้าเอง"
         if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
             rank_adjustment = float(confirmed_bonus)
     elif explicit_decision == "avoid" or (prob_win is not None and prob_win < neutral_threshold):
         bucket = "low_conviction"
         label = "Low-Conviction"
         icon = "🟠"
-        reason = "AI ยังไม่มั่นใจพอ ควรลดอันดับแต่ไม่บล็อกทิ้งทันที"
+        reason = "AI ยังไม่มั่นใจพอ ควรลดอันดับและรอการยืนยันเพิ่ม ไม่ได้แปลว่าต้องเข้าทันที"
         if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
             rank_adjustment = -abs(float(low_penalty))
 
@@ -115,6 +115,21 @@ def resolve_ai_dispatch_profile(candidate, *, config):
     }
 
 
+def _ai_message_role_text(profile):
+    if not isinstance(profile, dict):
+        return None
+    bucket = str(profile.get("bucket") or "").strip().lower()
+    if bucket == "confirmed":
+        return "ช่วยยืนยันมุมมอง ไม่ใช่คำสั่งเข้าเอง"
+    if bucket == "neutral":
+        return "ใช้ประกอบการตัดสินใจร่วมกับแผนหลัก"
+    if bucket == "low_conviction":
+        return "เตือนว่าความมั่นใจยังต่ำ ควรรอยืนยันเพิ่ม"
+    if bucket in {"disabled", "unavailable", "not_scored", "error", "unknown"}:
+        return "ไม่มีคะแนน AI พร้อมใช้ในรอบนี้"
+    return None
+
+
 def _append_ai_message_line(message, profile, *, config):
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_MESSAGE_ENABLE", True)):
         return message
@@ -123,6 +138,9 @@ def _append_ai_message_line(message, profile, *, config):
     if "🤖 AI:" in message:
         return message
     parts = [str(profile.get("label") or "Neutral")]
+    role_text = _ai_message_role_text(profile)
+    if role_text:
+        parts.append(role_text)
     prob_win = _safe_float(profile.get("prob_win"), None)
     expected_return = _safe_float(profile.get("expected_return_pct"), None)
     if prob_win is not None:

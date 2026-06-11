@@ -3732,7 +3732,8 @@ def _score_candidate_with_live_entry_ai(candidate):
         predicted = classifier.predict_proba(frame)
         if not len(predicted):
             return candidate
-        classes = [str(value) for value in list(getattr(classifier, "classes_", []) or [])]
+        raw_classes = getattr(classifier, "classes_", None)
+        classes = [str(value) for value in list(raw_classes)] if raw_classes is not None else []
         prob_map = {}
         for label in ("entry", "watch", "avoid"):
             if label in classes:

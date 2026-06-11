@@ -44,13 +44,59 @@ def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, ht
         lines.append(f"<b>{prefix}:</b> " + " | ".join(html_escape(part) for part in parts))
 
 
-def _append_action_lines(lines, action_guidance, *, html_escape):
-    if not isinstance(action_guidance, dict):
+def _harmonize_action_guidance(action_guidance, decision, *, signal=None):
+    guidance = dict(action_guidance) if isinstance(action_guidance, dict) else {}
+    decision = decision if isinstance(decision, dict) else {}
+    label = str(decision.get("label") or "").strip()
+    reason = str(decision.get("reason") or "").strip()
+    action_code = str(guidance.get("action_code") or "").strip().upper()
+    signal_text = _normalize_signal(signal or guidance.get("signal") or "BUY")
+
+    if label == "เข้าได้":
+        if signal_text == "SELL":
+            guidance["action_code"] = "ENTRY SHORT"
+            guidance["primary_text"] = "ถ้ายังไม่มีสถานะ สามารถกด SELL/Short ตามแผนได้"
+            guidance.setdefault("note_text", "ถ้ามี BUY เดิม ควรปิด BUY ก่อนแล้วค่อยเปิด SELL/Short")
+        else:
+            guidance["action_code"] = "ENTRY BUY"
+            guidance["primary_text"] = "ถ้ายังไม่มีสถานะ สามารถกด BUY/Long ตามแผนได้"
+            guidance.setdefault("note_text", "ถ้ามี Short เดิม ควรปิด Short ก่อนแล้วค่อยเปิด BUY/Long")
+        return guidance
+
+    if label == "รอ":
+        if signal_text == "SELL":
+            primary_text = "รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด SELL/Short"
+        else:
+            primary_text = "รอราคาเข้าใกล้จุดเข้า หรือรอแท่งยืนยันก่อนค่อยเปิด BUY/Long"
+        guidance["action_code"] = f"WATCH {signal_text}"
+        guidance["primary_text"] = primary_text
+        guidance["note_text"] = reason or "ยังไม่ใช่จังหวะเปิดไม้ใหม่ทันที"
+        return guidance
+
+    if label == "ห้ามเข้า":
+        if action_code.startswith("EXIT"):
+            guidance["primary_text"] = "ถ้ามีสถานะเดิม ให้ปิดกำไรหรือปิดลดความเสี่ยงตามแผนนี้"
+            guidance["note_text"] = "ยังไม่ใช่จุดเปิดไม้ใหม่จากข้อความนี้"
+        elif action_code == "SELL / RISK-OFF":
+            guidance["primary_text"] = "ให้มองเป็นสัญญาณลดความเสี่ยงหรือปิดสถานะเดิมก่อนเป็นหลัก"
+            guidance["note_text"] = "ยังไม่ควรกลับฝั่งเปิดไม้ใหม่ทันที"
+        else:
+            guidance["action_code"] = f"NO ENTRY {signal_text}"
+            guidance["primary_text"] = "งดเปิดไม้ใหม่จากข้อความนี้ก่อน"
+            guidance["note_text"] = reason or "รอแผนที่มี Entry/SL/TP ชัดกว่านี้ก่อน"
+        return guidance
+
+    return guidance
+
+
+def _append_action_lines(lines, action_guidance, *, html_escape, decision=None, signal=None):
+    guidance = _harmonize_action_guidance(action_guidance, decision, signal=signal)
+    if not isinstance(guidance, dict):
         return
-    action_text = str(action_guidance.get("primary_text") or "").strip()
+    action_text = str(guidance.get("primary_text") or "").strip()
     if action_text:
         lines.append("<b>🎯 Action:</b> " + html_escape(action_text))
-    note_text = str(action_guidance.get("note_text") or "").strip()
+    note_text = str(guidance.get("note_text") or "").strip()
     if note_text:
         lines.append("<b>⚠️ Note:</b> " + html_escape(note_text))
 
@@ -159,6 +205,7 @@ def _append_trade_decision_lines(lines, *, plan, html_escape, signal=None, strat
         lines.append(f"<b>🚦 สถานะ:</b> {html_escape(icon + ' ' + label)}")
     if reason:
         lines.append("<b>📝 Decision:</b> " + html_escape(reason))
+    return decision
 
 
 def _resolve_plan_value(plan, pick_plan_value, keys):
@@ -485,7 +532,7 @@ def build_telegram_message(
         mode_label=mode_label,
         source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
     )
-    _append_trade_decision_lines(
+    decision = _append_trade_decision_lines(
         lines,
         plan=primary_plan,
         html_escape=html_escape,
@@ -494,7 +541,7 @@ def build_telegram_message(
         action_guidance=action_guidance,
         current_price=item.get("price"),
     )
-    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     context_parts = []
     if isinstance(primary_plan, dict):
         source_label = get_plan_label(primary_plan, item)
@@ -780,7 +827,7 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         plan=plan,
         source_label="Price Action 15m",
     )
-    _append_trade_decision_lines(
+    decision = _append_trade_decision_lines(
         lines,
         plan=plan,
         html_escape=html_escape,
@@ -789,7 +836,7 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         action_guidance=action_guidance,
         current_price=item.get("price"),
     )
-    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
 
     context_parts = [
         str(plan.get("setup_label") or "").strip(),
@@ -869,7 +916,7 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         html_escape=html_escape,
     )
     action_guidance = build_trade_action_guidance(signal, plan=plan, source_label="Trend Breakout 15m")
-    _append_trade_decision_lines(
+    decision = _append_trade_decision_lines(
         lines,
         plan=plan,
         html_escape=html_escape,
@@ -878,7 +925,7 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         action_guidance=action_guidance,
         current_price=plan.get("current_price", item.get("price")),
     )
-    _append_action_lines(lines, action_guidance, html_escape=html_escape)
+    _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
     _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape)
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)

@@ -172,6 +172,131 @@ def attach_ai_dispatch_context(candidate, *, config):
     return candidate
 
 
+def _runtime_entry_ai_profile(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    status = str(candidate.get("entry_ai_runtime_status") or "").strip().lower()
+    reason_text = str(candidate.get("entry_ai_runtime_reason") or "").strip()
+    if not status:
+        return None
+    if status == "scored":
+        return None
+    mapping = {
+        "disabled": ("disabled", "ยังไม่มีผล", "⚪", "Entry AI ถูกปิดสำหรับรอบนี้"),
+        "model_unavailable": ("unavailable", "ยังไม่มีผล", "⚪", "รอบนี้ยังโหลด Entry AI model ไม่สำเร็จ"),
+        "not_allowed": ("not_scored", "ยังไม่มีผล", "⚪", "alert นี้อยู่นอก scope ของ Entry AI ปัจจุบัน"),
+        "score_failed": ("error", "ยังไม่มีผล", "⚪", "รอบนี้ Entry AI score ไม่สำเร็จ ใช้ rule เดิมแทน"),
+    }
+    bucket, label, icon, default_reason = mapping.get(
+        status,
+        ("unknown", "ยังไม่มีผล", "⚪", "ยังไม่มีผล Entry AI สำหรับ alert นี้"),
+    )
+    return {
+        "bucket": bucket,
+        "label": label,
+        "icon": icon,
+        "reason": reason_text or default_reason,
+        "prob_entry": None,
+        "prob_watch": None,
+        "prob_avoid": None,
+        "rank_adjustment": 0.0,
+    }
+
+
+def resolve_entry_ai_profile(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return None
+    prob_entry = _safe_float(candidate.get("entry_ai_prob_entry"), None)
+    prob_watch = _safe_float(candidate.get("entry_ai_prob_watch"), None)
+    prob_avoid = _safe_float(candidate.get("entry_ai_prob_avoid"), None)
+    explicit_bucket = str(candidate.get("entry_ai_bucket") or "").strip().lower()
+    if not explicit_bucket and prob_entry is None and prob_watch is None and prob_avoid is None:
+        return _runtime_entry_ai_profile(candidate)
+
+    entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", 0.45), 0.45)
+    avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", 0.55), 0.55)
+    entry_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_SCORE_BONUS", 4.0), 4.0)
+    avoid_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_SCORE_PENALTY", 1.5), 1.5)
+
+    bucket = explicit_bucket or "watch"
+    if isinstance(prob_avoid, float) and prob_avoid >= avoid_threshold:
+        bucket = "avoid"
+    elif isinstance(prob_entry, float) and prob_entry >= entry_threshold:
+        bucket = "entry"
+    elif bucket not in {"entry", "watch", "avoid"}:
+        bucket = "watch"
+
+    label = "รอ"
+    icon = "🟡"
+    reason = "Entry AI มองว่า setup นี้ใช้เป็นแผนอ้างอิงได้ แต่ควรรอความชัดเพิ่ม"
+    rank_adjustment = 0.0
+    if bucket == "entry":
+        label = "เข้าได้"
+        icon = "🟢"
+        reason = "Entry AI มองว่าจุดเข้าเริ่มพร้อม ใช้เพิ่มน้ำหนักการจัดอันดับได้ แต่ยังไม่ block เอง"
+        if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
+            rank_adjustment = float(entry_bonus)
+    elif bucket == "avoid":
+        label = "ห้ามเข้า"
+        icon = "⛔"
+        reason = "Entry AI มองว่าจุดเข้ายังไม่คุ้ม ควรลดอันดับ แต่ยังไม่ block สัญญาณอัตโนมัติ"
+        if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
+            rank_adjustment = -abs(float(avoid_penalty))
+
+    return {
+        "bucket": bucket,
+        "label": label,
+        "icon": icon,
+        "reason": reason,
+        "prob_entry": prob_entry,
+        "prob_watch": prob_watch,
+        "prob_avoid": prob_avoid,
+        "rank_adjustment": float(rank_adjustment),
+    }
+
+
+def _append_entry_ai_message_line(message, profile, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_MESSAGE_ENABLE", True)):
+        return message
+    if not isinstance(message, str) or not message.strip() or not isinstance(profile, dict):
+        return message
+    if "🧠 Entry AI:" in message:
+        return message
+    parts = [str(profile.get("label") or "รอ")]
+    prob_entry = _safe_float(profile.get("prob_entry"), None)
+    prob_watch = _safe_float(profile.get("prob_watch"), None)
+    prob_avoid = _safe_float(profile.get("prob_avoid"), None)
+    if prob_entry is not None:
+        parts.append(f"เข้าได้ {prob_entry * 100.0:.0f}%")
+    if prob_watch is not None:
+        parts.append(f"รอ {prob_watch * 100.0:.0f}%")
+    if prob_avoid is not None:
+        parts.append(f"ห้ามเข้า {prob_avoid * 100.0:.0f}%")
+    reason = str(profile.get("reason") or "").strip()
+    if reason:
+        parts.append(reason)
+    line = "<b>🧠 Entry AI:</b> " + " | ".join(parts)
+    return message.rstrip() + "\n" + line
+
+
+def attach_entry_ai_context(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return candidate
+    profile = resolve_entry_ai_profile(candidate, config=config)
+    if not isinstance(profile, dict):
+        return candidate
+    candidate["entry_ai_bucket"] = str(profile.get("bucket") or "").strip().lower() or None
+    candidate["entry_ai_label"] = str(profile.get("label") or "").strip() or None
+    candidate["entry_ai_icon"] = str(profile.get("icon") or "").strip() or None
+    candidate["entry_ai_reason"] = str(profile.get("reason") or "").strip() or None
+    candidate["entry_ai_rank_adjustment"] = _safe_float(profile.get("rank_adjustment"), 0.0)
+    candidate["entry_ai_prob_entry"] = _safe_float(profile.get("prob_entry"), None)
+    candidate["entry_ai_prob_watch"] = _safe_float(profile.get("prob_watch"), None)
+    candidate["entry_ai_prob_avoid"] = _safe_float(profile.get("prob_avoid"), None)
+    candidate["message"] = _append_entry_ai_message_line(candidate.get("message"), profile, config=config)
+    return candidate
+
+
 def _pick_numeric(plan, keys):
     if not isinstance(plan, dict):
         return None
@@ -680,6 +805,7 @@ def finalize_candidates(context):
     candidate_alert_profile = context["helpers"]["candidate_alert_profile"]
     build_regime_alert_budget = context["helpers"]["build_regime_alert_budget"]
     score_candidate_with_live_ai = context["helpers"].get("score_candidate_with_live_ai")
+    score_candidate_with_live_entry_ai = context["helpers"].get("score_candidate_with_live_entry_ai")
 
     filtered_candidates = []
     for candidate in context["candidates"]:
@@ -702,6 +828,9 @@ def finalize_candidates(context):
             candidate = score_candidate_with_live_ai(candidate)
         candidate = attach_ai_dispatch_context(candidate, config=context["config"])
         candidate = attach_short_trade_context(candidate, config=context["config"])
+        if callable(score_candidate_with_live_entry_ai):
+            candidate = score_candidate_with_live_entry_ai(candidate)
+        candidate = attach_entry_ai_context(candidate, config=context["config"])
         if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
             context["quality_drop_counts"][str(candidate.get("short_trade_reason") or "short_trade_avoid")] += 1
             continue

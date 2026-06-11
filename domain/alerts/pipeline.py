@@ -46,6 +46,10 @@ def _primary_candidate_sort_key(candidate):
     except Exception:
         pass
     try:
+        score += float(candidate.get("entry_ai_rank_adjustment", 0.0) or 0.0)
+    except Exception:
+        pass
+    try:
         confidence = float(candidate.get("confidence", 0.0))
     except Exception:
         confidence = 0.0

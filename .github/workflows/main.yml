@@ -130,6 +130,20 @@ jobs:
       TELEGRAM_ALERT_AI_NEUTRAL_THRESHOLD: ${{ vars.TELEGRAM_ALERT_AI_NEUTRAL_THRESHOLD || '0.45' }}
       TELEGRAM_ALERT_AI_CONFIRMED_SCORE_BONUS: ${{ vars.TELEGRAM_ALERT_AI_CONFIRMED_SCORE_BONUS || '6.0' }}
       TELEGRAM_ALERT_AI_LOW_CONVICTION_SCORE_PENALTY: ${{ vars.TELEGRAM_ALERT_AI_LOW_CONVICTION_SCORE_PENALTY || '2.5' }}
+      TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE || 'true' }}
+      TELEGRAM_ALERT_ENTRY_AI_FILTER_ENABLE: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_FILTER_ENABLE || 'false' }}
+      TELEGRAM_ALERT_ENTRY_AI_MESSAGE_ENABLE: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_MESSAGE_ENABLE || 'true' }}
+      TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE || 'true' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH || '.data/research/live/phase3_entry_quality_model.joblib' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_URL: ${{ secrets.TELEGRAM_ALERT_ENTRY_AI_MODEL_URL || vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_URL || '' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN: ${{ secrets.TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN || '' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION || 'v1' }}
+      TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES || '' }}
+      TELEGRAM_ALERT_ENTRY_AI_LIVE_GROUPS: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_LIVE_GROUPS || 'PRIMARY,DAILY' }}
+      TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD || '0.45' }}
+      TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD || '0.55' }}
+      TELEGRAM_ALERT_ENTRY_AI_ENTRY_SCORE_BONUS: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_ENTRY_SCORE_BONUS || '4.0' }}
+      TELEGRAM_ALERT_ENTRY_AI_AVOID_SCORE_PENALTY: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_AVOID_SCORE_PENALTY || '1.5' }}
       TREND_RADAR_INCLUDE_WATCH: ${{ vars.TREND_RADAR_INCLUDE_WATCH || 'false' }}
       TREND_RADAR_INCLUDE_EXIT: ${{ vars.TREND_RADAR_INCLUDE_EXIT || 'false' }}
       TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE || '60.0' }}
@@ -325,11 +339,11 @@ jobs:
           restore-keys: |
             telegram-alert-history-${{ github.ref_name }}-
       - name: Restore live AI model cache
-        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' }}
+        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true' }}
         uses: actions/cache/restore@v5
         with:
           path: .data/research/live
-          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}
+          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}-${{ env.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION }}
       - name: Validate Telegram secrets
         run: |
           test -n "$TELEGRAM_BOT_TOKEN"
@@ -341,38 +355,55 @@ jobs:
         run: |
           rm -f .yf_cache/cookies.db .yf_cache/cookies.db-shm .yf_cache/cookies.db-wal
           rm -f .yf_cache/tkr-tz.db .yf_cache/tkr-tz.db-shm .yf_cache/tkr-tz.db-wal
-      - name: Prepare live AI model
-        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' }}
+      - name: Prepare live AI models
+        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true' }}
         run: |
           python - <<'PY'
           import os
           from pathlib import Path
           from urllib.request import Request, urlopen
 
-          model_path = Path(os.environ["TELEGRAM_ALERT_AI_MODEL_PATH"]).expanduser()
-          model_url = os.environ.get("TELEGRAM_ALERT_AI_MODEL_URL", "").strip()
-          model_token = os.environ.get("TELEGRAM_ALERT_AI_MODEL_TOKEN", "").strip()
+          def fetch_model(path_env, url_env, token_env, enable_env, label):
+              enabled = os.environ.get(enable_env, "").strip().lower() == "true"
+              if not enabled:
+                  print(f"{label} disabled; skip model fetch.")
+                  return
+              model_path = Path(os.environ[path_env]).expanduser()
+              model_url = os.environ.get(url_env, "").strip()
+              model_token = os.environ.get(token_env, "").strip()
+              if model_path.exists() and model_path.stat().st_size > 0:
+                  print(f"Using cached {label}: {model_path}")
+                  return
+              if not model_url:
+                  print(f"No {url_env} configured; {label} stays in safe no-op mode.")
+                  return
+              model_path.parent.mkdir(parents=True, exist_ok=True)
+              headers = {"User-Agent": "tradV2-live-ai-fetch/1.0"}
+              if model_token:
+                  headers["Authorization"] = f"Bearer {model_token}"
+                  headers["Accept"] = "application/octet-stream"
+              request = Request(model_url, headers=headers)
+              with urlopen(request, timeout=45) as response:
+                  payload = response.read()
+              if not payload:
+                  raise RuntimeError(f"Downloaded {label} is empty")
+              model_path.write_bytes(payload)
+              print(f"Downloaded {label} to {model_path} ({len(payload)} bytes)")
 
-          if model_path.exists() and model_path.stat().st_size > 0:
-              print(f"Using cached live AI model: {model_path}")
-              raise SystemExit(0)
-
-          if not model_url:
-              print("No TELEGRAM_ALERT_AI_MODEL_URL configured; live AI scorer stays in safe no-op mode.")
-              raise SystemExit(0)
-
-          model_path.parent.mkdir(parents=True, exist_ok=True)
-          headers = {"User-Agent": "tradV2-live-ai-fetch/1.0"}
-          if model_token:
-              headers["Authorization"] = f"Bearer {model_token}"
-              headers["Accept"] = "application/octet-stream"
-          request = Request(model_url, headers=headers)
-          with urlopen(request, timeout=45) as response:
-              payload = response.read()
-          if not payload:
-              raise RuntimeError("Downloaded live AI model is empty")
-          model_path.write_bytes(payload)
-          print(f"Downloaded live AI model to {model_path} ({len(payload)} bytes)")
+          fetch_model(
+              "TELEGRAM_ALERT_AI_MODEL_PATH",
+              "TELEGRAM_ALERT_AI_MODEL_URL",
+              "TELEGRAM_ALERT_AI_MODEL_TOKEN",
+              "TELEGRAM_ALERT_AI_LIVE_ENABLE",
+              "live AI model",
+          )
+          fetch_model(
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH",
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_URL",
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN",
+              "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE",
+              "live Entry AI model",
+          )
           PY
       - name: Auto tune Telegram thresholds
         run: |
@@ -397,8 +428,8 @@ jobs:
           path: .data/telegram_alerts
           key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
       - name: Save live AI model cache
-        if: ${{ always() && env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' }}
+        if: ${{ always() && (env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true') }}
         uses: actions/cache/save@v5
         with:
           path: .data/research/live
-          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}
+          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}-${{ env.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION }}

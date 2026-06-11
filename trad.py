@@ -151,6 +151,13 @@ _LIVE_AI_MODEL_CACHE = {
     "bundle": None,
     "error": None,
 }
+_ENTRY_LIVE_AI_MODEL_LOCK = threading.Lock()
+_ENTRY_LIVE_AI_MODEL_CACHE = {
+    "path": None,
+    "mtime": None,
+    "bundle": None,
+    "error": None,
+}
 
 
 class _TTLCache:
@@ -3341,11 +3348,45 @@ def _resolve_live_ai_model_path():
     return existing[0][1]
 
 
+def _resolve_live_entry_ai_model_path():
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    configured = str(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH", "") or "").strip()
+    if configured:
+        if not os.path.isabs(configured):
+            configured = os.path.join(project_root, configured)
+        return os.path.normpath(configured)
+
+    candidate_paths = [
+        os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase3_entry_quality", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase3_entry_quality_local", "phase3_entry_quality_model.joblib"),
+    ]
+    existing = []
+    for path in candidate_paths:
+        try:
+            if os.path.exists(path):
+                existing.append((os.path.getmtime(path), os.path.normpath(path)))
+        except Exception:
+            continue
+    if not existing:
+        return None
+    existing.sort(reverse=True)
+    return existing[0][1]
+
+
 def _set_candidate_ai_runtime(candidate, status, reason=None):
     if not isinstance(candidate, dict):
         return candidate
     candidate["ai_runtime_status"] = str(status or "").strip().lower() or None
     candidate["ai_runtime_reason"] = str(reason or "").strip() or None
+    return candidate
+
+
+def _set_candidate_entry_ai_runtime(candidate, status, reason=None):
+    if not isinstance(candidate, dict):
+        return candidate
+    candidate["entry_ai_runtime_status"] = str(status or "").strip().lower() or None
+    candidate["entry_ai_runtime_reason"] = str(reason or "").strip() or None
     return candidate
 
 
@@ -3400,6 +3441,57 @@ def _load_live_ai_model_bundle():
             return None
 
 
+def _load_live_entry_ai_model_bundle():
+    if not bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE", True)):
+        return None
+    model_path = _resolve_live_entry_ai_model_path()
+    if not model_path or not os.path.exists(model_path):
+        return None
+    try:
+        model_mtime = os.path.getmtime(model_path)
+    except Exception:
+        return None
+
+    with _ENTRY_LIVE_AI_MODEL_LOCK:
+        cached_path = _ENTRY_LIVE_AI_MODEL_CACHE.get("path")
+        cached_mtime = _ENTRY_LIVE_AI_MODEL_CACHE.get("mtime")
+        cached_bundle = _ENTRY_LIVE_AI_MODEL_CACHE.get("bundle")
+        if cached_bundle is not None and cached_path == model_path and cached_mtime == model_mtime:
+            return cached_bundle
+
+        try:
+            import joblib
+
+            bundle = joblib.load(model_path)
+            feature_columns = list(bundle.get("feature_columns") or [])
+            classifier = bundle.get("classifier")
+            if not feature_columns or classifier is None:
+                raise ValueError("missing classifier or feature_columns")
+            _ENTRY_LIVE_AI_MODEL_CACHE.update(
+                {
+                    "path": model_path,
+                    "mtime": model_mtime,
+                    "bundle": bundle,
+                    "error": None,
+                }
+            )
+            logger.info("Loaded live Entry AI model from %s", model_path)
+            return bundle
+        except Exception as exc:
+            error_key = f"{model_path}|{exc}"
+            if _ENTRY_LIVE_AI_MODEL_CACHE.get("error") != error_key:
+                logger.warning("Live Entry AI scorer disabled for this run: %s", exc)
+            _ENTRY_LIVE_AI_MODEL_CACHE.update(
+                {
+                    "path": model_path,
+                    "mtime": model_mtime,
+                    "bundle": None,
+                    "error": error_key,
+                }
+            )
+            return None
+
+
 def _candidate_ai_features(candidate):
     if not isinstance(candidate, dict):
         return {}
@@ -3422,6 +3514,22 @@ def _candidate_ai_features(candidate):
         None,
     )
     source_count = _candidate_source_count(candidate)
+    entry_gap_pct = None
+    stop_risk_pct = None
+    target_reward_pct = None
+    if isinstance(entry_price, float) and entry_price:
+        if isinstance(price_at_checkpoint, float):
+            entry_gap_pct = abs(float(price_at_checkpoint) - float(entry_price)) / abs(float(entry_price)) * 100.0
+        if isinstance(stop_loss, float):
+            stop_risk_pct = abs(float(entry_price) - float(stop_loss)) / abs(float(entry_price)) * 100.0
+        if isinstance(take_profit, float):
+            target_reward_pct = abs(float(take_profit) - float(entry_price)) / abs(float(entry_price)) * 100.0
+    forecast_direction = _safe_upper_text(
+        plan.get("forecast_direction")
+        or ((item.get("price_forecast") or {}).get("direction") if isinstance(item.get("price_forecast"), dict) else "")
+        or "",
+        "",
+    )
 
     return {
         "strategy": _safe_upper_text(candidate.get("strategy"), ""),
@@ -3441,10 +3549,17 @@ def _candidate_ai_features(candidate):
         "alert_tier_score": _safe_float(profile.get("composite_score") if isinstance(profile, dict) else None, None),
         "tier_rank": _tier_rank_from_label(profile.get("tier") if isinstance(profile, dict) else None),
         "source_count": source_count,
+        "ai_dispatch_bucket": str(candidate.get("ai_dispatch_bucket") or "").strip().lower(),
+        "ai_runtime_status": str(candidate.get("ai_runtime_status") or "").strip().lower(),
+        "short_trade_bucket": str(candidate.get("short_trade_bucket") or "").strip().lower(),
+        "forecast_direction": forecast_direction,
         "backtest_win_rate_pct": _safe_float(edge_metrics.get("win_rate_pct"), None),
         "backtest_expectancy_rr": _safe_float(edge_metrics.get("expectancy_rr"), None),
         "backtest_trades": _safe_float(edge_metrics.get("trades"), None),
         "risk_reward": _safe_float(plan.get("risk_reward"), None),
+        "ai_rank_adjustment": _safe_float(candidate.get("ai_rank_adjustment"), None),
+        "short_trade_score_adjustment": _safe_float(candidate.get("short_trade_score_adjustment"), None),
+        "short_trade_regime_aligned": 1.0 if bool(candidate.get("short_trade_regime_aligned")) else 0.0,
         "adjusted_run_cap": _safe_float(candidate.get("adjusted_run_cap"), None),
         "symbol_cap": _safe_float(candidate.get("symbol_cap"), None),
         "quality_drop_confidence": _safe_float(candidate.get("quality_drop_confidence"), None),
@@ -3453,6 +3568,9 @@ def _candidate_ai_features(candidate):
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        "entry_gap_pct": entry_gap_pct,
+        "stop_risk_pct": stop_risk_pct,
+        "target_reward_pct": target_reward_pct,
     }
 
 
@@ -3492,6 +3610,31 @@ def _candidate_live_ai_scope_reason(candidate, bundle):
         return f"strategy_out_of_scope:{strategy.lower() or 'unknown'}"
 
     configured_groups = set(getattr(config, "TELEGRAM_ALERT_AI_LIVE_GROUPS", set()) or set())
+    if configured_groups and candidate_group not in configured_groups:
+        return f"group_out_of_scope:{candidate_group.lower() or 'unknown'}"
+
+    metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    trained_strategies = {_safe_upper_text(value, "") for value in list(metadata.get("strategies") or []) if _safe_upper_text(value, "")}
+    if trained_strategies and strategy not in trained_strategies:
+        return f"strategy_not_in_model:{strategy.lower() or 'unknown'}"
+
+    trained_groups = {_safe_upper_text(value, "") for value in list(metadata.get("groups") or []) if _safe_upper_text(value, "")}
+    if trained_groups and candidate_group not in trained_groups:
+        return f"group_not_in_model:{candidate_group.lower() or 'unknown'}"
+    return None
+
+
+def _candidate_live_entry_ai_scope_reason(candidate, bundle):
+    if not isinstance(candidate, dict) or not isinstance(bundle, dict):
+        return "invalid_candidate_or_bundle"
+    strategy = _safe_upper_text(candidate.get("strategy"), "")
+    candidate_group = _infer_candidate_group(candidate)
+
+    configured_strategies = set(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES", set()) or set())
+    if configured_strategies and strategy not in configured_strategies:
+        return f"strategy_out_of_scope:{strategy.lower() or 'unknown'}"
+
+    configured_groups = set(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_GROUPS", set()) or set())
     if configured_groups and candidate_group not in configured_groups:
         return f"group_out_of_scope:{candidate_group.lower() or 'unknown'}"
 
@@ -3558,6 +3701,76 @@ def _score_candidate_with_live_ai(candidate):
     except Exception as exc:
         _set_candidate_ai_runtime(candidate, "score_failed", str(exc))
         logger.debug("Live AI scoring skipped for %s: %s", candidate.get("symbol"), exc)
+        return candidate
+
+
+def _score_candidate_with_live_entry_ai(candidate):
+    if not bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE", True)):
+        _set_candidate_entry_ai_runtime(candidate, "disabled", "entry_ai_disabled")
+        return candidate
+    if not isinstance(candidate, dict):
+        return candidate
+
+    bundle = _load_live_entry_ai_model_bundle()
+    if not isinstance(bundle, dict):
+        _set_candidate_entry_ai_runtime(candidate, "model_unavailable", "model_bundle_not_loaded")
+        return candidate
+    scope_reason = _candidate_live_entry_ai_scope_reason(candidate, bundle)
+    if scope_reason:
+        _set_candidate_entry_ai_runtime(candidate, "not_allowed", scope_reason)
+        return candidate
+
+    try:
+        feature_columns = list(bundle.get("feature_columns") or [])
+        if not feature_columns:
+            return candidate
+        row = _candidate_ai_features(candidate)
+        frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
+        classifier = bundle.get("classifier")
+        if classifier is None:
+            return candidate
+        predicted = classifier.predict_proba(frame)
+        if not len(predicted):
+            return candidate
+        classes = [str(value) for value in list(getattr(classifier, "classes_", []) or [])]
+        prob_map = {}
+        for label in ("entry", "watch", "avoid"):
+            if label in classes:
+                prob_map[label] = _safe_float(predicted[0][classes.index(label)], None)
+            else:
+                prob_map[label] = None
+
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", None), None)
+        if entry_threshold is None:
+            entry_threshold = _safe_float(metadata.get("entry_threshold"), 0.45)
+        avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", None), None)
+        if avoid_threshold is None:
+            avoid_threshold = _safe_float(metadata.get("avoid_threshold"), 0.55)
+
+        ranked_labels = [(label, prob_map.get(label)) for label in ("entry", "watch", "avoid") if isinstance(prob_map.get(label), float)]
+        if not ranked_labels:
+            return candidate
+        predicted_bucket = max(ranked_labels, key=lambda item: item[1])[0]
+        if isinstance(prob_map.get("avoid"), float) and prob_map["avoid"] >= float(avoid_threshold):
+            predicted_bucket = "avoid"
+        elif isinstance(prob_map.get("entry"), float) and prob_map["entry"] >= float(entry_threshold):
+            predicted_bucket = "entry"
+        else:
+            predicted_bucket = "watch"
+
+        candidate["entry_ai_bucket"] = predicted_bucket
+        candidate["entry_ai_label"] = predicted_bucket
+        candidate["entry_ai_prob_entry"] = float(prob_map["entry"]) if isinstance(prob_map.get("entry"), float) else None
+        candidate["entry_ai_prob_watch"] = float(prob_map["watch"]) if isinstance(prob_map.get("watch"), float) else None
+        candidate["entry_ai_prob_avoid"] = float(prob_map["avoid"]) if isinstance(prob_map.get("avoid"), float) else None
+        candidate["entry_ai_model_type"] = str(bundle.get("model_type") or "phase3_entry_quality_classifier")
+        candidate["entry_ai_model_trained_at"] = str(bundle.get("trained_at") or "").strip() or None
+        _set_candidate_entry_ai_runtime(candidate, "scored", "ok")
+        return candidate
+    except Exception as exc:
+        _set_candidate_entry_ai_runtime(candidate, "score_failed", str(exc))
+        logger.debug("Live Entry AI scoring skipped for %s: %s", candidate.get("symbol"), exc)
         return candidate
 
 
@@ -4267,6 +4480,7 @@ def _pipeline_module_helpers():
         "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_alert_profile": _candidate_alert_profile,
         "score_candidate_with_live_ai": _score_candidate_with_live_ai,
+        "score_candidate_with_live_entry_ai": _score_candidate_with_live_entry_ai,
         "build_market_regime_snapshot": _build_market_regime_snapshot,
         "build_symbol_regime": _build_symbol_regime,
         "build_regime_context": _build_regime_context,

@@ -1471,6 +1471,42 @@ def _extract_walkforward_metrics(plan, optimizer_key="optimizer"):
     return metrics
 
 
+def _sell_continuation_gate_profile(plan, signal):
+    if str(signal or "").upper() != "SELL":
+        return None
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENABLE", True)):
+        return None
+    if not isinstance(plan, dict):
+        return None
+    confidence = _plan_confidence_value(plan)
+    min_confidence = getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", 88.0)
+    try:
+        min_confidence = float(min_confidence)
+    except Exception:
+        min_confidence = 88.0
+    if not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence):
+        return None
+    bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
+    max_bars_since = getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_BARS_SINCE_SIGNAL", 2)
+    try:
+        max_bars_since = int(max_bars_since)
+    except Exception:
+        max_bars_since = 2
+    if isinstance(bars_since, (int, float)) and float(bars_since) > float(max_bars_since):
+        return None
+    if "trend_alignment" in plan and not bool(plan.get("trend_alignment")):
+        return None
+    return {
+        "entry_min_wr": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_HIST_WIN_RATE", 55.0)),
+        "entry_min_trades": int(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_HIST_TRADES", 4)),
+        "entry_min_exp": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_EXPECTANCY_RR", 0.0)),
+        "walkforward_min_wr": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_WIN_RATE", 56.0)),
+        "walkforward_min_trades": int(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_VALID_TRADES", 4)),
+        "walkforward_min_exp": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_EXPECTANCY_RR", 0.01)),
+        "walkforward_min_robustness": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_ROBUSTNESS", 35.0)),
+    }
+
+
 def _evaluate_walkforward_gate(plan, signal):
     if str(signal or "").upper() not in ("BUY", "SELL"):
         return True, "not_entry_signal", {}
@@ -1500,6 +1536,12 @@ def _evaluate_walkforward_gate(plan, signal):
         min_robustness = float(min_robustness)
     except Exception:
         min_robustness = 45.0
+    continuation_profile = _sell_continuation_gate_profile(plan, signal)
+    if isinstance(continuation_profile, dict):
+        min_wr = float(continuation_profile.get("walkforward_min_wr", min_wr))
+        min_exp = float(continuation_profile.get("walkforward_min_exp", min_exp))
+        min_valid_trades = int(continuation_profile.get("walkforward_min_trades", min_valid_trades))
+        min_robustness = float(continuation_profile.get("walkforward_min_robustness", min_robustness))
     valid_trades = metrics.get("valid_trades")
     valid_wr = metrics.get("valid_win_rate_pct")
     valid_exp = metrics.get("valid_expectancy_rr")
@@ -1542,6 +1584,12 @@ def _evaluate_sell_whitelist_gate(plan):
         min_robustness = float(min_robustness)
     except Exception:
         min_robustness = 45.0
+    continuation_profile = _sell_continuation_gate_profile(plan, "SELL")
+    if isinstance(continuation_profile, dict):
+        min_wr = float(continuation_profile.get("walkforward_min_wr", min_wr))
+        min_exp = float(continuation_profile.get("walkforward_min_exp", min_exp))
+        min_valid_trades = int(continuation_profile.get("walkforward_min_trades", min_valid_trades))
+        min_robustness = float(continuation_profile.get("walkforward_min_robustness", min_robustness))
     valid_trades = metrics.get("valid_trades")
     valid_wr = metrics.get("valid_win_rate_pct")
     valid_exp = metrics.get("valid_expectancy_rr")
@@ -1579,6 +1627,11 @@ def _evaluate_entry_quality_gate(plan, signal):
         min_exp = float(min_exp)
     except Exception:
         min_exp = 0.05
+    continuation_profile = _sell_continuation_gate_profile(plan, signal)
+    if isinstance(continuation_profile, dict):
+        min_wr = float(continuation_profile.get("entry_min_wr", min_wr))
+        min_trades = int(continuation_profile.get("entry_min_trades", min_trades))
+        min_exp = float(continuation_profile.get("entry_min_exp", min_exp))
     if not isinstance(plan, dict):
         return False, "missing_plan", {}
     metrics = _extract_signal_edge_metrics(plan, signal)

@@ -200,6 +200,41 @@ def _bars_since_signal(candidate):
     return None
 
 
+def _sell_continuation_entry_window_override(candidate, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    if _signal_side(candidate) != "SELL":
+        return None
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+    market_regime = str(regime.get("market_regime") or "").strip().upper()
+    side_bias = str(regime.get("side_bias") or "").strip().upper()
+    if market_regime != "TREND_DOWN" or side_bias != "SELL":
+        return None
+    confidence = _safe_float(candidate.get("confidence"), None)
+    min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", 88.0), 88.0)
+    if confidence is None or confidence < float(min_confidence):
+        return None
+    bars_since = _bars_since_signal(candidate)
+    max_bars_since = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_BARS_SINCE_SIGNAL", 2), 2))
+    if isinstance(bars_since, float) and bars_since > float(max_bars_since):
+        return None
+    ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
+    if ai_bucket == "low_conviction":
+        return None
+    return {
+        "max_distance_pct": _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_PCT", 3.6),
+            3.6,
+        ),
+        "max_distance_r": _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_R", 1.5),
+            1.5,
+        ),
+    }
+
+
 def _signal_side(candidate):
     return str((candidate or {}).get("signal") or "").strip().upper()
 
@@ -229,6 +264,10 @@ def _within_entry_window(candidate, *, config):
     distance_pct, distance_r = _entry_distance_metrics(candidate)
     max_distance_pct = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_PCT", 2.5), 2.5)
     max_distance_r = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_R", 1.1), 1.1)
+    override = _sell_continuation_entry_window_override(candidate, config=config)
+    if isinstance(override, dict):
+        max_distance_pct = _safe_float(override.get("max_distance_pct"), max_distance_pct)
+        max_distance_r = _safe_float(override.get("max_distance_r"), max_distance_r)
     near_by_pct = isinstance(distance_pct, float) and distance_pct <= float(max_distance_pct)
     near_by_r = isinstance(distance_r, float) and distance_r <= float(max_distance_r)
     if near_by_pct or near_by_r:

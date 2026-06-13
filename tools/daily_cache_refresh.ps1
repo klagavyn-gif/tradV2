@@ -24,7 +24,7 @@ from pathlib import Path
 def main():
     root = Path(sys.argv[1]).resolve()
     days = int(sys.argv[2])
-    watchlist_arg = sys.argv[3]
+    watchlist_arg = sys.argv[3] if len(sys.argv) > 3 else ""
 
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -80,7 +80,11 @@ Write-Host "Provider: $provider"
 Write-Host ""
 
 try {
-    $output = & python $tempPy $root $Days $Watchlist 2>&1
+    $pythonArgs = @($tempPy, $root, $Days)
+    if (-not [string]::IsNullOrWhiteSpace($Watchlist)) {
+        $pythonArgs += $Watchlist
+    }
+    $output = & python @pythonArgs 2>&1
     $exitCode = $LASTEXITCODE
     $outputText = ($output | Out-String)
     $outputText | Tee-Object -FilePath $logPath

@@ -19,3 +19,4 @@ from .yahoo import (
     set_thread_curl_session,
     slice_history_by_period,
 )
+from .binance import get_binance_history

@@ -104,6 +104,7 @@ from data_layer.yahoo import (
     set_thread_curl_session as _data_set_thread_curl_session,
     slice_history_by_period as _data_slice_history_by_period,
 )
+from data_layer.binance import get_binance_history as _data_get_binance_history
 from strategies.price_action import build_price_action_plan as _strategies_build_price_action_plan
 try:
     import requests as http_requests
@@ -4747,23 +4748,50 @@ def _normalize_price_columns(df, symbol=None):
     return _data_normalize_price_columns(df, symbol=symbol, normalize_symbol_fn=normalize_symbol)
 
 
+def get_market_data_provider():
+    provider = str(getattr(config, "MARKET_DATA_PROVIDER", "yahoo") or "yahoo").strip().lower()
+    if provider in {"binance", "yahoo"}:
+        return provider
+    return "yahoo"
+
+
 def _history_store_enabled():
     return bool(getattr(config, "YF_HISTORY_STORE_ENABLE", True))
 
 
-def _history_store_dir():
-    base_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".data", "yf_history")
+def _history_store_dir(provider=None):
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    provider_text = str(provider or get_market_data_provider() or "yahoo").strip().lower() or "yahoo"
+    configured_dir = str(getattr(config, "MARKET_HISTORY_STORE_DIR", "") or "").strip()
+    if configured_dir:
+        base_dir = configured_dir if os.path.isabs(configured_dir) else os.path.join(project_root, configured_dir)
+    elif provider_text == "binance":
+        base_dir = os.path.join(project_root, ".data", "market_history", "binance")
+    else:
+        base_dir = os.path.join(project_root, ".data", "yf_history")
     os.makedirs(base_dir, exist_ok=True)
     return base_dir
 
 
-def _history_store_file_path(symbol, interval, auto_adjust):
+def get_market_history_store_dir(provider=None):
+    return _history_store_dir(provider=provider)
+
+
+def _history_store_file_path(symbol, interval, auto_adjust, provider=None):
     sym = normalize_symbol(symbol)
     interval_text = str(interval or "1d").lower()
     adj_text = "adj" if bool(auto_adjust) else "raw"
+    provider_text = str(provider or get_market_data_provider() or "yahoo").strip().lower() or "yahoo"
     safe_symbol = re.sub(r"[^A-Z0-9_-]+", "_", sym or "UNKNOWN")
-    digest = hashlib.sha1(f"{safe_symbol}|{interval_text}|{adj_text}".encode("utf-8")).hexdigest()[:10]
-    return os.path.join(_history_store_dir(), f"{safe_symbol}_{interval_text}_{adj_text}_{digest}.csv")
+    digest = hashlib.sha1(f"{provider_text}|{safe_symbol}|{interval_text}|{adj_text}".encode("utf-8")).hexdigest()[:10]
+    return os.path.join(
+        _history_store_dir(provider=provider_text),
+        f"{safe_symbol}_{interval_text}_{adj_text}_{provider_text}_{digest}.csv",
+    )
+
+
+def get_market_history_store_file_path(symbol, interval=None, auto_adjust=True, provider=None):
+    return _history_store_file_path(symbol, interval, auto_adjust, provider=provider)
 
 
 def _history_store_read(symbol, interval=None, auto_adjust=True):
@@ -5210,7 +5238,34 @@ def _fetch_yahoo_chart_history(symbol, period, interval=None, auto_adjust=True):
     )
 
 
-def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
+def get_market_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
+    provider = get_market_data_provider()
+    common_helpers = {
+        "normalize_symbol": normalize_symbol,
+        "cache_get": _YF_CACHE.get,
+        "cache_set": _YF_CACHE.set,
+        "empty_sentinel": _YF_EMPTY_SENTINEL,
+        "history_store_read": _history_store_read,
+        "history_store_merge": _history_store_merge,
+        "history_store_write": _history_store_write,
+        "normalize_price_columns": _normalize_price_columns,
+        "normalize_df_index": _normalize_df_index,
+        "slice_history_by_period": _slice_history_by_period,
+        "period_to_timedelta": _period_to_timedelta,
+        "record_source_health_event": lambda *args, **kwargs: _data_record_source_health_event(*args, config=config, **kwargs),
+        "now_getter": get_thai_now,
+    }
+    if provider == "binance":
+        return _data_get_binance_history(
+            symbol,
+            period,
+            interval=interval,
+            auto_adjust=auto_adjust,
+            cache_ttl_seconds=cache_ttl_seconds,
+            config=config,
+            logger=logger,
+            helpers=common_helpers,
+        )
     return _data_get_yf_history(
         symbol,
         period,
@@ -5220,17 +5275,8 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
         config=config,
         logger=logger,
         helpers={
-            "normalize_symbol": normalize_symbol,
-            "cache_get": _YF_CACHE.get,
-            "cache_set": _YF_CACHE.set,
-            "empty_sentinel": _YF_EMPTY_SENTINEL,
-            "history_store_read": _history_store_read,
-            "history_store_merge": _history_store_merge,
-            "history_store_write": _history_store_write,
+            **common_helpers,
             "configure_yf_tz_cache": _configure_yf_tz_cache,
-            "normalize_price_columns": _normalize_price_columns,
-            "normalize_df_index": _normalize_df_index,
-            "slice_history_by_period": _slice_history_by_period,
             "remote_history_period": _remote_history_period,
             "prefer_chart_api": _prefer_chart_api,
             "fetch_yahoo_chart_history": _fetch_yahoo_chart_history,
@@ -5238,8 +5284,17 @@ def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_se
             "is_yf_auth_error": _is_yf_auth_error,
             "clear_yf_runtime_cache": _clear_yf_runtime_cache,
             "set_thread_curl_session": _set_thread_curl_session,
-            "record_source_health_event": lambda *args, **kwargs: _data_record_source_health_event(*args, config=config, **kwargs),
         },
+    )
+
+
+def get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
+    return get_market_history(
+        symbol,
+        period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        cache_ttl_seconds=cache_ttl_seconds,
     )
 
 

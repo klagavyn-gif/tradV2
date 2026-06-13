@@ -82,7 +82,7 @@ class ReplayTTLCache:
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Replay historical Telegram alerts from cached yf history")
+    parser = argparse.ArgumentParser(description="Replay historical Telegram alerts from cached market history")
     parser.add_argument("--days", type=int, default=3)
     parser.add_argument("--step", default="1h")
     parser.add_argument("--output", default="")
@@ -100,15 +100,23 @@ def parse_watchlist(text):
     return [part for part in values if part] or list(WATCHLIST)
 
 
+def _load_trad_module(root):
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import trad
+
+    return trad
+
+
 def load_cache(root, watchlist):
-    yf_dir = root / ".data" / "yf_history"
+    trad = _load_trad_module(root)
     cache = {}
     for symbol in watchlist:
         for interval in ("15m", "1h"):
-            matches = sorted(yf_dir.glob(f"{symbol}_{interval}_adj_*.csv"))
-            if not matches:
-                raise FileNotFoundError(f"Missing cache for {symbol} {interval}")
-            df = pd.read_csv(matches[0])
+            cache_path = Path(trad.get_market_history_store_file_path(symbol, interval=interval, auto_adjust=True))
+            if not cache_path.exists():
+                raise FileNotFoundError(f"Missing cache for {symbol} {interval}: {cache_path}")
+            df = pd.read_csv(cache_path)
             df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
             df = df.dropna(subset=["Datetime"]).set_index("Datetime").sort_index()
             cache[(symbol, interval)] = df
@@ -193,9 +201,7 @@ def summarize_replay(*, history, run_reports, days, step, checkpoints, watchlist
 
 
 def run_checkpoint(root, checkpoint_at, watchlist, state_rows):
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    import trad
+    trad = _load_trad_module(root)
 
     orig_build_ctx = trad._build_alert_runtime_context
     trad._build_alert_runtime_context = lambda results, min_conf, **kwargs: orig_build_ctx(results, min_conf)
@@ -206,7 +212,7 @@ def run_checkpoint(root, checkpoint_at, watchlist, state_rows):
     checkpoint_history = []
     checkpoint_reports = []
 
-    def fake_get_yf_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
+    def fake_get_market_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
         sym = trad.normalize_symbol(symbol)
         interval_text = str(interval or "15m").lower()
         if interval_text not in ("15m", "1h"):
@@ -217,7 +223,8 @@ def run_checkpoint(root, checkpoint_at, watchlist, state_rows):
         sliced = slice_df(df, period, state["now"])
         return sliced if not sliced.empty else None
 
-    trad.get_yf_history = fake_get_yf_history
+    trad.get_market_history = fake_get_market_history
+    trad.get_yf_history = fake_get_market_history
     trad.get_basic_info = lambda symbol: {
         "name": trad.normalize_symbol(symbol),
         "sector": "N/A",

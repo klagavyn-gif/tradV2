@@ -35,6 +35,11 @@ jobs:
       PYTHONUNBUFFERED: "1"
       SYMBOLS: ${{ github.event.inputs.symbols || vars.SYMBOLS || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD' }}
       PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
+      MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'yahoo' }}
+      MARKET_HISTORY_STORE_DIR: ${{ vars.MARKET_HISTORY_STORE_DIR || '' }}
+      BINANCE_DEFAULT_QUOTE: ${{ vars.BINANCE_DEFAULT_QUOTE || 'USDT' }}
+      BINANCE_KLINE_LIMIT: ${{ vars.BINANCE_KLINE_LIMIT || '1000' }}
+      BINANCE_REQUEST_TIMEOUT_SECONDS: ${{ vars.BINANCE_REQUEST_TIMEOUT_SECONDS || '20' }}
       TELEGRAM_ALERT_MIN_CONFIDENCE: ${{ vars.TELEGRAM_ALERT_MIN_CONFIDENCE || '66' }}
       TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE: ${{ vars.TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE || '57.0' }}
       TELEGRAM_ALERT_TTL_SECONDS: ${{ vars.TELEGRAM_ALERT_TTL_SECONDS || '1800' }}
@@ -351,7 +356,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -r requirements.txt --no-input --prefer-binary
-      - name: Reset yfinance runtime cache
+      - name: Reset market data runtime cache
         run: |
           rm -f .yf_cache/cookies.db .yf_cache/cookies.db-shm .yf_cache/cookies.db-wal
           rm -f .yf_cache/tkr-tz.db .yf_cache/tkr-tz.db-shm .yf_cache/tkr-tz.db-wal

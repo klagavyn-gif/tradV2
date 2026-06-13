@@ -4,6 +4,7 @@ __pycache__/
 .yf_cache/
 .data/telegram_alerts/
 .data/yf_history/
+.data/market_history/
 .data/research/
 .git.broken
 

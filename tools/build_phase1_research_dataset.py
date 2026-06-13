@@ -68,7 +68,7 @@ def build_parser():
     parser.add_argument(
         "--refresh-cache",
         action="store_true",
-        help="Refresh local Yahoo cache before replay using the project's live fetcher",
+        help="Refresh local market cache before replay using the project's live fetcher",
     )
     parser.add_argument(
         "--allow-partial-coverage",
@@ -100,15 +100,23 @@ def resolve_output_dir(root, output_dir):
     return path if path.is_absolute() else (root / path)
 
 
+def _load_trad_module(root):
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    import trad
+
+    return trad
+
+
 def load_cache(root, watchlist):
-    yf_dir = root / ".data" / "yf_history"
+    trad = _load_trad_module(root)
     cache = {}
     for symbol in watchlist:
         for interval in ("15m", "1h"):
-            matches = sorted(yf_dir.glob(f"{symbol}_{interval}_adj_*.csv"))
-            if not matches:
-                raise FileNotFoundError(f"Missing cache for {symbol} {interval}")
-            df = pd.read_csv(matches[0])
+            cache_path = Path(trad.get_market_history_store_file_path(symbol, interval=interval, auto_adjust=True))
+            if not cache_path.exists():
+                raise FileNotFoundError(f"Missing cache for {symbol} {interval}: {cache_path}")
+            df = pd.read_csv(cache_path)
             df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
             df = df.dropna(subset=["Datetime"]).set_index("Datetime").sort_index()
             cache[(symbol, interval)] = df
@@ -137,12 +145,12 @@ def _period_for_days(days):
 
 
 def refresh_cache(root, watchlist, days):
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
-    import trad
+    trad = _load_trad_module(root)
+    provider = str(trad.get_market_data_provider())
+    intraday_days = int(days or 1) if provider == "binance" else min(int(days or 1), 60)
 
     periods = {
-        "15m": _period_for_days(min(int(days or 1), 60)),
+        "15m": _period_for_days(intraday_days),
         "1h": _period_for_days(days),
     }
     refreshed = []
@@ -154,6 +162,7 @@ def refresh_cache(root, watchlist, days):
                     "symbol": symbol,
                     "interval": interval,
                     "period": period,
+                    "provider": provider,
                     "rows": int(len(df)) if isinstance(df, pd.DataFrame) else 0,
                 }
             )

@@ -2,6 +2,7 @@ import json
 import re
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -74,6 +75,35 @@ def _period_start_ms(period, *, period_to_timedelta_fn, now_getter=None):
     return int(start_dt.timestamp() * 1000.0)
 
 
+def _http_error_status(exc):
+    try:
+        return int(getattr(exc, "code", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _http_error_detail(exc):
+    parts = []
+    status = _http_error_status(exc)
+    if status > 0:
+        parts.append(f"http_{status}")
+    reason = str(getattr(exc, "reason", "") or "").strip()
+    if reason:
+        parts.append(reason)
+    try:
+        payload = exc.read()
+    except Exception:
+        payload = b""
+    if isinstance(payload, bytes) and payload:
+        try:
+            text = payload.decode("utf-8", errors="replace").strip()
+        except Exception:
+            text = ""
+        if text:
+            parts.append(text[:240])
+    return " | ".join(part for part in parts if part) or str(exc)
+
+
 def _request_klines(symbol, *, interval, start_ms, end_ms, limit, timeout_seconds):
     params = {
         "symbol": symbol,
@@ -139,6 +169,7 @@ def get_binance_history(
     slice_history_by_period_fn = helpers["slice_history_by_period"]
     period_to_timedelta_fn = helpers["period_to_timedelta"]
     record_source_health_event_fn = helpers["record_source_health_event"]
+    yahoo_fallback_history_fn = helpers.get("yahoo_fallback_history")
     now_getter = helpers.get("now_getter")
 
     sym = normalize_symbol_fn(symbol)
@@ -182,6 +213,7 @@ def get_binance_history(
     cursor_ms = int(start_ms)
     request_count = 0
     fetch_started = time.perf_counter()
+    blocked_http_error = None
     try:
         while cursor_ms < end_ms:
             page = _request_klines(
@@ -233,6 +265,20 @@ def get_binance_history(
             detail=f"requests={request_count}",
             elapsed_ms=elapsed_ms,
         )
+    except HTTPError as exc:
+        blocked_http_error = exc if _http_error_status(exc) == 451 else None
+        detail = _http_error_detail(exc)
+        record_source_health_event_fn(
+            "binance_klines",
+            "error",
+            symbol=sym,
+            period=period,
+            interval=interval_text,
+            detail=detail,
+            attempt=request_count or 1,
+            elapsed_ms=(time.perf_counter() - fetch_started) * 1000.0,
+        )
+        logger.warning("Binance history fetch failed for %s (%s): %s", sym, interval_text, detail)
     except Exception as exc:
         record_source_health_event_fn(
             "binance_klines",
@@ -245,6 +291,38 @@ def get_binance_history(
             elapsed_ms=(time.perf_counter() - fetch_started) * 1000.0,
         )
         logger.warning("Binance history fetch failed for %s (%s): %s", sym, interval_text, exc)
+
+    if blocked_http_error is not None and callable(yahoo_fallback_history_fn):
+        detail = _http_error_detail(blocked_http_error)
+        record_source_health_event_fn(
+            "binance_klines",
+            "fallback_yahoo",
+            symbol=sym,
+            period=period,
+            interval=interval_text,
+            detail=detail,
+        )
+        try:
+            yahoo_df = yahoo_fallback_history_fn(
+                sym,
+                period,
+                interval=interval,
+                auto_adjust=auto_adjust,
+                cache_ttl_seconds=cache_ttl_seconds,
+            )
+            if isinstance(yahoo_df, pd.DataFrame) and not yahoo_df.empty:
+                cache_set(key, yahoo_df, ttl_seconds=cache_ttl_seconds)
+                return yahoo_df.copy()
+        except Exception as exc:
+            record_source_health_event_fn(
+                "yahoo_fallback",
+                "error",
+                symbol=sym,
+                period=period,
+                interval=interval_text,
+                detail=str(exc),
+            )
+            logger.warning("Yahoo fallback after Binance 451 failed for %s (%s): %s", sym, interval_text, exc)
 
     if isinstance(disk_df, pd.DataFrame) and not disk_df.empty:
         sliced_disk = slice_history_by_period_fn(disk_df, period)

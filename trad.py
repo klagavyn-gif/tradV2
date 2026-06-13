@@ -4794,10 +4794,10 @@ def get_market_history_store_file_path(symbol, interval=None, auto_adjust=True, 
     return _history_store_file_path(symbol, interval, auto_adjust, provider=provider)
 
 
-def _history_store_read(symbol, interval=None, auto_adjust=True):
+def _history_store_read(symbol, interval=None, auto_adjust=True, provider=None):
     if not _history_store_enabled():
         return None
-    path = _history_store_file_path(symbol, interval, auto_adjust)
+    path = _history_store_file_path(symbol, interval, auto_adjust, provider=provider)
     if not os.path.exists(path):
         return None
     try:
@@ -4813,10 +4813,10 @@ def _history_store_read(symbol, interval=None, auto_adjust=True):
         return None
 
 
-def _history_store_write(symbol, interval, auto_adjust, df):
+def _history_store_write(symbol, interval, auto_adjust, df, provider=None):
     if not _history_store_enabled() or df is None or getattr(df, "empty", True):
         return
-    path = _history_store_file_path(symbol, interval, auto_adjust)
+    path = _history_store_file_path(symbol, interval, auto_adjust, provider=provider)
     try:
         out = df.copy()
         out = _normalize_df_index(out)
@@ -5238,6 +5238,52 @@ def _fetch_yahoo_chart_history(symbol, period, interval=None, auto_adjust=True):
     )
 
 
+def _get_yahoo_history_fallback(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
+    return _data_get_yf_history(
+        symbol,
+        period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        cache_ttl_seconds=cache_ttl_seconds,
+        config=config,
+        logger=logger,
+        helpers={
+            "normalize_symbol": normalize_symbol,
+            "cache_get": _YF_CACHE.get,
+            "cache_set": _YF_CACHE.set,
+            "empty_sentinel": _YF_EMPTY_SENTINEL,
+            "history_store_read": lambda symbol_arg, interval=None, auto_adjust=True: _history_store_read(
+                symbol_arg,
+                interval=interval,
+                auto_adjust=auto_adjust,
+                provider="yahoo",
+            ),
+            "history_store_merge": _history_store_merge,
+            "history_store_write": lambda symbol_arg, interval, auto_adjust, df: _history_store_write(
+                symbol_arg,
+                interval,
+                auto_adjust,
+                df,
+                provider="yahoo",
+            ),
+            "normalize_price_columns": _normalize_price_columns,
+            "normalize_df_index": _normalize_df_index,
+            "slice_history_by_period": _slice_history_by_period,
+            "period_to_timedelta": _period_to_timedelta,
+            "record_source_health_event": lambda *args, **kwargs: _data_record_source_health_event(*args, config=config, **kwargs),
+            "now_getter": get_thai_now,
+            "configure_yf_tz_cache": _configure_yf_tz_cache,
+            "remote_history_period": _remote_history_period,
+            "prefer_chart_api": _prefer_chart_api,
+            "fetch_yahoo_chart_history": _fetch_yahoo_chart_history,
+            "get_thread_curl_session": _get_thread_curl_session,
+            "is_yf_auth_error": _is_yf_auth_error,
+            "clear_yf_runtime_cache": _clear_yf_runtime_cache,
+            "set_thread_curl_session": _set_thread_curl_session,
+        },
+    )
+
+
 def get_market_history(symbol, period, interval=None, auto_adjust=True, cache_ttl_seconds=None):
     provider = get_market_data_provider()
     common_helpers = {
@@ -5264,7 +5310,10 @@ def get_market_history(symbol, period, interval=None, auto_adjust=True, cache_tt
             cache_ttl_seconds=cache_ttl_seconds,
             config=config,
             logger=logger,
-            helpers=common_helpers,
+            helpers={
+                **common_helpers,
+                "yahoo_fallback_history": _get_yahoo_history_fallback,
+            },
         )
     return _data_get_yf_history(
         symbol,

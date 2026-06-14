@@ -1,0 +1,219 @@
+{
+  "trained_at": "2026-06-14T16:11:18.658977Z",
+  "input_path": "E:\\TRAD\\DDD\\tradV2\\.data\\research\\phase1_binance_365_dense\\phase1_candidates.csv",
+  "artifact_path": "E:\\TRAD\\DDD\\tradV2\\.data\\research\\phase3_entry_quality_binance_365_dense\\phase3_entry_quality_model.joblib",
+  "row_count_total": 29018,
+  "row_count_usable": 29010,
+  "row_count_train": 21841,
+  "row_count_holdout": 7169,
+  "groups": [
+    "primary",
+    "trend_radar",
+    "daily"
+  ],
+  "strategies": [],
+  "entry_threshold": 0.45,
+  "avoid_threshold": 0.55,
+  "overall_label_counts": {
+    "entry": 996,
+    "watch": 1176,
+    "avoid": 26838
+  },
+  "train_label_counts": {
+    "entry": 781,
+    "watch": 914,
+    "avoid": 20146
+  },
+  "holdout_label_counts": {
+    "entry": 215,
+    "watch": 262,
+    "avoid": 6692
+  },
+  "argmax_metrics": {
+    "accuracy": 0.9384851443715999,
+    "balanced_accuracy": 0.778650651755532,
+    "macro_f1": 0.678280842465033,
+    "confusion_matrix": {
+      "labels": [
+        "entry",
+        "watch",
+        "avoid"
+      ],
+      "values": [
+        [
+          175,
+          39,
+          1
+        ],
+        [
+          113,
+          148,
+          1
+        ],
+        [
+          66,
+          221,
+          6405
+        ]
+      ]
+    },
+    "classification_report": {
+      "entry": {
+        "precision": 0.4943502824858757,
+        "recall": 0.813953488372093,
+        "f1-score": 0.6151142355008787,
+        "support": 215.0
+      },
+      "watch": {
+        "precision": 0.3627450980392157,
+        "recall": 0.5648854961832062,
+        "f1-score": 0.4417910447761194,
+        "support": 262.0
+      },
+      "avoid": {
+        "precision": 0.9996878414234431,
+        "recall": 0.9571129707112971,
+        "f1-score": 0.9779372471181006,
+        "support": 6692.0
+      },
+      "accuracy": 0.9384851443715999,
+      "macro avg": {
+        "precision": 0.6189277406495115,
+        "recall": 0.778650651755532,
+        "f1-score": 0.6782808424650328,
+        "support": 7169.0
+      },
+      "weighted avg": {
+        "precision": 0.9612547860547384,
+        "recall": 0.9384851443715999,
+        "f1-score": 0.9474619712761,
+        "support": 7169.0
+      }
+    }
+  },
+  "threshold_metrics": {
+    "accuracy": 0.9322081182870693,
+    "balanced_accuracy": 0.7661379267217027,
+    "macro_f1": 0.6467214541160964,
+    "confusion_matrix": {
+      "labels": [
+        "entry",
+        "watch",
+        "avoid"
+      ],
+      "values": [
+        [
+          204,
+          10,
+          1
+        ],
+        [
+          157,
+          104,
+          1
+        ],
+        [
+          72,
+          245,
+          6375
+        ]
+      ]
+    },
+    "classification_report": {
+      "entry": {
+        "precision": 0.47113163972286376,
+        "recall": 0.9488372093023256,
+        "f1-score": 0.6296296296296297,
+        "support": 215.0
+      },
+      "watch": {
+        "precision": 0.28969359331476324,
+        "recall": 0.3969465648854962,
+        "f1-score": 0.33494363929146537,
+        "support": 262.0
+      },
+      "avoid": {
+        "precision": 0.9996863729026187,
+        "recall": 0.9526300059772863,
+        "f1-score": 0.9755910934271941,
+        "support": 6692.0
+      },
+      "accuracy": 0.9322081182870693,
+      "macro avg": {
+        "precision": 0.5868372019800819,
+        "recall": 0.7661379267217027,
+        "f1-score": 0.6467214541160964,
+        "support": 7169.0
+      },
+      "weighted avg": {
+        "precision": 0.9578873247947005,
+        "recall": 0.9322081182870693,
+        "f1-score": 0.9418023714715466,
+        "support": 7169.0
+      }
+    }
+  },
+  "holdout_realized_by_argmax_prediction": {
+    "entry": {
+      "count": 8,
+      "win_rate_pct": 75.0,
+      "avg_return_pct": 3.448971300881511
+    },
+    "watch": {
+      "count": 11,
+      "win_rate_pct": 9.090909090909092,
+      "avg_return_pct": -0.5931867733188779
+    },
+    "avoid": {
+      "count": 181,
+      "win_rate_pct": 23.204419889502763,
+      "avg_return_pct": 1.0108699714265088
+    }
+  },
+  "holdout_realized_by_threshold_prediction": {
+    "entry": {
+      "count": 10,
+      "win_rate_pct": 70.0,
+      "avg_return_pct": 3.873193089113523
+    },
+    "watch": {
+      "count": 11,
+      "win_rate_pct": 0.0,
+      "avg_return_pct": -1.8351008853383135
+    },
+    "avoid": {
+      "count": 179,
+      "win_rate_pct": 23.463687150837988,
+      "avg_return_pct": 1.0362478188621718
+    }
+  },
+  "feature_columns": [
+    "strategy",
+    "symbol",
+    "signal",
+    "candidate_group",
+    "alert_tier",
+    "alert_intent",
+    "ai_dispatch_bucket",
+    "ai_runtime_status",
+    "short_trade_bucket",
+    "forecast_direction",
+    "confidence",
+    "score",
+    "alert_tier_score",
+    "tier_rank",
+    "source_count",
+    "backtest_win_rate_pct",
+    "backtest_expectancy_rr",
+    "backtest_trades",
+    "ai_prob_win",
+    "ai_expected_return_pct",
+    "ai_rank_adjustment",
+    "short_trade_score_adjustment",
+    "price_at_checkpoint",
+    "entry_gap_pct",
+    "stop_risk_pct",
+    "target_reward_pct",
+    "short_trade_regime_aligned"
+  ]
+}

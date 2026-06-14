@@ -3358,6 +3358,7 @@ def _resolve_live_entry_ai_model_path():
         return os.path.normpath(configured)
 
     candidate_paths = [
+        os.path.join(project_root, "models", "live", "phase3_entry_quality_model.joblib"),
         os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality", "phase3_entry_quality_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality_local", "phase3_entry_quality_model.joblib"),

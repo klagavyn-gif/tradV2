@@ -477,6 +477,218 @@ def _within_entry_window(candidate, *, config):
     return False, distance_pct, distance_r
 
 
+def _candidate_group(candidate):
+    return str((candidate or {}).get("candidate_group") or "").strip().upper()
+
+
+def _plan_price_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+    entry_price = _pick_numeric(plan, ["entry_price", "current_price", "price"])
+    current_price = _safe_float(candidate.get("price_at_checkpoint"), None)
+    if current_price is None:
+        current_price = _pick_numeric(plan, ["current_price", "price"])
+    if current_price is None and isinstance(item, dict):
+        current_price = _safe_float(item.get("current_price") or item.get("price"), None)
+    stop_loss = _pick_numeric(plan, ["stop_loss", "entry_stop_loss", "trailing_stop"])
+    take_profit = _pick_numeric(plan, ["take_profit", "take_profit_2", "exit_price"])
+    rr_value = _pick_numeric(plan, ["risk_reward", "rr", "rr_ratio"])
+
+    entry_gap_pct = None
+    stop_risk_pct = None
+    target_reward_pct = None
+    rr_ratio = None
+    if isinstance(entry_price, float) and entry_price:
+        entry_abs = abs(float(entry_price))
+        if isinstance(current_price, float):
+            entry_gap_pct = abs(float(current_price) - float(entry_price)) / entry_abs * 100.0
+        if isinstance(stop_loss, float):
+            stop_risk_pct = abs(float(entry_price) - float(stop_loss)) / entry_abs * 100.0
+        if isinstance(take_profit, float):
+            target_reward_pct = abs(float(take_profit) - float(entry_price)) / entry_abs * 100.0
+    if target_reward_pct is None and isinstance(rr_value, float) and isinstance(stop_risk_pct, float):
+        target_reward_pct = abs(float(rr_value)) * float(stop_risk_pct)
+    if isinstance(target_reward_pct, float) and isinstance(stop_risk_pct, float) and stop_risk_pct > 0:
+        rr_ratio = float(target_reward_pct) / float(stop_risk_pct)
+    elif isinstance(rr_value, float):
+        rr_ratio = abs(float(rr_value))
+    return {
+        "entry_price": entry_price,
+        "current_price": current_price,
+        "stop_loss": stop_loss,
+        "take_profit": take_profit,
+        "entry_gap_pct": entry_gap_pct,
+        "stop_risk_pct": stop_risk_pct,
+        "target_reward_pct": target_reward_pct,
+        "rr_ratio": rr_ratio,
+    }
+
+
+def resolve_sltp_live_profile(candidate, *, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SLTP_PROFILE_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    candidate_group = _candidate_group(candidate)
+    configured_strategies = set(getattr(config, "TELEGRAM_ALERT_SLTP_LIVE_STRATEGIES", set()) or set())
+    configured_groups = set(getattr(config, "TELEGRAM_ALERT_SLTP_LIVE_GROUPS", set()) or set())
+    if configured_strategies and strategy not in configured_strategies:
+        return None
+    if configured_groups and candidate_group not in configured_groups:
+        return None
+
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    signal = _signal_side(candidate)
+    if intent not in {"entry", "watch"} or signal not in {"BUY", "SELL"}:
+        return None
+
+    metrics = _plan_price_metrics(candidate)
+    entry_gap_pct = _safe_float(metrics.get("entry_gap_pct"), None)
+    stop_risk_pct = _safe_float(metrics.get("stop_risk_pct"), None)
+    target_reward_pct = _safe_float(metrics.get("target_reward_pct"), None)
+    rr_ratio = _safe_float(metrics.get("rr_ratio"), None)
+    if rr_ratio is None or target_reward_pct is None:
+        return None
+
+    max_entry_gap_pct = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_MAX_ENTRY_GAP_PCT", 0.80), 0.80)
+    hard_avoid_min_rr = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_HARD_AVOID_MIN_RR", 0.70), 0.70)
+    hard_avoid_min_target = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_HARD_AVOID_MIN_TARGET_REWARD_PCT", 0.75), 0.75)
+    premium_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_PREMIUM_SCORE_BONUS", 3.0), 3.0)
+    standard_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_STANDARD_SCORE_BONUS", 1.25), 1.25)
+    watch_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_WATCH_SCORE_PENALTY", 1.5), 1.5)
+    avoid_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_AVOID_SCORE_PENALTY", 3.0), 3.0)
+
+    side_prefix = "BUY" if signal == "BUY" else "SELL"
+    min_rr = _safe_float(getattr(config, f"TELEGRAM_ALERT_SLTP_{side_prefix}_MIN_RR", 1.0), 1.0)
+    min_target = _safe_float(getattr(config, f"TELEGRAM_ALERT_SLTP_{side_prefix}_MIN_TARGET_REWARD_PCT", 1.25), 1.25)
+    bonus_rr = _safe_float(getattr(config, f"TELEGRAM_ALERT_SLTP_{side_prefix}_BONUS_RR", 2.0), 2.0)
+    bonus_target = _safe_float(getattr(config, f"TELEGRAM_ALERT_SLTP_{side_prefix}_BONUS_TARGET_REWARD_PCT", 3.0), 3.0)
+
+    profile = {
+        "bucket": "watch",
+        "label": "SL/TP Watch",
+        "reason": "SL/TP ยังไม่เด่นพอสำหรับเพิ่มน้ำหนักรอบนี้",
+        "score_adjustment": 0.0,
+        "block": False,
+        "block_reason": None,
+        "entry_gap_pct": entry_gap_pct,
+        "stop_risk_pct": stop_risk_pct,
+        "target_reward_pct": target_reward_pct,
+        "rr_ratio": rr_ratio,
+    }
+
+    if rr_ratio < float(hard_avoid_min_rr) or target_reward_pct < float(hard_avoid_min_target):
+        profile.update(
+            {
+                "bucket": "avoid",
+                "label": "SL/TP Avoid",
+                "reason": f"{signal} reward/risk บางเกินไป (RR={rr_ratio:.2f}, target={target_reward_pct:.2f}%)",
+                "score_adjustment": -abs(float(avoid_penalty)),
+                "block": True,
+                "block_reason": f"sltp_{signal.lower()}_hard_avoid",
+            }
+        )
+        return profile
+
+    if signal == "BUY":
+        stop_min = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_BUY_PREFERRED_STOP_MIN_PCT", 0.75), 0.75)
+        stop_max = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_BUY_PREFERRED_STOP_MAX_PCT", 1.80), 1.80)
+        if (
+            rr_ratio >= float(bonus_rr)
+            and target_reward_pct >= float(bonus_target)
+            and (entry_gap_pct is None or entry_gap_pct <= min(float(max_entry_gap_pct), 0.35))
+            and (stop_risk_pct is None or (float(stop_min) <= stop_risk_pct <= float(stop_max)))
+        ):
+            profile.update(
+                {
+                    "bucket": "premium",
+                    "label": "SL/TP Premium",
+                    "reason": "BUY ได้ reward เด่นและ RR สูงพอ แม้ฝั่งนี้ต้องคัดเข้ม",
+                    "score_adjustment": float(premium_bonus),
+                }
+            )
+        elif rr_ratio >= float(min_rr) and target_reward_pct >= float(min_target) and (
+            entry_gap_pct is None or entry_gap_pct <= float(max_entry_gap_pct)
+        ):
+            profile.update(
+                {
+                    "bucket": "standard",
+                    "label": "SL/TP Standard",
+                    "reason": "BUY ยังพอถือเป็น setup เข้าได้ แต่ยังไม่ใช่โซนเด่นสุด",
+                    "score_adjustment": float(standard_bonus),
+                }
+            )
+        else:
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "SL/TP Watch",
+                    "reason": "BUY ฝั่งนี้ยังต้องการ reward/RR สูงกว่านี้ก่อนค่อยเร่งน้ำหนัก",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+    else:
+        bonus_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_SELL_BONUS_ENTRY_GAP_PCT", 0.15), 0.15)
+        if (
+            rr_ratio >= float(bonus_rr)
+            and target_reward_pct >= float(bonus_target)
+            and (entry_gap_pct is None or entry_gap_pct <= float(bonus_gap))
+        ):
+            profile.update(
+                {
+                    "bucket": "premium",
+                    "label": "SL/TP Premium",
+                    "reason": "SELL ใกล้ entry zone และได้ reward/RR ตาม bucket เด่นของรอบเทรน",
+                    "score_adjustment": float(premium_bonus),
+                }
+            )
+        elif rr_ratio >= float(min_rr) and target_reward_pct >= float(min_target) and (
+            entry_gap_pct is None or entry_gap_pct <= float(max_entry_gap_pct)
+        ):
+            profile.update(
+                {
+                    "bucket": "standard",
+                    "label": "SL/TP Standard",
+                    "reason": "SELL ผ่านเกณฑ์ reward/RR พื้นฐาน ใช้เพิ่มน้ำหนักได้",
+                    "score_adjustment": float(standard_bonus),
+                }
+            )
+        else:
+            profile.update(
+                {
+                    "bucket": "watch",
+                    "label": "SL/TP Watch",
+                    "reason": "SELL ยังไม่ใกล้ entry zone หรือ reward/RR ยังไม่เด่นพอ",
+                    "score_adjustment": -abs(float(watch_penalty)),
+                }
+            )
+    return profile
+
+
+def attach_sltp_live_context(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return candidate
+    profile = resolve_sltp_live_profile(candidate, config=config)
+    if not isinstance(profile, dict):
+        return candidate
+    candidate["sltp_live_label"] = str(profile.get("label") or "").strip() or None
+    candidate["sltp_live_bucket"] = str(profile.get("bucket") or "").strip().lower() or None
+    candidate["sltp_live_reason"] = str(profile.get("reason") or "").strip() or None
+    candidate["sltp_live_score_adjustment"] = _safe_float(profile.get("score_adjustment"), 0.0)
+    candidate["sltp_live_entry_gap_pct"] = _safe_float(profile.get("entry_gap_pct"), None)
+    candidate["sltp_live_stop_risk_pct"] = _safe_float(profile.get("stop_risk_pct"), None)
+    candidate["sltp_live_target_reward_pct"] = _safe_float(profile.get("target_reward_pct"), None)
+    candidate["sltp_live_rr_ratio"] = _safe_float(profile.get("rr_ratio"), None)
+    if profile.get("bucket") == "watch" and str(candidate.get("alert_intent") or "").strip().lower() == "entry":
+        candidate["alert_intent"] = "watch"
+        candidate["alert_intent_reason"] = f"sltp_watch:{profile.get('reason')}"
+    return candidate
+
+
 def classify_candidate_intent(candidate, *, config):
     if not isinstance(candidate, dict):
         return "watch", "invalid_candidate"
@@ -828,11 +1040,15 @@ def finalize_candidates(context):
             candidate = score_candidate_with_live_ai(candidate)
         candidate = attach_ai_dispatch_context(candidate, config=context["config"])
         candidate = attach_short_trade_context(candidate, config=context["config"])
+        candidate = attach_sltp_live_context(candidate, config=context["config"])
         if callable(score_candidate_with_live_entry_ai):
             candidate = score_candidate_with_live_entry_ai(candidate)
         candidate = attach_entry_ai_context(candidate, config=context["config"])
         if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
             context["quality_drop_counts"][str(candidate.get("short_trade_reason") or "short_trade_avoid")] += 1
+            continue
+        if str(candidate.get("sltp_live_bucket") or "").strip().lower() == "avoid":
+            context["quality_drop_counts"][str(candidate.get("sltp_live_reason") or "sltp_live_avoid")] += 1
             continue
         filtered_candidates.append(candidate)
 

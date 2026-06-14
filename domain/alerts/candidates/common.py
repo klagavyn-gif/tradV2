@@ -138,17 +138,16 @@ def _append_ai_message_line(message, profile, *, config):
     if "🤖 AI:" in message:
         return message
     parts = [str(profile.get("label") or "Neutral")]
-    role_text = _ai_message_role_text(profile)
-    if role_text:
-        parts.append(role_text)
     prob_win = _safe_float(profile.get("prob_win"), None)
     expected_return = _safe_float(profile.get("expected_return_pct"), None)
     if prob_win is not None:
-        parts.append(f"pWin {prob_win * 100.0:.0f}%")
+        parts.append(f"p(win) {prob_win * 100.0:.0f}%")
     if expected_return is not None:
-        parts.append(f"Exp {expected_return:+.2f}%")
+        parts.append(f"exp {expected_return:+.2f}%")
     if prob_win is None and expected_return is None:
         reason = str(profile.get("reason") or "").strip()
+        if not reason:
+            reason = _ai_message_role_text(profile)
         if reason:
             parts.append(reason)
     line = "<b>🤖 AI:</b> " + " | ".join(parts)
@@ -264,18 +263,38 @@ def _append_entry_ai_message_line(message, profile, *, config):
         return message
     parts = [str(profile.get("label") or "รอ")]
     prob_entry = _safe_float(profile.get("prob_entry"), None)
-    prob_watch = _safe_float(profile.get("prob_watch"), None)
     prob_avoid = _safe_float(profile.get("prob_avoid"), None)
     if prob_entry is not None:
-        parts.append(f"เข้าได้ {prob_entry * 100.0:.0f}%")
-    if prob_watch is not None:
-        parts.append(f"รอ {prob_watch * 100.0:.0f}%")
+        parts.append(f"p(entry) {prob_entry * 100.0:.0f}%")
     if prob_avoid is not None:
-        parts.append(f"ห้ามเข้า {prob_avoid * 100.0:.0f}%")
+        parts.append(f"p(avoid) {prob_avoid * 100.0:.0f}%")
     reason = str(profile.get("reason") or "").strip()
-    if reason:
+    if reason and prob_entry is None and prob_avoid is None:
         parts.append(reason)
     line = "<b>🧠 Entry AI:</b> " + " | ".join(parts)
+    return message.rstrip() + "\n" + line
+
+
+def _append_sltp_message_line(message, profile):
+    if not isinstance(message, str) or not message.strip() or not isinstance(profile, dict):
+        return message
+    if "<b>SL/TP:</b>" in message:
+        return message
+    parts = [str(profile.get("label") or "Watch")]
+    entry_gap_pct = _safe_float(profile.get("entry_gap_pct"), None)
+    target_reward_pct = _safe_float(profile.get("target_reward_pct"), None)
+    rr_ratio = _safe_float(profile.get("rr_ratio"), None)
+    if entry_gap_pct is not None:
+        parts.append(f"gap {entry_gap_pct:.2f}%")
+    if target_reward_pct is not None:
+        parts.append(f"target {target_reward_pct:.2f}%")
+    if rr_ratio is not None:
+        parts.append(f"RR {rr_ratio:.2f}")
+    if len(parts) == 1:
+        reason = str(profile.get("reason") or "").strip()
+        if reason:
+            parts.append(reason)
+    line = "<b>SL/TP:</b> " + " | ".join(parts)
     return message.rstrip() + "\n" + line
 
 
@@ -570,7 +589,7 @@ def resolve_sltp_live_profile(candidate, *, config):
 
     profile = {
         "bucket": "watch",
-        "label": "SL/TP Watch",
+        "label": "Watch",
         "reason": "SL/TP ยังไม่เด่นพอสำหรับเพิ่มน้ำหนักรอบนี้",
         "score_adjustment": 0.0,
         "block": False,
@@ -585,7 +604,7 @@ def resolve_sltp_live_profile(candidate, *, config):
         profile.update(
             {
                 "bucket": "avoid",
-                "label": "SL/TP Avoid",
+                "label": "Avoid",
                 "reason": f"{signal} reward/risk บางเกินไป (RR={rr_ratio:.2f}, target={target_reward_pct:.2f}%)",
                 "score_adjustment": -abs(float(avoid_penalty)),
                 "block": True,
@@ -606,7 +625,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "premium",
-                    "label": "SL/TP Premium",
+                    "label": "Premium",
                     "reason": "BUY ได้ reward เด่นและ RR สูงพอ แม้ฝั่งนี้ต้องคัดเข้ม",
                     "score_adjustment": float(premium_bonus),
                 }
@@ -617,7 +636,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "standard",
-                    "label": "SL/TP Standard",
+                    "label": "Standard",
                     "reason": "BUY ยังพอถือเป็น setup เข้าได้ แต่ยังไม่ใช่โซนเด่นสุด",
                     "score_adjustment": float(standard_bonus),
                 }
@@ -626,7 +645,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "watch",
-                    "label": "SL/TP Watch",
+                    "label": "Watch",
                     "reason": "BUY ฝั่งนี้ยังต้องการ reward/RR สูงกว่านี้ก่อนค่อยเร่งน้ำหนัก",
                     "score_adjustment": -abs(float(watch_penalty)),
                 }
@@ -641,7 +660,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "premium",
-                    "label": "SL/TP Premium",
+                    "label": "Premium",
                     "reason": "SELL ใกล้ entry zone และได้ reward/RR ตาม bucket เด่นของรอบเทรน",
                     "score_adjustment": float(premium_bonus),
                 }
@@ -652,7 +671,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "standard",
-                    "label": "SL/TP Standard",
+                    "label": "Standard",
                     "reason": "SELL ผ่านเกณฑ์ reward/RR พื้นฐาน ใช้เพิ่มน้ำหนักได้",
                     "score_adjustment": float(standard_bonus),
                 }
@@ -661,7 +680,7 @@ def resolve_sltp_live_profile(candidate, *, config):
             profile.update(
                 {
                     "bucket": "watch",
-                    "label": "SL/TP Watch",
+                    "label": "Watch",
                     "reason": "SELL ยังไม่ใกล้ entry zone หรือ reward/RR ยังไม่เด่นพอ",
                     "score_adjustment": -abs(float(watch_penalty)),
                 }
@@ -683,6 +702,7 @@ def attach_sltp_live_context(candidate, *, config):
     candidate["sltp_live_stop_risk_pct"] = _safe_float(profile.get("stop_risk_pct"), None)
     candidate["sltp_live_target_reward_pct"] = _safe_float(profile.get("target_reward_pct"), None)
     candidate["sltp_live_rr_ratio"] = _safe_float(profile.get("rr_ratio"), None)
+    candidate["message"] = _append_sltp_message_line(candidate.get("message"), profile)
     if profile.get("bucket") == "watch" and str(candidate.get("alert_intent") or "").strip().lower() == "entry":
         candidate["alert_intent"] = "watch"
         candidate["alert_intent_reason"] = f"sltp_watch:{profile.get('reason')}"

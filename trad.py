@@ -3358,22 +3358,26 @@ def _resolve_live_entry_ai_model_path():
         return os.path.normpath(configured)
 
     candidate_paths = [
+        os.path.join(project_root, "models", "live", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, "models", "live", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase3_entry_quality_v3", "phase3_entry_quality_v3_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase3_entry_quality_v3_local", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality", "phase3_entry_quality_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality_local", "phase3_entry_quality_model.joblib"),
     ]
     existing = []
-    for path in candidate_paths:
+    for index, path in enumerate(candidate_paths):
         try:
             if os.path.exists(path):
-                existing.append((os.path.getmtime(path), os.path.normpath(path)))
+                existing.append((os.path.getmtime(path), -index, os.path.normpath(path)))
         except Exception:
             continue
     if not existing:
         return None
     existing.sort(reverse=True)
-    return existing[0][1]
+    return existing[0][2]
 
 
 def _set_candidate_ai_runtime(candidate, status, reason=None):
@@ -3390,6 +3394,50 @@ def _set_candidate_entry_ai_runtime(candidate, status, reason=None):
     candidate["entry_ai_runtime_status"] = str(status or "").strip().lower() or None
     candidate["entry_ai_runtime_reason"] = str(reason or "").strip() or None
     return candidate
+
+
+def _entry_ai_policy_threshold_label(prob_map, *, entry_threshold, avoid_threshold):
+    entry_prob = _safe_float((prob_map or {}).get("entry"), None)
+    avoid_prob = _safe_float((prob_map or {}).get("avoid"), None)
+    if isinstance(avoid_prob, float) and isinstance(avoid_threshold, float) and avoid_prob >= float(avoid_threshold):
+        return "avoid"
+    if isinstance(entry_prob, float) and isinstance(entry_threshold, float) and entry_prob >= float(entry_threshold):
+        return "entry"
+    return "watch"
+
+
+def _live_entry_ai_bundle_predict_proba(bundle, frame):
+    if not isinstance(bundle, dict):
+        return None, []
+    feature_columns = list(bundle.get("feature_columns") or [])
+    backend = str(bundle.get("backend") or "").strip().lower()
+    raw_classes = list(bundle.get("classes") or [])
+    classifier = bundle.get("classifier")
+    if classifier is not None:
+        predicted = classifier.predict_proba(frame)
+        if not raw_classes:
+            raw_classes = list(getattr(classifier, "classes_", None) or [])
+        return predicted, [str(value) for value in raw_classes]
+
+    estimator = bundle.get("estimator")
+    if estimator is not None:
+        predicted = estimator.predict_proba(frame[feature_columns] if feature_columns else frame)
+        if not raw_classes:
+            raw_classes = list(getattr(estimator, "classes_", None) or [])
+        return predicted, [str(value) for value in raw_classes]
+
+    model = bundle.get("model")
+    preprocessor = bundle.get("preprocessor")
+    if model is None:
+        return None, []
+    if backend == "xgboost" and preprocessor is not None and feature_columns:
+        encoded = preprocessor.transform(frame[feature_columns])
+        predicted = model.predict_proba(encoded)
+    else:
+        predicted = model.predict_proba(frame[feature_columns] if feature_columns else frame)
+    if not raw_classes:
+        raw_classes = list(getattr(model, "classes_", None) or [])
+    return predicted, [str(value) for value in raw_classes]
 
 
 def _load_live_ai_model_bundle():
@@ -3466,9 +3514,12 @@ def _load_live_entry_ai_model_bundle():
 
             bundle = joblib.load(model_path)
             feature_columns = list(bundle.get("feature_columns") or [])
-            classifier = bundle.get("classifier")
-            if not feature_columns or classifier is None:
-                raise ValueError("missing classifier or feature_columns")
+            backend = str(bundle.get("backend") or "").strip().lower()
+            has_predictor = bundle.get("classifier") is not None or bundle.get("estimator") is not None or bundle.get("model") is not None
+            if backend == "xgboost" and bundle.get("model") is not None and bundle.get("preprocessor") is None:
+                raise ValueError("missing preprocessor for xgboost entry ai bundle")
+            if not feature_columns or not has_predictor:
+                raise ValueError("missing model or feature_columns")
             _ENTRY_LIVE_AI_MODEL_CACHE.update(
                 {
                     "path": model_path,
@@ -3728,14 +3779,11 @@ def _score_candidate_with_live_entry_ai(candidate):
             return candidate
         row = _candidate_ai_features(candidate)
         frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
-        classifier = bundle.get("classifier")
-        if classifier is None:
+        predicted, classes = _live_entry_ai_bundle_predict_proba(bundle, frame)
+        if predicted is None:
             return candidate
-        predicted = classifier.predict_proba(frame)
         if not len(predicted):
             return candidate
-        raw_classes = getattr(classifier, "classes_", None)
-        classes = [str(value) for value in list(raw_classes)] if raw_classes is not None else []
         prob_map = {}
         for label in ("entry", "watch", "avoid"):
             if label in classes:
@@ -3744,12 +3792,29 @@ def _score_candidate_with_live_entry_ai(candidate):
                 prob_map[label] = None
 
         metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+        model_type = str(bundle.get("model_type") or "phase3_entry_quality_classifier")
         entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", None), None)
         if entry_threshold is None:
             entry_threshold = _safe_float(metadata.get("entry_threshold"), 0.45)
         avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", None), None)
         if avoid_threshold is None:
             avoid_threshold = _safe_float(metadata.get("avoid_threshold"), 0.55)
+        standard_entry_threshold = _safe_float(metadata.get("recommended_standard_entry_threshold"), None)
+        if standard_entry_threshold is None:
+            standard_entry_threshold = entry_threshold
+        standard_avoid_threshold = _safe_float(metadata.get("recommended_standard_avoid_threshold"), None)
+        if standard_avoid_threshold is None:
+            standard_avoid_threshold = avoid_threshold
+        premium_entry_threshold = _safe_float(metadata.get("recommended_premium_entry_threshold"), None)
+        if premium_entry_threshold is None:
+            premium_entry_threshold = _safe_float(metadata.get("recommended_entry_threshold"), None)
+        if premium_entry_threshold is None:
+            premium_entry_threshold = standard_entry_threshold
+        premium_avoid_threshold = _safe_float(metadata.get("recommended_premium_avoid_threshold"), None)
+        if premium_avoid_threshold is None:
+            premium_avoid_threshold = _safe_float(metadata.get("recommended_avoid_threshold"), None)
+        if premium_avoid_threshold is None:
+            premium_avoid_threshold = standard_avoid_threshold
 
         ranked_labels = [(label, prob_map.get(label)) for label in ("entry", "watch", "avoid") if isinstance(prob_map.get(label), float)]
         if not ranked_labels:
@@ -3762,12 +3827,52 @@ def _score_candidate_with_live_entry_ai(candidate):
         else:
             predicted_bucket = "watch"
 
+        premium_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=premium_entry_threshold,
+            avoid_threshold=premium_avoid_threshold,
+        )
+        standard_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=standard_entry_threshold,
+            avoid_threshold=standard_avoid_threshold,
+        )
+        policy_mode = "premium_standard"
+        if (
+            not str(model_type or "").strip().lower().startswith("phase3_entry_quality_v3")
+            and math.isclose(float(premium_entry_threshold), float(standard_entry_threshold), rel_tol=1e-9, abs_tol=1e-9)
+            and math.isclose(float(premium_avoid_threshold), float(standard_avoid_threshold), rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            policy_mode = "single"
+
+        policy_tier = None
+        if premium_label == "entry":
+            policy_tier = "premium"
+            predicted_bucket = "entry"
+        elif standard_label == "entry":
+            policy_tier = "standard"
+            predicted_bucket = "entry"
+        elif standard_label == "avoid" or premium_label == "avoid":
+            policy_tier = "avoid"
+            predicted_bucket = "avoid"
+        else:
+            policy_tier = "watch"
+            predicted_bucket = "watch"
+
         candidate["entry_ai_bucket"] = predicted_bucket
         candidate["entry_ai_label"] = predicted_bucket
         candidate["entry_ai_prob_entry"] = float(prob_map["entry"]) if isinstance(prob_map.get("entry"), float) else None
         candidate["entry_ai_prob_watch"] = float(prob_map["watch"]) if isinstance(prob_map.get("watch"), float) else None
         candidate["entry_ai_prob_avoid"] = float(prob_map["avoid"]) if isinstance(prob_map.get("avoid"), float) else None
-        candidate["entry_ai_model_type"] = str(bundle.get("model_type") or "phase3_entry_quality_classifier")
+        candidate["entry_ai_policy_mode"] = policy_mode
+        candidate["entry_ai_policy_tier"] = policy_tier
+        candidate["entry_ai_premium_label"] = premium_label
+        candidate["entry_ai_standard_label"] = standard_label
+        candidate["entry_ai_premium_entry_threshold"] = float(premium_entry_threshold)
+        candidate["entry_ai_premium_avoid_threshold"] = float(premium_avoid_threshold)
+        candidate["entry_ai_standard_entry_threshold"] = float(standard_entry_threshold)
+        candidate["entry_ai_standard_avoid_threshold"] = float(standard_avoid_threshold)
+        candidate["entry_ai_model_type"] = model_type
         candidate["entry_ai_model_trained_at"] = str(bundle.get("trained_at") or "").strip() or None
         _set_candidate_entry_ai_runtime(candidate, "scored", "ok")
         return candidate

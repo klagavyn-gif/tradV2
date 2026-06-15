@@ -202,6 +202,17 @@ def _runtime_entry_ai_profile(candidate):
     }
 
 
+def _entry_ai_policy_text(value):
+    bucket = str(value or "").strip().lower()
+    if bucket == "entry":
+        return "เข้าได้"
+    if bucket == "avoid":
+        return "ห้ามเข้า"
+    if bucket == "watch":
+        return "รอ"
+    return None
+
+
 def resolve_entry_ai_profile(candidate, *, config):
     if not isinstance(candidate, dict):
         return None
@@ -209,13 +220,84 @@ def resolve_entry_ai_profile(candidate, *, config):
     prob_watch = _safe_float(candidate.get("entry_ai_prob_watch"), None)
     prob_avoid = _safe_float(candidate.get("entry_ai_prob_avoid"), None)
     explicit_bucket = str(candidate.get("entry_ai_bucket") or "").strip().lower()
+    policy_mode = str(candidate.get("entry_ai_policy_mode") or "").strip().lower()
+    policy_tier = str(candidate.get("entry_ai_policy_tier") or "").strip().lower()
+    premium_label = str(candidate.get("entry_ai_premium_label") or "").strip().lower()
+    standard_label = str(candidate.get("entry_ai_standard_label") or "").strip().lower()
     if not explicit_bucket and prob_entry is None and prob_watch is None and prob_avoid is None:
         return _runtime_entry_ai_profile(candidate)
 
     entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", 0.45), 0.45)
     avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", 0.55), 0.55)
     entry_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_SCORE_BONUS", 4.0), 4.0)
+    premium_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_PREMIUM_SCORE_BONUS", entry_bonus), entry_bonus)
+    standard_bonus = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_ENTRY_AI_STANDARD_SCORE_BONUS", max(float(entry_bonus) * 0.5, 0.0)),
+        max(float(entry_bonus) * 0.5, 0.0),
+    )
+    watch_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_WATCH_SCORE_PENALTY", 0.0), 0.0)
     avoid_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_SCORE_PENALTY", 1.5), 1.5)
+
+    if policy_mode == "premium_standard" or premium_label or standard_label or policy_tier in {"premium", "standard"}:
+        bucket = explicit_bucket or "watch"
+        label = "รอ"
+        icon = "🟡"
+        reason = "Entry AI V3 มองว่ายังไม่ถึงจังหวะ Standard"
+        rank_adjustment = 0.0
+        tier = None
+        resolved_policy_tier = policy_tier if policy_tier in {"premium", "standard", "watch", "avoid"} else "watch"
+
+        if policy_tier == "premium" or premium_label == "entry":
+            bucket = "entry"
+            label = "เข้าได้"
+            icon = "🟢"
+            tier = "Premium"
+            resolved_policy_tier = "premium"
+            reason = "Entry AI V3 ผ่านเกณฑ์ Premium ใช้เพิ่มน้ำหนักได้มากสุด"
+            if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
+                rank_adjustment = float(premium_bonus)
+        elif policy_tier == "standard" or standard_label == "entry":
+            bucket = "entry"
+            label = "เข้าได้"
+            icon = "🟢"
+            tier = "Standard"
+            resolved_policy_tier = "standard"
+            reason = "Entry AI V3 ผ่านเกณฑ์ Standard ใช้เพิ่มน้ำหนักได้ แต่ยังไม่ใช่ Premium"
+            if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
+                rank_adjustment = float(standard_bonus)
+        elif policy_tier == "avoid" or standard_label == "avoid" or premium_label == "avoid" or explicit_bucket == "avoid":
+            bucket = "avoid"
+            label = "ห้ามเข้า"
+            icon = "⛔"
+            resolved_policy_tier = "avoid"
+            reason = "Entry AI V3 มองว่าจุดเข้ายังไม่คุ้ม ควรหลีกเลี่ยงรอบนี้"
+            if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
+                rank_adjustment = -abs(float(avoid_penalty))
+        else:
+            bucket = "watch"
+            label = "รอ"
+            icon = "🟡"
+            resolved_policy_tier = "watch"
+            if premium_label == "watch" and standard_label == "watch":
+                reason = "Entry AI V3 ยังไม่ผ่านทั้ง Premium และ Standard"
+            if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)) and float(watch_penalty) > 0:
+                rank_adjustment = -abs(float(watch_penalty))
+
+        return {
+            "bucket": bucket,
+            "label": label,
+            "icon": icon,
+            "reason": reason,
+            "prob_entry": prob_entry,
+            "prob_watch": prob_watch,
+            "prob_avoid": prob_avoid,
+            "rank_adjustment": float(rank_adjustment),
+            "policy_mode": "premium_standard",
+            "tier": tier,
+            "policy_tier": resolved_policy_tier,
+            "premium_label": premium_label or None,
+            "standard_label": standard_label or None,
+        }
 
     bucket = explicit_bucket or "watch"
     if isinstance(prob_avoid, float) and prob_avoid >= avoid_threshold:
@@ -251,6 +333,11 @@ def resolve_entry_ai_profile(candidate, *, config):
         "prob_watch": prob_watch,
         "prob_avoid": prob_avoid,
         "rank_adjustment": float(rank_adjustment),
+        "policy_mode": "single",
+        "tier": None,
+        "policy_tier": bucket,
+        "premium_label": None,
+        "standard_label": None,
     }
 
 
@@ -262,6 +349,17 @@ def _append_entry_ai_message_line(message, profile, *, config):
     if "🧠 Entry AI:" in message:
         return message
     parts = [str(profile.get("label") or "รอ")]
+    tier = str(profile.get("tier") or "").strip()
+    policy_mode = str(profile.get("policy_mode") or "").strip().lower()
+    premium_label = _entry_ai_policy_text(profile.get("premium_label"))
+    standard_label = _entry_ai_policy_text(profile.get("standard_label"))
+    if tier:
+        parts.append(tier)
+    elif policy_mode == "premium_standard":
+        if premium_label:
+            parts.append(f"P {premium_label}")
+        if standard_label:
+            parts.append(f"S {standard_label}")
     prob_entry = _safe_float(profile.get("prob_entry"), None)
     prob_avoid = _safe_float(profile.get("prob_avoid"), None)
     if prob_entry is not None:
@@ -312,6 +410,10 @@ def attach_entry_ai_context(candidate, *, config):
     candidate["entry_ai_prob_entry"] = _safe_float(profile.get("prob_entry"), None)
     candidate["entry_ai_prob_watch"] = _safe_float(profile.get("prob_watch"), None)
     candidate["entry_ai_prob_avoid"] = _safe_float(profile.get("prob_avoid"), None)
+    candidate["entry_ai_policy_mode"] = str(profile.get("policy_mode") or "").strip().lower() or None
+    candidate["entry_ai_policy_tier"] = str(profile.get("policy_tier") or "").strip().lower() or None
+    candidate["entry_ai_premium_label"] = str(profile.get("premium_label") or "").strip().lower() or None
+    candidate["entry_ai_standard_label"] = str(profile.get("standard_label") or "").strip().lower() or None
     candidate["message"] = _append_entry_ai_message_line(candidate.get("message"), profile, config=config)
     return candidate
 

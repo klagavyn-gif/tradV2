@@ -84,23 +84,23 @@ def resolve_ai_dispatch_profile(candidate, *, config):
     low_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_AI_LOW_CONVICTION_SCORE_PENALTY", 2.5), 2.5)
 
     bucket = "neutral"
-    label = "Neutral"
+    label = "กลาง"
     icon = "🟡"
-    reason = "AI มองเป็นตัวกลาง ใช้ประกอบการตัดสินใจกับ score เดิม ไม่ใช่คำสั่งเข้าเอง"
+    reason = "AI มองว่ากลาง ๆ ใช้ช่วยดูเพิ่ม แต่ยังไม่ใช่จังหวะเด่น"
     rank_adjustment = 0.0
 
     if explicit_decision == "entry" or (prob_win is not None and prob_win >= confirmed_threshold):
         bucket = "confirmed"
-        label = "AI-Confirmed"
+        label = "ยืนยันเพิ่ม"
         icon = "🟢"
-        reason = "AI ช่วยยืนยันมุมมองของสัญญาณนี้ ใช้เพิ่มน้ำหนักการจัดอันดับได้ แต่ไม่ใช่คำสั่งเข้าเอง"
+        reason = "AI เห็นด้วยกับสัญญาณนี้ ใช้เพิ่มความมั่นใจได้"
         if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
             rank_adjustment = float(confirmed_bonus)
     elif explicit_decision == "avoid" or (prob_win is not None and prob_win < neutral_threshold):
         bucket = "low_conviction"
-        label = "Low-Conviction"
+        label = "ยังไม่ชัด"
         icon = "🟠"
-        reason = "AI ยังไม่มั่นใจพอ ควรลดอันดับและรอการยืนยันเพิ่ม ไม่ได้แปลว่าต้องเข้าทันที"
+        reason = "AI ยังไม่มั่นใจพอ ควรรอดูเพิ่ม"
         if bool(getattr(config, "TELEGRAM_ALERT_AI_RANKING_ENABLE", True)):
             rank_adjustment = -abs(float(low_penalty))
 
@@ -120,13 +120,13 @@ def _ai_message_role_text(profile):
         return None
     bucket = str(profile.get("bucket") or "").strip().lower()
     if bucket == "confirmed":
-        return "ช่วยยืนยันมุมมอง ไม่ใช่คำสั่งเข้าเอง"
+        return "ช่วยยืนยันสัญญาณ"
     if bucket == "neutral":
-        return "ใช้ประกอบการตัดสินใจร่วมกับแผนหลัก"
+        return "กลาง ๆ ใช้ดูประกอบ"
     if bucket == "low_conviction":
-        return "เตือนว่าความมั่นใจยังต่ำ ควรรอยืนยันเพิ่ม"
+        return "ยังไม่ชัด ควรรอเพิ่ม"
     if bucket in {"disabled", "unavailable", "not_scored", "error", "unknown"}:
-        return "ไม่มีคะแนน AI พร้อมใช้ในรอบนี้"
+        return "รอบนี้ยังไม่มีคะแนน AI"
     return None
 
 
@@ -137,7 +137,7 @@ def _append_ai_message_line(message, profile, *, config):
         return message
     if "🤖 AI:" in message:
         return message
-    parts = [str(profile.get("label") or "Neutral")]
+    parts = [str(profile.get("label") or "กลาง")]
     prob_win = _safe_float(profile.get("prob_win"), None)
     expected_return = _safe_float(profile.get("expected_return_pct"), None)
     if prob_win is not None:
@@ -181,14 +181,14 @@ def _runtime_entry_ai_profile(candidate):
     if status == "scored":
         return None
     mapping = {
-        "disabled": ("disabled", "ยังไม่มีผล", "⚪", "Entry AI ถูกปิดสำหรับรอบนี้"),
-        "model_unavailable": ("unavailable", "ยังไม่มีผล", "⚪", "รอบนี้ยังโหลด Entry AI model ไม่สำเร็จ"),
-        "not_allowed": ("not_scored", "ยังไม่มีผล", "⚪", "alert นี้อยู่นอก scope ของ Entry AI ปัจจุบัน"),
-        "score_failed": ("error", "ยังไม่มีผล", "⚪", "รอบนี้ Entry AI score ไม่สำเร็จ ใช้ rule เดิมแทน"),
+        "disabled": ("disabled", "ยังไม่ประเมิน", "⚪", "Entry AI ถูกปิดในรอบนี้"),
+        "model_unavailable": ("unavailable", "ยังไม่ประเมิน", "⚪", "รอบนี้โหลด Entry AI ไม่สำเร็จ"),
+        "not_allowed": ("not_scored", "ยังไม่ประเมิน", "⚪", "alert นี้อยู่นอกขอบเขตของ Entry AI"),
+        "score_failed": ("error", "ยังไม่ประเมิน", "⚪", "รอบนี้ Entry AI ประเมินไม่สำเร็จ"),
     }
     bucket, label, icon, default_reason = mapping.get(
         status,
-        ("unknown", "ยังไม่มีผล", "⚪", "ยังไม่มีผล Entry AI สำหรับ alert นี้"),
+        ("unknown", "ยังไม่ประเมิน", "⚪", "รอบนี้ยังไม่มีผล Entry AI"),
     )
     return {
         "bucket": bucket,
@@ -242,7 +242,7 @@ def resolve_entry_ai_profile(candidate, *, config):
         bucket = explicit_bucket or "watch"
         label = "รอ"
         icon = "🟡"
-        reason = "Entry AI V3 มองว่ายังไม่ถึงจังหวะ Standard"
+        reason = "ยังไม่ถึงจังหวะเข้า"
         rank_adjustment = 0.0
         tier = None
         resolved_policy_tier = policy_tier if policy_tier in {"premium", "standard", "watch", "avoid"} else "watch"
@@ -253,7 +253,7 @@ def resolve_entry_ai_profile(candidate, *, config):
             icon = "🟢"
             tier = "Premium"
             resolved_policy_tier = "premium"
-            reason = "Entry AI V3 ผ่านเกณฑ์ Premium ใช้เพิ่มน้ำหนักได้มากสุด"
+            reason = "ผ่านเกณฑ์ Premium เข้าได้ค่อนข้างดี"
             if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
                 rank_adjustment = float(premium_bonus)
         elif policy_tier == "standard" or standard_label == "entry":
@@ -262,7 +262,7 @@ def resolve_entry_ai_profile(candidate, *, config):
             icon = "🟢"
             tier = "Standard"
             resolved_policy_tier = "standard"
-            reason = "Entry AI V3 ผ่านเกณฑ์ Standard ใช้เพิ่มน้ำหนักได้ แต่ยังไม่ใช่ Premium"
+            reason = "ผ่านเกณฑ์ Standard เข้าได้ แต่ยังไม่คมเท่า Premium"
             if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
                 rank_adjustment = float(standard_bonus)
         elif policy_tier == "avoid" or standard_label == "avoid" or premium_label == "avoid" or explicit_bucket == "avoid":
@@ -270,7 +270,7 @@ def resolve_entry_ai_profile(candidate, *, config):
             label = "ห้ามเข้า"
             icon = "⛔"
             resolved_policy_tier = "avoid"
-            reason = "Entry AI V3 มองว่าจุดเข้ายังไม่คุ้ม ควรหลีกเลี่ยงรอบนี้"
+            reason = "จุดเข้ายังไม่คุ้ม ควรหลีกเลี่ยงรอบนี้"
             if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
                 rank_adjustment = -abs(float(avoid_penalty))
         else:
@@ -279,7 +279,7 @@ def resolve_entry_ai_profile(candidate, *, config):
             icon = "🟡"
             resolved_policy_tier = "watch"
             if premium_label == "watch" and standard_label == "watch":
-                reason = "Entry AI V3 ยังไม่ผ่านทั้ง Premium และ Standard"
+                reason = "ยังไม่ผ่านทั้ง Premium และ Standard"
             if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)) and float(watch_penalty) > 0:
                 rank_adjustment = -abs(float(watch_penalty))
 
@@ -309,18 +309,18 @@ def resolve_entry_ai_profile(candidate, *, config):
 
     label = "รอ"
     icon = "🟡"
-    reason = "Entry AI มองว่า setup นี้ใช้เป็นแผนอ้างอิงได้ แต่ควรรอความชัดเพิ่ม"
+    reason = "จังหวะนี้ยังไม่ชัด ควรรอดูเพิ่ม"
     rank_adjustment = 0.0
     if bucket == "entry":
         label = "เข้าได้"
         icon = "🟢"
-        reason = "Entry AI มองว่าจุดเข้าเริ่มพร้อม ใช้เพิ่มน้ำหนักการจัดอันดับได้ แต่ยังไม่ block เอง"
+        reason = "จุดเข้าเริ่มพร้อม ใช้ประกอบการเข้าได้"
         if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
             rank_adjustment = float(entry_bonus)
     elif bucket == "avoid":
         label = "ห้ามเข้า"
         icon = "⛔"
-        reason = "Entry AI มองว่าจุดเข้ายังไม่คุ้ม ควรลดอันดับ แต่ยังไม่ block สัญญาณอัตโนมัติ"
+        reason = "จุดเข้ายังไม่คุ้ม ควรเลี่ยงไปก่อน"
         if bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RANKING_ENABLE", True)):
             rank_adjustment = -abs(float(avoid_penalty))
 

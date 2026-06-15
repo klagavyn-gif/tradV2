@@ -3358,10 +3358,14 @@ def _resolve_live_entry_ai_model_path():
         return os.path.normpath(configured)
 
     candidate_paths = [
+        os.path.join(project_root, "models", "live", "phase4_entry_quality_v4_model.joblib"),
         os.path.join(project_root, "models", "live", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, "models", "live", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "live", "phase4_entry_quality_v4_model.joblib"),
         os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, ".data", "research", "live", "phase3_entry_quality_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase4_entry_quality_v4", "phase4_entry_quality_v4_model.joblib"),
+        os.path.join(project_root, ".data", "research", "phase4_entry_quality_v4_local", "phase4_entry_quality_v4_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality_v3", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality_v3_local", "phase3_entry_quality_v3_model.joblib"),
         os.path.join(project_root, ".data", "research", "phase3_entry_quality", "phase3_entry_quality_model.joblib"),
@@ -3404,6 +3408,39 @@ def _entry_ai_policy_threshold_label(prob_map, *, entry_threshold, avoid_thresho
     if isinstance(entry_prob, float) and isinstance(entry_threshold, float) and entry_prob >= float(entry_threshold):
         return "entry"
     return "watch"
+
+
+def _entry_ai_metadata_policy_threshold(metadata, policy_name, threshold_name, fallback=None):
+    if not isinstance(metadata, dict):
+        return fallback
+    policy = metadata.get(f"recommended_{policy_name}_policy")
+    if isinstance(policy, dict):
+        value = _safe_float(policy.get(threshold_name), None)
+        if value is not None:
+            return value
+    key = f"recommended_{policy_name}_{threshold_name}"
+    value = _safe_float(metadata.get(key), None)
+    if value is not None:
+        return value
+    return fallback
+
+
+def _is_v4_entry_ai_bundle(bundle, metadata=None):
+    if not isinstance(bundle, dict):
+        return False
+    if not isinstance(metadata, dict):
+        metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
+    model_type = str(bundle.get("model_type") or "").strip().lower()
+    model_version = str(bundle.get("model_version") or metadata.get("model_version") or "").strip().lower()
+    feature_schema_version = str(metadata.get("feature_schema_version") or "").strip().lower()
+    policy_schema_version = str(metadata.get("policy_schema_version") or "").strip().lower()
+    if model_type.startswith("phase4_entry_quality_v4"):
+        return True
+    return any(
+        value.startswith("v4_")
+        for value in (model_version, feature_schema_version, policy_schema_version)
+        if value
+    )
 
 
 def _live_entry_ai_bundle_predict_proba(bundle, frame):
@@ -3793,28 +3830,39 @@ def _score_candidate_with_live_entry_ai(candidate):
 
         metadata = bundle.get("metadata") if isinstance(bundle.get("metadata"), dict) else {}
         model_type = str(bundle.get("model_type") or "phase3_entry_quality_classifier")
+        model_version = str(bundle.get("model_version") or metadata.get("model_version") or "").strip() or None
+        feature_schema_version = str(metadata.get("feature_schema_version") or "").strip() or None
+        label_schema_version = str(metadata.get("label_schema_version") or "").strip() or None
+        policy_schema_version = str(metadata.get("policy_schema_version") or "").strip() or None
+        is_v4_native = _is_v4_entry_ai_bundle(bundle, metadata)
         entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", None), None)
         if entry_threshold is None:
             entry_threshold = _safe_float(metadata.get("entry_threshold"), 0.45)
         avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", None), None)
         if avoid_threshold is None:
             avoid_threshold = _safe_float(metadata.get("avoid_threshold"), 0.55)
-        standard_entry_threshold = _safe_float(metadata.get("recommended_standard_entry_threshold"), None)
+        standard_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "standard", "entry_threshold", None)
         if standard_entry_threshold is None:
             standard_entry_threshold = entry_threshold
-        standard_avoid_threshold = _safe_float(metadata.get("recommended_standard_avoid_threshold"), None)
+        standard_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "standard", "avoid_threshold", None)
         if standard_avoid_threshold is None:
             standard_avoid_threshold = avoid_threshold
-        premium_entry_threshold = _safe_float(metadata.get("recommended_premium_entry_threshold"), None)
+        premium_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "premium", "entry_threshold", None)
         if premium_entry_threshold is None:
             premium_entry_threshold = _safe_float(metadata.get("recommended_entry_threshold"), None)
         if premium_entry_threshold is None:
             premium_entry_threshold = standard_entry_threshold
-        premium_avoid_threshold = _safe_float(metadata.get("recommended_premium_avoid_threshold"), None)
+        premium_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "premium", "avoid_threshold", None)
         if premium_avoid_threshold is None:
             premium_avoid_threshold = _safe_float(metadata.get("recommended_avoid_threshold"), None)
         if premium_avoid_threshold is None:
             premium_avoid_threshold = standard_avoid_threshold
+        watch_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "watch", "entry_threshold", None)
+        if watch_entry_threshold is None:
+            watch_entry_threshold = standard_entry_threshold
+        watch_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "watch", "avoid_threshold", None)
+        if watch_avoid_threshold is None:
+            watch_avoid_threshold = standard_avoid_threshold
 
         ranked_labels = [(label, prob_map.get(label)) for label in ("entry", "watch", "avoid") if isinstance(prob_map.get(label), float)]
         if not ranked_labels:
@@ -3837,9 +3885,15 @@ def _score_candidate_with_live_entry_ai(candidate):
             entry_threshold=standard_entry_threshold,
             avoid_threshold=standard_avoid_threshold,
         )
-        policy_mode = "premium_standard"
+        watch_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=watch_entry_threshold,
+            avoid_threshold=watch_avoid_threshold,
+        )
+        policy_mode = "premium_standard_v4" if is_v4_native else "premium_standard"
         if (
-            not str(model_type or "").strip().lower().startswith("phase3_entry_quality_v3")
+            not is_v4_native
+            and not str(model_type or "").strip().lower().startswith("phase3_entry_quality_v3")
             and math.isclose(float(premium_entry_threshold), float(standard_entry_threshold), rel_tol=1e-9, abs_tol=1e-9)
             and math.isclose(float(premium_avoid_threshold), float(standard_avoid_threshold), rel_tol=1e-9, abs_tol=1e-9)
         ):
@@ -3852,9 +3906,12 @@ def _score_candidate_with_live_entry_ai(candidate):
         elif standard_label == "entry":
             policy_tier = "standard"
             predicted_bucket = "entry"
-        elif standard_label == "avoid" or premium_label == "avoid":
+        elif watch_label == "avoid" or standard_label == "avoid" or premium_label == "avoid":
             policy_tier = "avoid"
             predicted_bucket = "avoid"
+        elif is_v4_native and watch_label in {"entry", "watch"}:
+            policy_tier = "watch"
+            predicted_bucket = "watch"
         else:
             policy_tier = "watch"
             predicted_bucket = "watch"
@@ -3868,11 +3925,18 @@ def _score_candidate_with_live_entry_ai(candidate):
         candidate["entry_ai_policy_tier"] = policy_tier
         candidate["entry_ai_premium_label"] = premium_label
         candidate["entry_ai_standard_label"] = standard_label
+        candidate["entry_ai_watch_label"] = watch_label
         candidate["entry_ai_premium_entry_threshold"] = float(premium_entry_threshold)
         candidate["entry_ai_premium_avoid_threshold"] = float(premium_avoid_threshold)
         candidate["entry_ai_standard_entry_threshold"] = float(standard_entry_threshold)
         candidate["entry_ai_standard_avoid_threshold"] = float(standard_avoid_threshold)
+        candidate["entry_ai_watch_entry_threshold"] = float(watch_entry_threshold)
+        candidate["entry_ai_watch_avoid_threshold"] = float(watch_avoid_threshold)
         candidate["entry_ai_model_type"] = model_type
+        candidate["entry_ai_model_version"] = model_version
+        candidate["entry_ai_feature_schema_version"] = feature_schema_version
+        candidate["entry_ai_label_schema_version"] = label_schema_version
+        candidate["entry_ai_policy_schema_version"] = policy_schema_version
         candidate["entry_ai_model_trained_at"] = str(bundle.get("trained_at") or "").strip() or None
         _set_candidate_entry_ai_runtime(candidate, "scored", "ok")
         return candidate

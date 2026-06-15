@@ -8,3 +8,4 @@ curl_cffi
 requests
 joblib==1.5.1
 scikit-learn==1.7.0
+xgboost==2.1.4

@@ -130,6 +130,20 @@ def _ai_message_role_text(profile):
     return None
 
 
+def _insert_message_line_before_footer(message, line):
+    if not isinstance(message, str) or not message.strip():
+        return message
+    if not isinstance(line, str) or not line.strip():
+        return message
+    footer_marker = "────────────────\n🕒 <b>เวลา:</b>"
+    marker_index = message.rfind(footer_marker)
+    if marker_index < 0:
+        return message.rstrip() + "\n" + line
+    head = message[:marker_index].rstrip()
+    tail = message[marker_index:]
+    return head + "\n" + line + "\n" + tail.lstrip("\n")
+
+
 def _append_ai_message_line(message, profile, *, config):
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_MESSAGE_ENABLE", True)):
         return message
@@ -151,7 +165,7 @@ def _append_ai_message_line(message, profile, *, config):
         if reason:
             parts.append(reason)
     line = "<b>🤖 AI:</b> " + " | ".join(parts)
-    return message.rstrip() + "\n" + line
+    return _insert_message_line_before_footer(message, line)
 
 
 def attach_ai_dispatch_context(candidate, *, config):
@@ -388,7 +402,7 @@ def _append_entry_ai_message_line(message, profile, *, config):
     if reason and prob_entry is None and prob_avoid is None:
         parts.append(reason)
     line = "<b>🧠 Entry AI:</b> " + " | ".join(parts)
-    return message.rstrip() + "\n" + line
+    return _insert_message_line_before_footer(message, line)
 
 
 def _append_sltp_message_line(message, profile):
@@ -411,7 +425,7 @@ def _append_sltp_message_line(message, profile):
         if reason:
             parts.append(reason)
     line = "<b>SL/TP:</b> " + " | ".join(parts)
-    return message.rstrip() + "\n" + line
+    return _insert_message_line_before_footer(message, line)
 
 
 def attach_entry_ai_context(candidate, *, config):

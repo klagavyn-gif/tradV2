@@ -26,10 +26,10 @@ def _append_snapshot_lines(lines, *, price_text=None, change=None, confidence=No
     if isinstance(confidence, (int, float)):
         snapshot_parts.append(f"Conf {float(confidence):.0f}%")
     if snapshot_parts:
-        lines.append("<b>📍 Snapshot:</b> " + " | ".join(html_escape(part) for part in snapshot_parts))
+        lines.append("<b>💵 ราคาปัจจุบัน:</b> " + " | ".join(html_escape(part) for part in snapshot_parts))
     source_text = _format_sources_compact(sources, html_escape)
     if source_text:
-        lines.append("<b>🧩 Source:</b> " + source_text)
+        lines.append("<b>🧩 ชุดสัญญาณ:</b> " + source_text)
 
 
 def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, html_escape, prefix="🧪 Edge"):
@@ -92,7 +92,7 @@ def _append_action_lines(lines, action_guidance, *, html_escape, decision=None, 
         return
     action_text = str(guidance.get("primary_text") or "").strip()
     if action_text:
-        lines.append("<b>🎯 สรุป:</b> " + html_escape(action_text))
+        lines.append("<b>👉 การทำต่อ:</b> " + html_escape(action_text))
     note_text = str(guidance.get("note_text") or "").strip()
     if note_text:
         lines.append("<b>⚠️ หมายเหตุ:</b> " + html_escape(note_text))
@@ -205,7 +205,7 @@ def _append_trade_decision_lines(lines, *, plan, html_escape, signal=None, strat
     reason = str(decision.get("reason") or "").strip()
     icon = str(decision.get("icon") or "🟡").strip()
     if label:
-        lines.append(f"<b>🚦 สถานะ:</b> {html_escape(icon + ' ' + label)}")
+        lines.append(f"<b>🎯 สรุป:</b> {html_escape(icon + ' ' + label)}")
     if reason:
         lines.append("<b>📝 เหตุผล:</b> " + html_escape(reason))
     return decision
@@ -384,7 +384,7 @@ def _append_levels_lines(
     signal=None,
     entry_override_text=None,
     stop_label="SL",
-    plan_heading="📌 Plan",
+    plan_heading="📌 แผน",
 ):
     guidance = _resolve_level_guidance(
         plan,
@@ -426,17 +426,17 @@ def _append_levels_lines(
     if rr_bits:
         risk_parts.append("RR " + " / ".join(rr_bits))
     if risk_parts:
-        lines.append("<b>📏 Risk:</b> " + " | ".join(html_escape(part) for part in risk_parts))
+        lines.append("<b>📏 ความเสี่ยง:</b> " + " | ".join(html_escape(part) for part in risk_parts))
     level_source = str(guidance.get("level_source") or "").strip().lower()
     if level_source == "actual":
-        lines.append("<b>🧭 Level Source:</b> actual plan")
+        lines.append("<b>🧭 ระดับราคา:</b> actual plan")
     elif level_source == "actual+fallback":
-        lines.append("<b>🧭 Level Source:</b> actual+fallback")
+        lines.append("<b>🧭 ระดับราคา:</b> actual+fallback")
     elif level_source == "fallback":
-        lines.append("<b>🧭 Level Source:</b> fallback risk model")
+        lines.append("<b>🧭 ระดับราคา:</b> fallback risk model")
 
 
-def _append_reason_line(lines, *, html_escape, parts=None, reasons=None, label="🧠 Context"):
+def _append_reason_line(lines, *, html_escape, parts=None, reasons=None, label="🧠 บริบท"):
     compact_parts = []
     if isinstance(parts, list):
         compact_parts.extend([str(part).strip() for part in parts if str(part).strip()])
@@ -505,16 +505,6 @@ def build_telegram_message(
     price = item.get("price")
     change = item.get("change")
     price_text = format_price_value(price)
-    _append_snapshot_lines(
-        lines,
-        price_text=price_text,
-        change=change,
-        confidence=best_conf,
-        sources=sources,
-        html_escape=html_escape,
-    )
-    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-
     if not isinstance(primary_plan, dict):
         primary_plan = pick_primary_trade_plan(
             item,
@@ -545,6 +535,15 @@ def build_telegram_message(
         action_guidance=action_guidance,
         current_price=item.get("price"),
     )
+    _append_snapshot_lines(
+        lines,
+        price_text=price_text,
+        change=change,
+        confidence=best_conf,
+        sources=sources,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     context_parts = []
     if isinstance(primary_plan, dict):
@@ -555,7 +554,7 @@ def build_telegram_message(
         if pattern and pattern.upper() != "NONE":
             context_parts.append(f"Pattern {pattern}")
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
-    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผนอ้างอิง"
+    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผน"
     _append_levels_lines(
         lines,
         plan=primary_plan,
@@ -813,24 +812,6 @@ def build_price_action_message(item, plan, *, helpers, get_now):
     change = item.get("change")
     entry_text = format_price_value(entry_price)
     curr_text = format_price_value(curr_price)
-    _append_snapshot_lines(
-        lines,
-        price_text=curr_text or entry_text,
-        change=change,
-        confidence=plan_confidence_value(plan),
-        sources=None,
-        html_escape=html_escape,
-    )
-    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-
-    conf = plan_confidence_value(plan)
-    _append_edge_lines(
-        lines,
-        win_rate=plan.get("historical_win_rate"),
-        expectancy=plan.get("historical_avg_rr"),
-        trades=plan.get("historical_trades"),
-        html_escape=html_escape,
-    )
     action_guidance = build_trade_action_guidance(
         signal,
         plan=plan,
@@ -845,6 +826,22 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         action_guidance=action_guidance,
         current_price=item.get("price"),
     )
+    _append_snapshot_lines(
+        lines,
+        price_text=curr_text or entry_text,
+        change=change,
+        confidence=plan_confidence_value(plan),
+        sources=None,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
+    _append_edge_lines(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        html_escape=html_escape,
+    )
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
 
     context_parts = [
@@ -854,7 +851,7 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         str(plan.get("trend_1h") or "").strip(),
     ]
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
-    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผนอ้างอิง"
+    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผน"
     _append_levels_lines(
         lines,
         plan=plan,
@@ -892,16 +889,6 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
     curr_text = format_price_value(plan.get("current_price", item.get("price")))
     breakout_text = format_price_value(plan.get("breakout_level"))
     change = item.get("change")
-    _append_snapshot_lines(
-        lines,
-        price_text=curr_text or entry_text,
-        change=change,
-        confidence=plan_confidence_value(plan),
-        sources=None,
-        html_escape=html_escape,
-    )
-    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-
     trend_1h = str(plan.get("trend_1h") or "").strip()
     market_bias = str(plan.get("market_bias") or "").strip()
     adx = plan.get("adx")
@@ -918,14 +905,6 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
     if breakout_text:
         context_parts.insert(0, f"Level {breakout_text}")
 
-    conf = plan_confidence_value(plan)
-    _append_edge_lines(
-        lines,
-        win_rate=plan.get("historical_win_rate"),
-        expectancy=plan.get("historical_avg_rr"),
-        trades=plan.get("historical_trades"),
-        html_escape=html_escape,
-    )
     action_guidance = build_trade_action_guidance(signal, plan=plan, source_label="Trend Breakout 15m")
     decision = _append_trade_decision_lines(
         lines,
@@ -936,9 +915,25 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         action_guidance=action_guidance,
         current_price=plan.get("current_price", item.get("price")),
     )
+    _append_snapshot_lines(
+        lines,
+        price_text=curr_text or entry_text,
+        change=change,
+        confidence=plan_confidence_value(plan),
+        sources=None,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
+    _append_edge_lines(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        html_escape=html_escape,
+    )
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts, reasons=plan.get("reasons"))
-    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผนอ้างอิง"
+    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผน"
     _append_levels_lines(lines, plan=plan, format_price_value=format_price_value, html_escape=html_escape, plan_heading=plan_heading)
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)
@@ -1040,25 +1035,6 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
     price = item.get("price")
     change = item.get("change")
     price_text = format_price_value(price)
-    _append_snapshot_lines(
-        lines,
-        price_text=price_text,
-        change=change,
-        confidence=avg_wr,
-        sources=confluence,
-        html_escape=html_escape,
-    )
-    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-    _append_edge_lines(
-        lines,
-        win_rate=avg_wr,
-        expectancy=avg_exp,
-        trades=super_meta.get("avg_trades"),
-        html_escape=html_escape,
-        prefix="🏆 Ensemble",
-    )
-    lines.append("<b>⚠️ หมายเหตุ:</b> เป็นตัวเด่นของรอบนี้ แต่ยังต้องยึดสถานะและแผนด้านล่าง")
-
     if not isinstance(primary_plan, dict):
         primary_plan = pick_primary_trade_plan(
             item,
@@ -1080,13 +1056,31 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         action_guidance=action_guidance,
         current_price=item.get("price"),
     )
+    _append_snapshot_lines(
+        lines,
+        price_text=price_text,
+        change=change,
+        confidence=avg_wr,
+        sources=confluence,
+        html_escape=html_escape,
+    )
+    _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
+    _append_edge_lines(
+        lines,
+        win_rate=avg_wr,
+        expectancy=avg_exp,
+        trades=super_meta.get("avg_trades"),
+        html_escape=html_escape,
+        prefix="🏆 Ensemble",
+    )
+    lines.append("<b>⚠️ หมายเหตุ:</b> เป็นตัวเด่นของรอบนี้ แต่ให้ยึดสรุปและแผนด้านล่างเป็นหลัก")
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
     pattern = primary_plan.get("detected_pattern") if isinstance(primary_plan, dict) else None
     context_parts = []
     if pattern and pattern != "None":
         context_parts.append(f"Pattern {pattern}")
     _append_reason_line(lines, html_escape=html_escape, parts=context_parts)
-    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผนอ้างอิง"
+    plan_heading = "📌 แผนเข้า" if str((decision or {}).get("label") or "").strip() == "เข้าได้" else "📌 แผน"
     _append_levels_lines(lines, plan=primary_plan, format_price_value=format_price_value, html_escape=html_escape, plan_heading=plan_heading)
     _append_footer(lines, get_now=get_now, tv_symbol=tv_symbol)
     return "\n".join(lines)

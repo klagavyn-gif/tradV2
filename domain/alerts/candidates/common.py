@@ -144,6 +144,44 @@ def _insert_message_line_before_footer(message, line):
     return head + "\n" + line + "\n" + tail.lstrip("\n")
 
 
+def _entry_ai_rule_summary_text(profile):
+    if not isinstance(profile, dict):
+        return None
+    label = str(profile.get("label") or "").strip()
+    tier = str(profile.get("tier") or "").strip()
+    policy_tier = str(profile.get("policy_tier") or "").strip().lower()
+    prob_entry = _safe_float(profile.get("prob_entry"), None)
+    prob_avoid = _safe_float(profile.get("prob_avoid"), None)
+
+    if label == "เข้าได้":
+        tier_text = f" {tier}" if tier else ""
+        if prob_entry is not None and prob_avoid is not None:
+            return (
+                f"เข้าได้{tier_text} เมื่อ p(entry) >= 80% และ p(avoid) < 40% | "
+                f"รอบนี้ {prob_entry * 100.0:.0f}% / {prob_avoid * 100.0:.0f}%"
+            )
+        return f"เข้าได้{tier_text} เมื่อ Entry AI ยืนยันและความเสี่ยงยังคุมได้"
+
+    if label == "ห้ามเข้า" or policy_tier == "avoid":
+        if prob_entry is not None and prob_avoid is not None:
+            return (
+                "งดเมื่อ p(entry) < 40% หรือ p(avoid) >= 60% | "
+                f"รอบนี้ {prob_entry * 100.0:.0f}% / {prob_avoid * 100.0:.0f}%"
+            )
+        return "งดเมื่อ Entry AI เตือนว่าจุดเข้าหรือ reward/risk ยังไม่คุ้ม"
+
+    if label == "รอ" or policy_tier == "watch":
+        tier_text = f" {tier}" if tier else " Watch"
+        if prob_entry is not None and prob_avoid is not None:
+            return (
+                f"รอ{tier_text} เมื่อ p(entry) ยังไม่ถึง 80% หรือ p(avoid) ยังสูง | "
+                f"รอบนี้ {prob_entry * 100.0:.0f}% / {prob_avoid * 100.0:.0f}%"
+            )
+        return f"รอ{tier_text} เมื่อยังไม่ใช่จังหวะเข้าและควรรอดูเพิ่ม"
+
+    return None
+
+
 def _append_ai_message_line(message, profile, *, config):
     if not bool(getattr(config, "TELEGRAM_ALERT_AI_MESSAGE_ENABLE", True)):
         return message
@@ -402,7 +440,11 @@ def _append_entry_ai_message_line(message, profile, *, config):
     if reason and prob_entry is None and prob_avoid is None:
         parts.append(reason)
     line = "<b>🧠 Entry AI:</b> " + " | ".join(parts)
-    return _insert_message_line_before_footer(message, line)
+    message = _insert_message_line_before_footer(message, line)
+    rule_summary = _entry_ai_rule_summary_text(profile)
+    if rule_summary and "📘 กติกาใช้งาน:" not in str(message):
+        message = _insert_message_line_before_footer(message, "<b>📘 กติกาใช้งาน:</b> " + rule_summary)
+    return message
 
 
 def _append_sltp_message_line(message, profile):

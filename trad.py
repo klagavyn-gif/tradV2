@@ -3415,9 +3415,19 @@ def _entry_ai_policy_threshold_label(prob_map, *, entry_threshold, avoid_thresho
     return "watch"
 
 
-def _entry_ai_metadata_policy_threshold(metadata, policy_name, threshold_name, fallback=None):
+def _entry_ai_metadata_policy_threshold(metadata, policy_name, threshold_name, fallback=None, strategy=None):
     if not isinstance(metadata, dict):
         return fallback
+    strategy = _safe_upper_text(strategy, "")
+    strategy_policies = metadata.get("strategy_specific_policies")
+    if strategy and isinstance(strategy_policies, dict):
+        strategy_policy_root = strategy_policies.get(strategy)
+        if isinstance(strategy_policy_root, dict):
+            policy = strategy_policy_root.get(f"recommended_{policy_name}_policy")
+            if isinstance(policy, dict):
+                value = _safe_float(policy.get(threshold_name), None)
+                if value is not None:
+                    return value
     policy = metadata.get(f"recommended_{policy_name}_policy")
     if isinstance(policy, dict):
         value = _safe_float(policy.get(threshold_name), None)

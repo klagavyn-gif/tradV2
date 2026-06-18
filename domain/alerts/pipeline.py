@@ -322,6 +322,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         except Exception:
             pass
     if is_daily_best_pick_window():
+        always_send_daily_summary = bool(getattr(config, "TELEGRAM_DAILY_SUMMARY_ALWAYS_SEND", True))
         daily_candidates = build_daily_best_pick_candidates(results, runtime_context=runtime_context)
         daily_dispatch = dispatch_daily_candidates(
             daily_candidates,
@@ -337,7 +338,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         per_symbol_sent = dict(daily_dispatch["per_symbol_sent"])
         sent_candidates.extend(daily_dispatch["sent_candidates"])
         sent += daily_pick_sent
-        if not daily_pick_sent:
+        if always_send_daily_summary or not daily_pick_sent:
             daily_summary = build_daily_summary_message(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
             if dispatch_daily_summary(
                 daily_summary,
@@ -349,7 +350,11 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
                 sent += 1
                 daily_summary_sent = 1
             elif not daily_summary_sent:
-                logger.info("Daily Best Pick window active but no directional candidate or summary was sent")
+                logger.info(
+                    "Daily Best Pick window active but daily summary was not sent (daily_pick_sent=%s always_send=%s)",
+                    daily_pick_sent,
+                    always_send_daily_summary,
+                )
 
     trend_radar_candidates = []
     if not kill:

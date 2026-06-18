@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import html
 import json
 import math
 import os
@@ -49,6 +50,7 @@ def alert_history_csv_fieldnames():
         "entry_ai_premium_label",
         "entry_ai_standard_label",
         "entry_ai_watch_label",
+        "entry_ai_strategy_policy",
         "entry_ai_prob_entry",
         "entry_ai_prob_watch",
         "entry_ai_prob_avoid",
@@ -345,6 +347,7 @@ def candidate_ops_snapshot(candidate, *, helpers):
         "entry_ai_premium_label": str(candidate.get("entry_ai_premium_label") or "").strip().lower() or None,
         "entry_ai_standard_label": str(candidate.get("entry_ai_standard_label") or "").strip().lower() or None,
         "entry_ai_watch_label": str(candidate.get("entry_ai_watch_label") or "").strip().lower() or None,
+        "entry_ai_strategy_policy": str(candidate.get("entry_ai_strategy_policy") or "").strip().upper() or None,
         "entry_ai_prob_entry": float(candidate.get("entry_ai_prob_entry")) if isinstance(candidate.get("entry_ai_prob_entry"), (int, float)) else None,
         "entry_ai_prob_watch": float(candidate.get("entry_ai_prob_watch")) if isinstance(candidate.get("entry_ai_prob_watch"), (int, float)) else None,
         "entry_ai_prob_avoid": float(candidate.get("entry_ai_prob_avoid")) if isinstance(candidate.get("entry_ai_prob_avoid"), (int, float)) else None,
@@ -633,6 +636,37 @@ def _realized_metric_average(rows, field):
     return float(sum(values) / float(len(values)))
 
 
+def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
+    directional = []
+    by_symbol = {}
+    for entry in (entries or []):
+        if not isinstance(entry, dict):
+            continue
+        signal = str(entry.get("signal") or "").strip().upper()
+        symbol = str(entry.get("symbol") or "").strip().upper()
+        if signal in ("BUY", "SELL") and symbol:
+            directional.append(entry)
+            by_symbol.setdefault(symbol, []).append(entry)
+
+    outcomes = []
+    now_dt = get_now()
+    max_hold_bars = _safe_int(helpers["alert_realized_max_hold_bars"](), 64)
+    if max_hold_bars is None or max_hold_bars < 1:
+        max_hold_bars = 64
+    for symbol, rows in by_symbol.items():
+        history_df = _load_symbol_realized_history(symbol, rows, helpers=helpers, now_dt=now_dt)
+        for entry in rows:
+            outcomes.append(
+                _resolve_directional_alert_outcome(
+                    entry,
+                    price_df=history_df,
+                    now_dt=now_dt,
+                    max_hold_bars=max_hold_bars,
+                )
+            )
+    return directional, outcomes
+
+
 def _build_telegram_realized_report_from_entries(entries, *, days_value, helpers, get_now, strategy_order, history_lock):
     enabled = bool(helpers["alert_realized_enabled"]())
     generated_at = get_now().strftime("%Y-%m-%d %H:%M:%S")
@@ -659,34 +693,8 @@ def _build_telegram_realized_report_from_entries(entries, *, days_value, helpers
     if not enabled:
         return summary
 
-    directional = []
-    by_symbol = {}
-    for entry in (entries or []):
-        if not isinstance(entry, dict):
-            continue
-        signal = str(entry.get("signal") or "").strip().upper()
-        symbol = str(entry.get("symbol") or "").strip().upper()
-        if signal in ("BUY", "SELL") and symbol:
-            directional.append(entry)
-            by_symbol.setdefault(symbol, []).append(entry)
+    directional, outcomes = _resolve_directional_alert_outcomes(entries, helpers=helpers, get_now=get_now)
     summary["eligible_directional_alerts"] = len(directional)
-
-    outcomes = []
-    now_dt = get_now()
-    max_hold_bars = _safe_int(helpers["alert_realized_max_hold_bars"](), 64)
-    if max_hold_bars is None or max_hold_bars < 1:
-        max_hold_bars = 64
-    for symbol, rows in by_symbol.items():
-        history_df = _load_symbol_realized_history(symbol, rows, helpers=helpers, now_dt=now_dt)
-        for entry in rows:
-            outcomes.append(
-                _resolve_directional_alert_outcome(
-                    entry,
-                    price_df=history_df,
-                    now_dt=now_dt,
-                    max_hold_bars=max_hold_bars,
-                )
-            )
 
     settled = [row for row in outcomes if row.get("outcome_status") == "settled"]
     open_rows = [row for row in outcomes if row.get("outcome_status") == "open"]
@@ -896,6 +904,361 @@ def read_latest_telegram_run_report(path):
         return None
 
 
+def _read_json_file(path):
+    target = str(path or "").strip()
+    if not target or not os.path.exists(target):
+        return None
+    try:
+        with open(target, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _summary_section(payload):
+    if not isinstance(payload, dict):
+        return {}
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        return summary
+    return payload
+
+
+def _basename_text(path):
+    text = str(path or "").strip()
+    if not text:
+        return None
+    return os.path.basename(text.replace("\\", os.sep).replace("/", os.sep)) or text
+
+
+def _fmt_number(value, digits=1, suffix=""):
+    number = _safe_float(value)
+    if number is None:
+        return "-"
+    return f"{number:.{int(digits)}f}{suffix}"
+
+
+def _fmt_count(value):
+    count = _safe_int(value)
+    if count is None:
+        return "-"
+    return str(int(count))
+
+
+def _format_counter_items(counter_map, *, limit=3, key_map=None):
+    if not isinstance(counter_map, dict):
+        return "-"
+    items = []
+    for key, value in counter_map.items():
+        count = _safe_int(value)
+        text = str(key or "").strip()
+        if count is None or count <= 0 or not text:
+            continue
+        if isinstance(key_map, dict):
+            text = str(key_map.get(text, text))
+        items.append((text, int(count)))
+    if not items:
+        return "-"
+    items.sort(key=lambda item: (-item[1], item[0]))
+    return ", ".join([f"{text} {count}" for text, count in items[: max(1, int(limit))]])
+
+
+def _top_quality_drop_counts(quality_drop_counts, *, limit=3):
+    if not isinstance(quality_drop_counts, dict):
+        return "-"
+    cleaned = []
+    for key, value in quality_drop_counts.items():
+        count = _safe_int(value)
+        text = str(key or "").strip()
+        if count is None or count <= 0 or not text:
+            continue
+        cleaned.append((text.replace("_", " "), int(count)))
+    if not cleaned:
+        return "-"
+    cleaned.sort(key=lambda item: (-item[1], item[0]))
+    return ", ".join([f"{text} {count}" for text, count in cleaned[: max(1, int(limit))]])
+
+
+def _latest_entry_ai_runtime(entries, *, helpers):
+    runtime = {
+        "model_path": None,
+        "model_name": None,
+        "model_version": None,
+        "trained_at": None,
+        "policy_schema_version": None,
+        "allowlist": None,
+        "live_enabled": None,
+    }
+    model_path_getter = helpers.get("entry_ai_model_path")
+    if callable(model_path_getter):
+        runtime["model_path"] = str(model_path_getter() or "").strip() or None
+        runtime["model_name"] = _basename_text(runtime["model_path"])
+    live_enabled_getter = helpers.get("entry_ai_live_enabled")
+    if callable(live_enabled_getter):
+        runtime["live_enabled"] = bool(live_enabled_getter())
+    allowlist_getter = helpers.get("entry_ai_allowlist_text")
+    if callable(allowlist_getter):
+        allowlist = str(allowlist_getter() or "").strip()
+        runtime["allowlist"] = allowlist or None
+    for row in (entries or []):
+        if not isinstance(row, dict):
+            continue
+        if runtime["model_version"] is None:
+            text = str(row.get("entry_ai_model_version") or "").strip()
+            runtime["model_version"] = text or None
+        if runtime["trained_at"] is None:
+            text = str(row.get("entry_ai_model_trained_at") or "").strip()
+            runtime["trained_at"] = text or None
+        if runtime["policy_schema_version"] is None:
+            text = str(row.get("entry_ai_policy_schema_version") or "").strip()
+            runtime["policy_schema_version"] = text or None
+        if runtime["model_version"] and runtime["trained_at"] and runtime["policy_schema_version"]:
+            break
+    return runtime
+
+
+def _rank_daily_summary_candidates(existing_candidates, *, results, min_conf, top_n, helpers):
+    ranked = [row for row in (existing_candidates or []) if isinstance(row, dict)]
+    build_candidates = helpers.get("build_telegram_candidates")
+    if not ranked and callable(build_candidates):
+        try:
+            built = build_candidates(results or [], min_conf, runtime_context=None)
+        except TypeError:
+            built = build_candidates(results or [], min_conf)
+        if isinstance(built, tuple):
+            ranked = [row for row in (built[0] or []) if isinstance(row, dict)]
+        elif isinstance(built, list):
+            ranked = [row for row in built if isinstance(row, dict)]
+    ranked.sort(
+        key=lambda row: (
+            _safe_float(row.get("score"), 0.0) or 0.0,
+            _safe_float(row.get("confidence"), 0.0) or 0.0,
+        ),
+        reverse=True,
+    )
+    normalize_symbol = helpers["normalize_symbol"]
+    unique_ranked = []
+    seen_symbols = set()
+    for row in ranked:
+        symbol = normalize_symbol(row.get("symbol") or "")
+        if not symbol or symbol in seen_symbols:
+            continue
+        seen_symbols.add(symbol)
+        unique_ranked.append(row)
+        if len(unique_ranked) >= top_n:
+            break
+    return unique_ranked
+
+
+def build_telegram_daily_summary_message(
+    results,
+    *,
+    existing_candidates=None,
+    min_conf=None,
+    config,
+    helpers,
+    get_now,
+    strategy_order,
+    history_lock,
+):
+    if not bool(getattr(config, "TELEGRAM_DAILY_SUMMARY_ENABLED", True)):
+        return None
+    try:
+        top_n = max(1, int(getattr(config, "TELEGRAM_DAILY_SUMMARY_TOP_N", 3)))
+    except Exception:
+        top_n = 3
+    try:
+        history_days = float(getattr(config, "TELEGRAM_DAILY_SUMMARY_HISTORY_DAYS", 1.0))
+    except Exception:
+        history_days = 1.0
+    if history_days <= 0:
+        history_days = 1.0
+    try:
+        realized_days = float(getattr(config, "TELEGRAM_DAILY_SUMMARY_REALIZED_DAYS", 45.0))
+    except Exception:
+        realized_days = 45.0
+    if realized_days <= 0:
+        realized_days = 45.0
+    if not isinstance(min_conf, (int, float)):
+        min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
+    try:
+        min_conf = float(min_conf)
+    except Exception:
+        min_conf = 58.0
+
+    now_dt = get_now()
+    now_text = now_dt.strftime("%Y-%m-%d %H:%M")
+    recent_entries = helpers["read_telegram_alert_history"](days=history_days)
+    latest_run = read_latest_telegram_run_report(helpers["alert_run_report_file_path"]())
+    realized_payload = _read_json_file(helpers["alert_realized_summary_file_path"]()) or {}
+    realized_summary = _summary_section(realized_payload)
+    feedback_summary = _summary_section(_read_json_file(helpers["alert_feedback_summary_file_path"]()) or {})
+    training_summary = _summary_section(_read_json_file(helpers["live_feedback_training_summary_file_path"]()) or {})
+    calibration_summary = _summary_section(_read_json_file(helpers["live_feedback_calibration_summary_file_path"]()) or {})
+    shadow_summary = _summary_section(_read_json_file(helpers["live_feedback_shadow_summary_file_path"]()) or {})
+    runtime = _latest_entry_ai_runtime(recent_entries, helpers=helpers)
+
+    strategies = Counter()
+    symbols = Counter()
+    signals = Counter()
+    intents = Counter()
+    tiers = Counter()
+    buckets = Counter()
+    daily_pick_count = 0
+    directional_count = 0
+    latest_alert_at = None
+    for entry in recent_entries:
+        if not isinstance(entry, dict):
+            continue
+        strategy = str(entry.get("strategy") or "").strip().upper()
+        symbol = helpers["normalize_symbol"](entry.get("symbol") or "")
+        signal = str(entry.get("signal") or "").strip().upper()
+        intent = str(entry.get("alert_intent") or "").strip().lower()
+        tier = str(entry.get("entry_ai_policy_tier") or "").strip().lower()
+        bucket = str(entry.get("entry_ai_bucket") or "").strip().lower()
+        if strategy:
+            strategies[strategy] += 1
+        if symbol:
+            symbols[symbol] += 1
+        if signal:
+            signals[signal] += 1
+        if intent:
+            intents[intent] += 1
+        if tier:
+            tiers[tier] += 1
+        if bucket:
+            buckets[bucket] += 1
+        if bool(entry.get("daily_pick")):
+            daily_pick_count += 1
+        if signal in {"BUY", "SELL"}:
+            directional_count += 1
+        ts_text = str(entry.get("timestamp") or "").strip()
+        if ts_text and latest_alert_at is None:
+            latest_alert_at = ts_text
+
+    ranked = _rank_daily_summary_candidates(
+        existing_candidates,
+        results=results,
+        min_conf=min_conf,
+        top_n=top_n,
+        helpers=helpers,
+    )
+    candidate_backtest_snapshot = helpers["candidate_backtest_snapshot"]
+    lines = [
+        "<b>Daily 09:00 Executive Summary</b>",
+        f"⏱️ <b>เวลา:</b> {html.escape(now_text)}",
+    ]
+
+    runtime_parts = [
+        "ON" if runtime.get("live_enabled") else "OFF",
+        runtime.get("model_name") or "-",
+    ]
+    if runtime.get("model_version"):
+        runtime_parts.append(f"ver {runtime['model_version']}")
+    if runtime.get("trained_at"):
+        runtime_parts.append(f"trained {runtime['trained_at']}")
+    lines.append("🤖 <b>Runtime:</b> " + " | ".join([html.escape(str(part)) for part in runtime_parts if str(part).strip()]))
+    if runtime.get("allowlist"):
+        lines.append(f"🧭 <b>Promotion:</b> {html.escape(runtime['allowlist'])}")
+
+    if isinstance(latest_run, dict):
+        lines.append(
+            "🧪 <b>Latest Run:</b> "
+            + f"{html.escape(str(latest_run.get('generated_at') or '-'))} | "
+            + f"raw {html.escape(_fmt_count(latest_run.get('raw_candidate_count')))}"
+            + f" -> cand {html.escape(_fmt_count(latest_run.get('candidate_count')))}"
+            + f" -> sent {html.escape(_fmt_count(latest_run.get('sent_count')))}"
+        )
+        lines.append(
+            "📤 <b>Dispatch:</b> "
+            + f"daily_pick {html.escape(_fmt_count(latest_run.get('daily_pick_sent')))}"
+            + f" | daily_summary {html.escape(_fmt_count(latest_run.get('daily_summary_sent')))}"
+            + f" | quality drops {html.escape(_top_quality_drop_counts(latest_run.get('quality_drop_counts')))}"
+        )
+    else:
+        lines.append("🧪 <b>Latest Run:</b> ยังไม่มี `latest_run.json` ใน runtime path")
+
+    if recent_entries:
+        lines.append(
+            "📣 <b>Alert "
+            + f"{html.escape(_fmt_number(history_days, digits=1))}d:</b> "
+            + f"{len(recent_entries)} alerts | directional {directional_count}"
+            + f" | daily_pick {daily_pick_count} | symbols {len(symbols)}"
+        )
+        lines.append(
+            "📊 <b>Mix:</b> "
+            + f"intent {html.escape(_format_counter_items(dict(intents), limit=3))}"
+            + f" | tier {html.escape(_format_counter_items(dict(tiers), limit=4))}"
+        )
+        lines.append(
+            "🗂️ <b>Top Flow:</b> "
+            + f"strategy {html.escape(_format_counter_items(dict(strategies), limit=3))}"
+            + f" | symbol {html.escape(_format_counter_items(dict(symbols), limit=3))}"
+        )
+        if latest_alert_at:
+            lines.append(f"🕒 <b>Latest Alert:</b> {html.escape(latest_alert_at)}")
+    else:
+        lines.append(f"📣 <b>Alert {html.escape(_fmt_number(history_days, digits=1))}d:</b> ยังไม่มี alert ในช่วงล่าสุด")
+
+    realized_generated_at = str(realized_summary.get("generated_at") or realized_payload.get("generated_at") or "").strip()
+    lines.append(
+        "🎯 <b>Realized "
+        + f"{html.escape(_fmt_number(realized_days, digits=0))}d:</b> "
+        + f"settled {html.escape(_fmt_count(realized_summary.get('settled_alerts')))}"
+        + f" | WR {html.escape(_fmt_number(realized_summary.get('win_rate_pct'), suffix='%'))}"
+        + f" | RR {html.escape(_fmt_number(realized_summary.get('avg_rr_realized'), digits=2))}"
+        + f" | PnL {html.escape(_fmt_number(realized_summary.get('avg_pnl_pct'), digits=2, suffix='%'))}"
+    )
+    if realized_generated_at:
+        lines.append(f"📅 <b>Realized Updated:</b> {html.escape(realized_generated_at)}")
+
+    lines.append(
+        "🔁 <b>Feedback Loop:</b> "
+        + f"feedback {html.escape(_fmt_count(feedback_summary.get('training_ready_rows')))} ready"
+        + f" | train {html.escape(_fmt_count(training_summary.get('filled_rows')))} filled"
+        + f" | calibration {html.escape(_fmt_count(calibration_summary.get('filled_row_count')))}"
+        + f" | shadow {html.escape(_fmt_count(shadow_summary.get('filled_row_count')))}"
+    )
+    shadow_model_version = str(shadow_summary.get("model_version") or "").strip()
+    if shadow_model_version:
+        lines.append(f"🪞 <b>Shadow Model:</b> {html.escape(shadow_model_version)}")
+
+    if ranked:
+        lines.append("📌 <b>Top Candidates Now:</b>")
+        for idx, row in enumerate(ranked, start=1):
+            metrics = candidate_backtest_snapshot(row)
+            symbol = helpers["normalize_symbol"](row.get("symbol") or "") or "-"
+            strategy = str(row.get("strategy") or "ALERT").strip().upper() or "ALERT"
+            signal = str(row.get("signal") or "WAIT").strip().upper() or "WAIT"
+            tier = str(row.get("entry_ai_policy_tier") or row.get("entry_ai_bucket") or "").strip().lower() or "-"
+            confidence = _safe_float(row.get("confidence"))
+            score = _safe_float(row.get("score"))
+            wr = _safe_float(metrics.get("win_rate_pct"))
+            lines.append(
+                f"{idx}. <b>{html.escape(strategy)}</b> | {html.escape(symbol)} | {html.escape(signal)} | "
+                + f"tier {html.escape(tier)} | conf {html.escape(_fmt_number(confidence, digits=0, suffix='%'))}"
+                + f" | score {html.escape(_fmt_number(score, digits=1))}"
+                + f" | WR {html.escape(_fmt_number(wr, digits=1, suffix='%'))}"
+            )
+    else:
+        lines.append("📌 <b>Top Candidates Now:</b> ยังไม่มี candidate ที่ผ่าน gate ในรอบนี้")
+
+    return {
+        "strategy": "DAILY_SUMMARY",
+        "signal": "INFO",
+        "score": float(_safe_float(realized_summary.get("win_rate_pct"), 0.0) or 0.0),
+        "confidence": float(_safe_float(realized_summary.get("win_rate_pct"), 0.0) or 0.0),
+        "edge_metrics": {
+            "win_rate_pct": _safe_float(realized_summary.get("win_rate_pct")),
+            "expectancy_rr": _safe_float(realized_summary.get("avg_rr_realized")),
+            "trades": _safe_float(realized_summary.get("settled_alerts")),
+        },
+        "message": "\n".join(lines),
+        "cache_key": f"DAILYSUMMARY_EXEC|{now_dt.strftime('%Y%m%d')}",
+    }
+
+
 def record_telegram_alert_history(
     candidate,
     *,
@@ -968,6 +1331,7 @@ def record_telegram_alert_history(
         "entry_ai_premium_label": str(candidate.get("entry_ai_premium_label") or "").strip().lower() or None,
         "entry_ai_standard_label": str(candidate.get("entry_ai_standard_label") or "").strip().lower() or None,
         "entry_ai_watch_label": str(candidate.get("entry_ai_watch_label") or "").strip().lower() or None,
+        "entry_ai_strategy_policy": str(candidate.get("entry_ai_strategy_policy") or "").strip().upper() or None,
         "entry_ai_prob_entry": float(candidate.get("entry_ai_prob_entry")) if isinstance(candidate.get("entry_ai_prob_entry"), (int, float)) else None,
         "entry_ai_prob_watch": float(candidate.get("entry_ai_prob_watch")) if isinstance(candidate.get("entry_ai_prob_watch"), (int, float)) else None,
         "entry_ai_prob_avoid": float(candidate.get("entry_ai_prob_avoid")) if isinstance(candidate.get("entry_ai_prob_avoid"), (int, float)) else None,
@@ -1432,3 +1796,511 @@ def write_verify_output(
     if include_results:
         payload["results"] = clean_json_value(results or [])
     return write_json_atomic(output_path, payload)
+
+
+def alert_feedback_export_fieldnames():
+    return alert_history_csv_fieldnames() + [
+        "outcome_status",
+        "outcome_result",
+        "exit_reason",
+        "settled_at",
+        "exit_price",
+        "bars_observed",
+        "bars_to_outcome",
+        "maturity_progress_pct",
+        "rr_realized",
+        "pnl_pct",
+        "mfe_pct",
+        "mae_pct",
+        "feedback_group",
+        "feedback_is_directional",
+        "feedback_is_settled",
+        "feedback_is_win",
+        "feedback_is_loss",
+        "feedback_is_flat",
+        "feedback_training_ready",
+    ]
+
+
+def _feedback_export_row(entry, outcome):
+    row = {key: entry.get(key) for key in alert_history_csv_fieldnames()}
+    outcome_status = str((outcome or {}).get("outcome_status") or "").strip().lower() or None
+    outcome_result = str((outcome or {}).get("outcome_result") or "").strip().lower() or None
+    row.update(
+        {
+            "outcome_status": outcome_status,
+            "outcome_result": outcome_result,
+            "exit_reason": str((outcome or {}).get("exit_reason") or "").strip() or None,
+            "settled_at": str((outcome or {}).get("settled_at") or "").strip() or None,
+            "exit_price": _safe_float((outcome or {}).get("exit_price")),
+            "bars_observed": _safe_int((outcome or {}).get("bars_observed")),
+            "bars_to_outcome": _safe_int((outcome or {}).get("bars_to_outcome")),
+            "maturity_progress_pct": _safe_float((outcome or {}).get("maturity_progress_pct")),
+            "rr_realized": _safe_float((outcome or {}).get("rr_realized")),
+            "pnl_pct": _safe_float((outcome or {}).get("pnl_pct")),
+            "mfe_pct": _safe_float((outcome or {}).get("mfe_pct")),
+            "mae_pct": _safe_float((outcome or {}).get("mae_pct")),
+            "feedback_group": outcome_status or "missing",
+            "feedback_is_directional": True,
+            "feedback_is_settled": outcome_status == "settled",
+            "feedback_is_win": outcome_result == "win",
+            "feedback_is_loss": outcome_result == "loss",
+            "feedback_is_flat": outcome_result == "flat",
+            "feedback_training_ready": outcome_status == "settled" and outcome_result in {"win", "loss", "flat"},
+        }
+    )
+    return row
+
+
+def build_telegram_alert_feedback_export(*, days=90, strategies=None, symbols=None, include_open=False, helpers, get_now):
+    entries = helpers["read_telegram_alert_history"](
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+    )
+    try:
+        days_value = float(days) if days is not None else None
+    except Exception:
+        days_value = None
+
+    generated_at = get_now().strftime("%Y-%m-%d %H:%M:%S")
+    directional, outcomes = _resolve_directional_alert_outcomes(entries, helpers=helpers, get_now=get_now)
+    outcomes_by_id = {}
+    for row in outcomes:
+        alert_id = str(row.get("alert_id") or "").strip()
+        if alert_id:
+            outcomes_by_id[alert_id] = row
+
+    rows = []
+    for entry in directional:
+        alert_id = str(entry.get("alert_id") or "").strip()
+        outcome = outcomes_by_id.get(alert_id) or {}
+        feedback_row = _feedback_export_row(entry, outcome)
+        if not include_open and not bool(feedback_row.get("feedback_training_ready")):
+            continue
+        rows.append(feedback_row)
+
+    settled_rows = [row for row in rows if row.get("feedback_is_settled")]
+    training_ready_rows = [row for row in rows if row.get("feedback_training_ready")]
+    win_rows = [row for row in settled_rows if row.get("feedback_is_win")]
+    loss_rows = [row for row in settled_rows if row.get("feedback_is_loss")]
+    flat_rows = [row for row in settled_rows if row.get("feedback_is_flat")]
+
+    by_strategy = {}
+    by_policy_tier = {}
+    for row in rows:
+        strategy = str(row.get("strategy") or "UNKNOWN").strip().upper()
+        policy_tier = str(row.get("entry_ai_policy_tier") or "unknown").strip().lower() or "unknown"
+        for key, bucket_map in ((strategy, by_strategy), (policy_tier, by_policy_tier)):
+            bucket = bucket_map.setdefault(
+                key,
+                {
+                    "rows": 0,
+                    "settled_rows": 0,
+                    "training_ready_rows": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "flats": 0,
+                    "win_rate_pct": None,
+                    "avg_rr_realized": None,
+                    "avg_pnl_pct": None,
+                    "_rows": [],
+                },
+            )
+            bucket["rows"] += 1
+            bucket["_rows"].append(row)
+            if row.get("feedback_is_settled"):
+                bucket["settled_rows"] += 1
+            if row.get("feedback_training_ready"):
+                bucket["training_ready_rows"] += 1
+            if row.get("feedback_is_win"):
+                bucket["wins"] += 1
+            elif row.get("feedback_is_loss"):
+                bucket["losses"] += 1
+            elif row.get("feedback_is_flat"):
+                bucket["flats"] += 1
+
+    for bucket_map in (by_strategy, by_policy_tier):
+        for key, bucket in list(bucket_map.items()):
+            ready_rows = [row for row in bucket.pop("_rows", []) if row.get("feedback_training_ready")]
+            bucket["avg_rr_realized"] = _realized_metric_average(ready_rows, "rr_realized")
+            bucket["avg_pnl_pct"] = _realized_metric_average(ready_rows, "pnl_pct")
+            if bucket["training_ready_rows"] > 0:
+                bucket["win_rate_pct"] = (float(bucket["wins"]) / float(bucket["training_ready_rows"])) * 100.0
+            bucket_map[key] = bucket
+
+    summary = {
+        "generated_at": generated_at,
+        "window_days": days_value,
+        "total_history_entries": len(entries or []),
+        "eligible_directional_alerts": len(directional),
+        "exported_rows": len(rows),
+        "settled_rows": len(settled_rows),
+        "training_ready_rows": len(training_ready_rows),
+        "wins": len(win_rows),
+        "losses": len(loss_rows),
+        "flats": len(flat_rows),
+        "include_open": bool(include_open),
+        "win_rate_pct": (float(len(win_rows)) / float(len(training_ready_rows)) * 100.0) if training_ready_rows else None,
+        "avg_rr_realized": _realized_metric_average(training_ready_rows, "rr_realized"),
+        "avg_pnl_pct": _realized_metric_average(training_ready_rows, "pnl_pct"),
+        "by_strategy": {key: by_strategy[key] for key in sorted(by_strategy.keys())},
+        "by_entry_ai_policy_tier": {key: by_policy_tier[key] for key in sorted(by_policy_tier.keys())},
+    }
+    return {
+        "generated_at": generated_at,
+        "window_days": days_value,
+        "fieldnames": alert_feedback_export_fieldnames(),
+        "summary": summary,
+        "rows": rows,
+    }
+
+
+def live_feedback_training_fieldnames():
+    return [
+        "checkpoint_at",
+        "candidate_group",
+        "candidate_rank",
+        "timestamp",
+        "alert_id",
+        "strategy",
+        "symbol",
+        "signal",
+        "timeframe",
+        "evaluation_window_bars",
+        "daily_pick",
+        "alert_tier",
+        "alert_tier_score",
+        "tier_rank",
+        "tier_action",
+        "alert_mode",
+        "confidence",
+        "score",
+        "source_count",
+        "source_label",
+        "strategy_label",
+        "alert_intent",
+        "alert_intent_reason",
+        "ai_dispatch_label",
+        "ai_dispatch_bucket",
+        "ai_dispatch_reason",
+        "ai_prob_win",
+        "ai_expected_return_pct",
+        "ai_rank_adjustment",
+        "ai_runtime_status",
+        "ai_runtime_reason",
+        "entry_ai_label",
+        "entry_ai_bucket",
+        "entry_ai_reason",
+        "entry_ai_policy_mode",
+        "entry_ai_policy_tier",
+        "entry_ai_premium_label",
+        "entry_ai_standard_label",
+        "entry_ai_watch_label",
+        "entry_ai_strategy_policy",
+        "entry_ai_prob_entry",
+        "entry_ai_prob_watch",
+        "entry_ai_prob_avoid",
+        "entry_ai_model_type",
+        "entry_ai_model_version",
+        "entry_ai_model_trained_at",
+        "entry_ai_feature_schema_version",
+        "entry_ai_label_schema_version",
+        "entry_ai_policy_schema_version",
+        "entry_ai_rank_adjustment",
+        "entry_ai_runtime_status",
+        "entry_ai_runtime_reason",
+        "short_trade_label",
+        "short_trade_bucket",
+        "short_trade_reason",
+        "short_trade_score_adjustment",
+        "short_trade_regime_aligned",
+        "sltp_live_label",
+        "sltp_live_bucket",
+        "sltp_live_reason",
+        "sltp_live_score_adjustment",
+        "entry_price",
+        "price_at_checkpoint",
+        "stop_loss",
+        "take_profit",
+        "risk_reward",
+        "entry_gap_pct",
+        "stop_risk_pct",
+        "target_reward_pct",
+        "rr_ratio",
+        "detected_pattern",
+        "forecast_direction",
+        "forecast_score",
+        "plan_reason",
+        "bars_since_signal",
+        "red_to_green_quality_score",
+        "green_flip_reclaim",
+        "min_confidence",
+        "dynamic_min_confidence",
+        "backtest_win_rate_pct",
+        "backtest_expectancy_rr",
+        "backtest_trades",
+        "cache_key",
+        "label_status",
+        "label_filled",
+        "label_win",
+        "label_fill_bar",
+        "label_exit_bar",
+        "label_fill_timestamp",
+        "label_exit_timestamp",
+        "label_return_pct",
+        "label_mfe_pct",
+        "label_mae_pct",
+        "label_mfe_r",
+        "label_mae_r",
+        "feedback_outcome_status",
+        "feedback_outcome_result",
+        "feedback_exit_reason",
+        "feedback_settled_at",
+        "feedback_exit_price",
+        "feedback_bars_observed",
+        "feedback_bars_to_outcome",
+        "feedback_maturity_progress_pct",
+    ]
+
+
+def _derive_candidate_group_from_feedback_row(row):
+    strategy = str(row.get("strategy") or "").strip().upper()
+    if bool(row.get("daily_pick")) or strategy == "DAILY_BEST":
+        return "daily"
+    if strategy in {"TRADAR15", "TRENDRADAR15", "TREND_RADAR"}:
+        return "trend_radar"
+    if strategy in {"TRENDSTATE15", "TREND_STATE"}:
+        return "trend_state"
+    return "primary"
+
+
+def _derive_tier_rank(value):
+    text = str(value or "").strip().upper()
+    if text == "S":
+        return 5
+    if text == "A":
+        return 4
+    if text == "B":
+        return 3
+    if text == "C":
+        return 2
+    if text:
+        return 1
+    return 0
+
+
+def _feedback_price_at_checkpoint(row):
+    entry_price = _safe_float(row.get("entry_price"), None)
+    entry_gap_pct = _safe_float(row.get("sltp_live_entry_gap_pct"), None)
+    if entry_price is None:
+        return None
+    if entry_gap_pct is None or entry_gap_pct <= 0:
+        return entry_price
+    return float(entry_price) * (1.0 + (float(entry_gap_pct) / 100.0))
+
+
+def _feedback_training_row(row):
+    stop_risk_pct = _safe_float(row.get("sltp_live_stop_risk_pct"), None)
+    target_reward_pct = _safe_float(row.get("sltp_live_target_reward_pct"), None)
+    entry_gap_pct = _safe_float(row.get("sltp_live_entry_gap_pct"), None)
+    rr_ratio = _safe_float(row.get("sltp_live_rr_ratio"), None)
+    pnl_pct = _safe_float(row.get("pnl_pct"), None)
+    mfe_pct = _safe_float(row.get("mfe_pct"), None)
+    mae_pct = _safe_float(row.get("mae_pct"), None)
+    outcome_status = str(row.get("outcome_status") or "").strip().lower() or None
+    outcome_result = str(row.get("outcome_result") or "").strip().lower() or None
+    label_filled = outcome_status == "settled"
+    label_win = True if outcome_result == "win" else False if label_filled else None
+
+    label_mfe_r = None
+    label_mae_r = None
+    if isinstance(stop_risk_pct, (int, float)) and stop_risk_pct > 0:
+        if isinstance(mfe_pct, (int, float)):
+            label_mfe_r = float(mfe_pct) / float(stop_risk_pct)
+        if isinstance(mae_pct, (int, float)):
+            label_mae_r = -abs(float(mae_pct)) / float(stop_risk_pct)
+
+    return {
+        "checkpoint_at": str(row.get("timestamp") or "").strip() or None,
+        "candidate_group": _derive_candidate_group_from_feedback_row(row),
+        "candidate_rank": None,
+        "timestamp": str(row.get("timestamp") or "").strip() or None,
+        "alert_id": str(row.get("alert_id") or "").strip() or None,
+        "strategy": str(row.get("strategy") or "").strip().upper() or None,
+        "symbol": str(row.get("symbol") or "").strip().upper() or None,
+        "signal": str(row.get("signal") or "").strip().upper() or None,
+        "timeframe": str(row.get("timeframe") or "").strip().lower() or None,
+        "evaluation_window_bars": _safe_int(row.get("evaluation_window_bars")),
+        "daily_pick": bool(row.get("daily_pick")),
+        "alert_tier": str(row.get("alert_tier") or "").strip() or None,
+        "alert_tier_score": _safe_float(row.get("alert_tier_score")),
+        "tier_rank": _derive_tier_rank(row.get("alert_tier")),
+        "tier_action": str(row.get("tier_action") or "").strip() or None,
+        "alert_mode": str(row.get("alert_mode") or "").strip() or None,
+        "confidence": _safe_float(row.get("confidence")),
+        "score": _safe_float(row.get("score")),
+        "source_count": _safe_int(row.get("source_count"), 0),
+        "source_label": str(row.get("source_label") or "").strip() or None,
+        "strategy_label": str(row.get("strategy_label") or "").strip() or None,
+        "alert_intent": str(row.get("alert_intent") or "").strip().lower() or None,
+        "alert_intent_reason": str(row.get("alert_intent_reason") or "").strip() or None,
+        "ai_dispatch_label": str(row.get("ai_dispatch_label") or "").strip() or None,
+        "ai_dispatch_bucket": str(row.get("ai_dispatch_bucket") or "").strip().lower() or None,
+        "ai_dispatch_reason": str(row.get("ai_dispatch_reason") or "").strip() or None,
+        "ai_prob_win": _safe_float(row.get("ai_prob_win")),
+        "ai_expected_return_pct": _safe_float(row.get("ai_expected_return_pct")),
+        "ai_rank_adjustment": _safe_float(row.get("ai_rank_adjustment")),
+        "ai_runtime_status": str(row.get("ai_runtime_status") or "").strip().lower() or None,
+        "ai_runtime_reason": str(row.get("ai_runtime_reason") or "").strip() or None,
+        "entry_ai_label": str(row.get("entry_ai_label") or "").strip() or None,
+        "entry_ai_bucket": str(row.get("entry_ai_bucket") or "").strip().lower() or None,
+        "entry_ai_reason": str(row.get("entry_ai_reason") or "").strip() or None,
+        "entry_ai_policy_mode": str(row.get("entry_ai_policy_mode") or "").strip().lower() or None,
+        "entry_ai_policy_tier": str(row.get("entry_ai_policy_tier") or "").strip().lower() or None,
+        "entry_ai_premium_label": str(row.get("entry_ai_premium_label") or "").strip().lower() or None,
+        "entry_ai_standard_label": str(row.get("entry_ai_standard_label") or "").strip().lower() or None,
+        "entry_ai_watch_label": str(row.get("entry_ai_watch_label") or "").strip().lower() or None,
+        "entry_ai_strategy_policy": str(row.get("entry_ai_strategy_policy") or "").strip().upper() or None,
+        "entry_ai_prob_entry": _safe_float(row.get("entry_ai_prob_entry")),
+        "entry_ai_prob_watch": _safe_float(row.get("entry_ai_prob_watch")),
+        "entry_ai_prob_avoid": _safe_float(row.get("entry_ai_prob_avoid")),
+        "entry_ai_model_type": str(row.get("entry_ai_model_type") or "").strip() or None,
+        "entry_ai_model_version": str(row.get("entry_ai_model_version") or "").strip() or None,
+        "entry_ai_model_trained_at": str(row.get("entry_ai_model_trained_at") or "").strip() or None,
+        "entry_ai_feature_schema_version": str(row.get("entry_ai_feature_schema_version") or "").strip() or None,
+        "entry_ai_label_schema_version": str(row.get("entry_ai_label_schema_version") or "").strip() or None,
+        "entry_ai_policy_schema_version": str(row.get("entry_ai_policy_schema_version") or "").strip() or None,
+        "entry_ai_rank_adjustment": _safe_float(row.get("entry_ai_rank_adjustment")),
+        "entry_ai_runtime_status": str(row.get("entry_ai_runtime_status") or "").strip().lower() or None,
+        "entry_ai_runtime_reason": str(row.get("entry_ai_runtime_reason") or "").strip() or None,
+        "short_trade_label": str(row.get("short_trade_label") or "").strip() or None,
+        "short_trade_bucket": str(row.get("short_trade_bucket") or "").strip().lower() or None,
+        "short_trade_reason": str(row.get("short_trade_reason") or "").strip() or None,
+        "short_trade_score_adjustment": _safe_float(row.get("short_trade_score_adjustment")),
+        "short_trade_regime_aligned": bool(row.get("short_trade_regime_aligned")) if row.get("short_trade_regime_aligned") is not None else None,
+        "sltp_live_label": str(row.get("sltp_live_label") or "").strip() or None,
+        "sltp_live_bucket": str(row.get("sltp_live_bucket") or "").strip().lower() or None,
+        "sltp_live_reason": str(row.get("sltp_live_reason") or "").strip() or None,
+        "sltp_live_score_adjustment": _safe_float(row.get("sltp_live_score_adjustment")),
+        "entry_price": _safe_float(row.get("entry_price")),
+        "price_at_checkpoint": _feedback_price_at_checkpoint(row),
+        "stop_loss": _safe_float(row.get("stop_loss")),
+        "take_profit": _safe_float(row.get("take_profit")),
+        "risk_reward": _safe_float(row.get("risk_reward")),
+        "entry_gap_pct": entry_gap_pct,
+        "stop_risk_pct": stop_risk_pct,
+        "target_reward_pct": target_reward_pct,
+        "rr_ratio": rr_ratio,
+        "detected_pattern": str(row.get("detected_pattern") or "").strip() or None,
+        "forecast_direction": str(row.get("forecast_direction") or "").strip().upper() or None,
+        "forecast_score": _safe_float(row.get("forecast_score")),
+        "plan_reason": str(row.get("plan_reason") or "").strip() or None,
+        "bars_since_signal": _safe_float(row.get("bars_since_signal")),
+        "red_to_green_quality_score": _safe_float(row.get("red_to_green_quality_score")),
+        "green_flip_reclaim": bool(row.get("green_flip_reclaim")) if row.get("green_flip_reclaim") is not None else None,
+        "min_confidence": _safe_float(row.get("min_confidence")),
+        "dynamic_min_confidence": _safe_float(row.get("dynamic_min_confidence")),
+        "backtest_win_rate_pct": _safe_float(row.get("backtest_win_rate_pct")),
+        "backtest_expectancy_rr": _safe_float(row.get("backtest_expectancy_rr")),
+        "backtest_trades": _safe_float(row.get("backtest_trades")),
+        "cache_key": str(row.get("cache_key") or "").strip() or None,
+        "label_status": outcome_status or "unsupported",
+        "label_filled": label_filled,
+        "label_win": label_win,
+        "label_fill_bar": 0 if label_filled else None,
+        "label_exit_bar": _safe_int(row.get("bars_to_outcome")),
+        "label_fill_timestamp": str(row.get("timestamp") or "").strip() or None,
+        "label_exit_timestamp": str(row.get("settled_at") or "").strip() or None,
+        "label_return_pct": pnl_pct,
+        "label_mfe_pct": mfe_pct,
+        "label_mae_pct": -abs(float(mae_pct)) if isinstance(mae_pct, (int, float)) else None,
+        "label_mfe_r": label_mfe_r,
+        "label_mae_r": label_mae_r,
+        "feedback_outcome_status": outcome_status,
+        "feedback_outcome_result": outcome_result,
+        "feedback_exit_reason": str(row.get("exit_reason") or "").strip() or None,
+        "feedback_settled_at": str(row.get("settled_at") or "").strip() or None,
+        "feedback_exit_price": _safe_float(row.get("exit_price")),
+        "feedback_bars_observed": _safe_int(row.get("bars_observed")),
+        "feedback_bars_to_outcome": _safe_int(row.get("bars_to_outcome")),
+        "feedback_maturity_progress_pct": _safe_float(row.get("maturity_progress_pct")),
+    }
+
+
+def build_live_feedback_training_dataset(*, days=90, strategies=None, symbols=None, include_open=False, helpers, get_now):
+    feedback_payload = build_telegram_alert_feedback_export(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        include_open=include_open,
+        helpers=helpers,
+        get_now=get_now,
+    )
+    rows = [_feedback_training_row(row) for row in (feedback_payload.get("rows") or [])]
+    training_ready_rows = [row for row in rows if bool(row.get("label_filled"))]
+    wins = [row for row in training_ready_rows if row.get("label_win") is True]
+    losses = [row for row in training_ready_rows if row.get("label_win") is False]
+
+    by_group = {}
+    by_strategy = {}
+    for row in rows:
+        for key, bucket_map in (
+            (str(row.get("candidate_group") or "unknown"), by_group),
+            (str(row.get("strategy") or "UNKNOWN").strip().upper(), by_strategy),
+        ):
+            bucket = bucket_map.setdefault(
+                key,
+                {
+                    "rows": 0,
+                    "filled_rows": 0,
+                    "wins": 0,
+                    "losses": 0,
+                    "win_rate_pct": None,
+                    "avg_return_pct": None,
+                    "avg_mfe_r": None,
+                    "avg_mae_r": None,
+                    "_rows": [],
+                },
+            )
+            bucket["rows"] += 1
+            bucket["_rows"].append(row)
+            if row.get("label_filled"):
+                bucket["filled_rows"] += 1
+            if row.get("label_win") is True:
+                bucket["wins"] += 1
+            elif row.get("label_win") is False:
+                bucket["losses"] += 1
+
+    for bucket_map in (by_group, by_strategy):
+        for key, bucket in list(bucket_map.items()):
+            filled_rows = [row for row in bucket.pop("_rows", []) if row.get("label_filled")]
+            if bucket["filled_rows"] > 0:
+                bucket["win_rate_pct"] = (float(bucket["wins"]) / float(bucket["filled_rows"])) * 100.0
+            bucket["avg_return_pct"] = _realized_metric_average(filled_rows, "label_return_pct")
+            bucket["avg_mfe_r"] = _realized_metric_average(filled_rows, "label_mfe_r")
+            bucket["avg_mae_r"] = _realized_metric_average(filled_rows, "label_mae_r")
+            bucket_map[key] = bucket
+
+    summary = {
+        "generated_at": feedback_payload.get("generated_at"),
+        "window_days": feedback_payload.get("window_days"),
+        "total_rows": len(rows),
+        "filled_rows": len(training_ready_rows),
+        "wins": len(wins),
+        "losses": len(losses),
+        "fill_rate_pct": (float(len(training_ready_rows)) / float(len(rows)) * 100.0) if rows else 0.0,
+        "win_rate_pct": (float(len(wins)) / float(len(training_ready_rows)) * 100.0) if training_ready_rows else None,
+        "avg_return_pct": _realized_metric_average(training_ready_rows, "label_return_pct"),
+        "avg_mfe_r": _realized_metric_average(training_ready_rows, "label_mfe_r"),
+        "avg_mae_r": _realized_metric_average(training_ready_rows, "label_mae_r"),
+        "by_candidate_group": {key: by_group[key] for key in sorted(by_group.keys())},
+        "by_strategy": {key: by_strategy[key] for key in sorted(by_strategy.keys())},
+    }
+    return {
+        "generated_at": feedback_payload.get("generated_at"),
+        "window_days": feedback_payload.get("window_days"),
+        "fieldnames": live_feedback_training_fieldnames(),
+        "summary": summary,
+        "rows": rows,
+    }

@@ -308,6 +308,7 @@ def build_price_action_plan(
     detected_pattern = "None"
     pattern_idx = None
     role_reversal = ""
+    research_gate_reasons = []
     if bull_score >= min_score and bull_score >= bear_score + 4.0:
         signal = "BUY"
         score = float(bull_score)
@@ -325,9 +326,19 @@ def build_price_action_plan(
         if chart_pattern_signal == "SELL" and chart_pattern_label:
             role_reversal = "Breakdown & Retest ฝั่ง SELL"
 
+    research_signal = signal if signal in ("BUY", "SELL") else None
+    research_score = float(score) if research_signal else 0.0
+    research_reasons = list(reasons[:6]) if research_signal else []
+    research_detected_pattern = detected_pattern if research_signal else "None"
+    research_pattern_idx = pattern_idx if research_signal else None
+
     if require_pattern and signal == "BUY" and not pattern_ok_buy and chart_pattern_signal != "BUY":
+        if research_signal == "BUY":
+            research_gate_reasons.append("pattern_confirmation_missing")
         signal = "WAIT"
     if require_pattern and signal == "SELL" and not pattern_ok_sell and chart_pattern_signal != "SELL":
+        if research_signal == "SELL":
+            research_gate_reasons.append("pattern_confirmation_missing")
         signal = "WAIT"
 
     proxy_metrics = price_action_proxy_metrics(item, signal)
@@ -344,6 +355,8 @@ def build_price_action_plan(
     if proxy_ok and isinstance(proxy_trades, (int, float)) and float(proxy_trades) < min_proxy_trades:
         proxy_ok = False
     if signal not in ("BUY", "SELL") or not proxy_ok:
+        if research_signal in ("BUY", "SELL") and not proxy_ok:
+            research_gate_reasons.append("proxy_gate_failed")
         signal = "WAIT"
 
     confidence = None
@@ -352,9 +365,19 @@ def build_price_action_plan(
         if isinstance(proxy_wr, (int, float)):
             confidence = min(96.0, confidence + max(-4.0, min(6.0, (float(proxy_wr) - 55.0) * 0.20)))
 
+    research_confidence = None
+    if research_signal in ("BUY", "SELL"):
+        research_confidence = max(50.0, min(94.0, research_score))
+        if isinstance(proxy_wr, (int, float)):
+            research_confidence = min(
+                96.0,
+                research_confidence + max(-4.0, min(6.0, (float(proxy_wr) - 55.0) * 0.20)),
+            )
+
+    active_trade_signal = signal if signal in ("BUY", "SELL") else research_signal
     default_stop = None
     entry_price = current_price
-    if signal == "BUY":
+    if active_trade_signal == "BUY":
         stop_candidates = []
         if isinstance(demand_zone, (int, float)) and float(demand_zone) < current_price:
             stop_candidates.append(float(demand_zone))
@@ -365,7 +388,7 @@ def build_price_action_plan(
         if isinstance(atr_value, (int, float)) and atr_value > 0:
             stop_candidates.append(current_price - (float(atr_value) * stop_atr_mult))
         default_stop = min(stop_candidates) if stop_candidates else None
-    elif signal == "SELL":
+    elif active_trade_signal == "SELL":
         stop_candidates = []
         if isinstance(supply_zone, (int, float)) and float(supply_zone) > current_price:
             stop_candidates.append(float(supply_zone))
@@ -378,11 +401,11 @@ def build_price_action_plan(
         default_stop = max(stop_candidates) if stop_candidates else None
 
     stop_loss = None
-    if signal in ("BUY", "SELL") and isinstance(default_stop, (int, float)):
+    if active_trade_signal in ("BUY", "SELL") and isinstance(default_stop, (int, float)):
         stop_loss = candle_based_risk(
             df,
-            pattern_idx if isinstance(pattern_idx, int) else len(df) - 1,
-            signal,
+            pattern_idx if isinstance(pattern_idx, int) else research_pattern_idx if isinstance(research_pattern_idx, int) else len(df) - 1,
+            active_trade_signal,
             atr_value,
             default_stop,
             buffer_atr=candle_stop_buffer,
@@ -391,10 +414,10 @@ def build_price_action_plan(
         stop_loss = default_stop
 
     take_profit = None
-    if signal in ("BUY", "SELL") and isinstance(stop_loss, (int, float)):
+    if active_trade_signal in ("BUY", "SELL") and isinstance(stop_loss, (int, float)):
         risk_dist = abs(float(entry_price) - float(stop_loss))
         if risk_dist > 0:
-            if signal == "BUY":
+            if active_trade_signal == "BUY":
                 take_profit = float(entry_price) + (risk_dist * tp_mult)
                 if isinstance(supply_zone, (int, float)) and float(supply_zone) > float(entry_price):
                     take_profit = max(float(entry_price) + (risk_dist * 1.2), min(float(take_profit), float(supply_zone)))
@@ -428,6 +451,12 @@ def build_price_action_plan(
         "proxy_sources": proxy_sources,
         "proxy_source_count": proxy_source_count,
         "score": float(score) if signal in ("BUY", "SELL") else 0.0,
+        "research_signal": research_signal,
+        "research_confidence": float(research_confidence) if isinstance(research_confidence, (int, float)) else None,
+        "research_score": float(research_score) if research_signal in ("BUY", "SELL") else 0.0,
+        "research_detected_pattern": research_detected_pattern,
+        "research_gate_reasons": research_gate_reasons[:4],
+        "research_reasons": research_reasons[:6],
         "setup": signal if signal in ("BUY", "SELL") else "WAIT",
         "setup_label": " | ".join([bit for bit in setup_bits if bit]),
         "market_structure": market_structure,
@@ -436,6 +465,7 @@ def build_price_action_plan(
         "chart_pattern": chart_pattern_label,
         "role_reversal": role_reversal,
         "detected_pattern": detected_pattern,
+        "research_pattern_idx": int(research_pattern_idx) if isinstance(research_pattern_idx, int) else None,
         "entry_price": float(entry_price),
         "current_price": float(current_price),
         "price": float(current_price),
@@ -453,4 +483,3 @@ def build_price_action_plan(
         "forecast_probability": float(pred_prob) if isinstance(pred_prob, (int, float)) else None,
         "reasons": reasons[:6],
     }
-

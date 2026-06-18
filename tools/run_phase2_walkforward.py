@@ -127,7 +127,7 @@ def load_dataset(input_path):
                 rows.append(json.loads(line))
         df = pd.DataFrame(rows)
     else:
-        df = pd.read_csv(input_path)
+        df = pd.read_csv(input_path, low_memory=False)
     if df.empty:
         return df
     if "checkpoint_at" in df.columns:

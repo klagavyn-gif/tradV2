@@ -1,7 +1,10 @@
 import argparse
 import json
+import os
 import sys
+import time
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import pandas as pd
@@ -33,6 +36,16 @@ PERIOD_MAP = {
     "2y": pd.Timedelta(days=730),
     "5y": pd.Timedelta(days=365 * 5),
 }
+
+_WORKER_ROOT = None
+_WORKER_CACHE = None
+_WORKER_WATCHLIST = None
+_WORKER_GROUPS = None
+_WORKER_MAX_HOLD_BARS = 64
+_WORKER_ENTRY_FILL_TOLERANCE_PCT = 0.15
+_WORKER_RESEARCH_SUPPLEMENTS = None
+_WORKER_RESEARCH_PA_MIN_CONFIDENCE = 56.0
+_WORKER_RESEARCH_PA_MIN_SCORE = 58.0
 
 
 def build_parser():
@@ -75,6 +88,35 @@ def build_parser():
         action="store_true",
         help="Allow replay to continue when cache history is shorter than requested days",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Checkpoint workers to use. 0 = auto (up to 4 workers), 1 = sequential",
+    )
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=25,
+        help="Print and persist progress every N completed checkpoints",
+    )
+    parser.add_argument(
+        "--research-strategy-supplements",
+        default="PA15",
+        help="Optional comma-separated research-only strategy supplements to add to Phase 1 dataset without changing live alert behavior",
+    )
+    parser.add_argument(
+        "--research-pa-min-confidence",
+        type=float,
+        default=56.0,
+        help="Minimum confidence for research-only PA15 candidates extracted before live dispatch gates",
+    )
+    parser.add_argument(
+        "--research-pa-min-score",
+        type=float,
+        default=58.0,
+        help="Minimum score for research-only PA15 candidates extracted before live dispatch gates",
+    )
     return parser
 
 
@@ -90,6 +132,11 @@ def parse_groups(text):
         if value in {"primary", "trend_radar", "trend_state", "daily"} and value not in groups:
             groups.append(value)
     return groups or ["primary", "trend_radar", "daily"]
+
+
+def parse_csv_upper(text):
+    values = [part.strip().upper() for part in str(text or "").split(",")]
+    return [part for part in values if part]
 
 
 def resolve_output_dir(root, output_dir):
@@ -243,6 +290,102 @@ def compute_points(cache, days, step, end_at=None, *, allow_partial_coverage=Fal
     return list(pd.date_range(start=start_now, end=latest_now, freq=step))
 
 
+def resolve_worker_count(requested, total_points):
+    total = max(1, int(total_points or 1))
+    raw = int(requested or 0)
+    if raw <= 0:
+        raw = min(4, os.cpu_count() or 1)
+    return max(1, min(raw, total))
+
+
+def _format_duration(seconds):
+    if seconds is None:
+        return "unknown"
+    remaining = max(0, int(round(float(seconds))))
+    hours, remaining = divmod(remaining, 3600)
+    minutes, secs = divmod(remaining, 60)
+    if hours:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def write_progress(output_dir, payload):
+    output_dir.mkdir(parents=True, exist_ok=True)
+    progress_path = output_dir / "phase1_progress.json"
+    progress_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def emit_progress(*, output_dir, completed, total, started_at, candidate_total, workers, checkpoint_at, last_candidate_count):
+    elapsed = max(0.0, time.perf_counter() - started_at)
+    rate = (float(completed) / elapsed) if elapsed > 0 else 0.0
+    eta = ((float(total - completed) / rate) if rate > 0 else None)
+    checkpoint_text = pd.Timestamp(checkpoint_at).isoformat() if checkpoint_at is not None else None
+    payload = {
+        "status": "running" if completed < total else "completed",
+        "completed_checkpoints": int(completed),
+        "total_checkpoints": int(total),
+        "progress_pct": (float(completed) / float(total) * 100.0) if total else 0.0,
+        "elapsed_seconds": float(elapsed),
+        "eta_seconds": float(eta) if eta is not None else None,
+        "workers": int(workers),
+        "candidates_collected": int(candidate_total),
+        "last_checkpoint_at": checkpoint_text,
+        "last_checkpoint_candidates": int(last_candidate_count),
+        "updated_at": pd.Timestamp.now().isoformat(),
+    }
+    write_progress(output_dir, payload)
+    message = (
+        f"[phase1] {completed}/{total} checkpoints "
+        f"({payload['progress_pct']:.1f}%) | candidates={candidate_total} | "
+        f"elapsed={_format_duration(elapsed)} | eta={_format_duration(eta)} | "
+        f"workers={workers} | last_checkpoint={checkpoint_text} | last_candidates={last_candidate_count}"
+    )
+    print(message, flush=True)
+
+
+def _init_worker(
+    root,
+    cache,
+    watchlist,
+    groups,
+    max_hold_bars,
+    entry_fill_tolerance_pct,
+    research_supplements,
+    research_pa_min_confidence,
+    research_pa_min_score,
+):
+    global _WORKER_ROOT, _WORKER_CACHE, _WORKER_WATCHLIST, _WORKER_GROUPS
+    global _WORKER_MAX_HOLD_BARS, _WORKER_ENTRY_FILL_TOLERANCE_PCT
+    global _WORKER_RESEARCH_SUPPLEMENTS, _WORKER_RESEARCH_PA_MIN_CONFIDENCE, _WORKER_RESEARCH_PA_MIN_SCORE
+    _WORKER_ROOT = root
+    _WORKER_CACHE = cache
+    _WORKER_WATCHLIST = list(watchlist or [])
+    _WORKER_GROUPS = list(groups or [])
+    _WORKER_MAX_HOLD_BARS = int(max_hold_bars or 64)
+    _WORKER_ENTRY_FILL_TOLERANCE_PCT = float(entry_fill_tolerance_pct or 0.15)
+    _WORKER_RESEARCH_SUPPLEMENTS = list(research_supplements or [])
+    _WORKER_RESEARCH_PA_MIN_CONFIDENCE = float(research_pa_min_confidence or 56.0)
+    _WORKER_RESEARCH_PA_MIN_SCORE = float(research_pa_min_score or 58.0)
+
+
+def _run_checkpoint_worker(index, checkpoint_at):
+    rows, checkpoint_summary = run_checkpoint(
+        root=Path(_WORKER_ROOT),
+        cache=_WORKER_CACHE,
+        checkpoint_at=checkpoint_at,
+        watchlist=_WORKER_WATCHLIST,
+        groups=_WORKER_GROUPS,
+        max_hold_bars=_WORKER_MAX_HOLD_BARS,
+        entry_fill_tolerance_pct=_WORKER_ENTRY_FILL_TOLERANCE_PCT,
+        research_supplements=_WORKER_RESEARCH_SUPPLEMENTS,
+        research_pa_min_confidence=_WORKER_RESEARCH_PA_MIN_CONFIDENCE,
+        research_pa_min_score=_WORKER_RESEARCH_PA_MIN_SCORE,
+    )
+    return index, rows, checkpoint_summary
+
+
 def format_coverage_error(coverage):
     rows = coverage.get("rows") or []
     worst = sorted(rows, key=lambda row: (row.get("coverage_days") or 0.0, str(row.get("symbol") or ""), str(row.get("interval") or "")))
@@ -299,6 +442,104 @@ def _candidate_anchor_price(candidate, snapshot):
         if parsed is not None:
             return parsed
     return None
+
+
+def _research_entry_intent(*, trad, candidate):
+    plan = candidate.get("plan") if isinstance(candidate, dict) else None
+    item = candidate.get("item") if isinstance(candidate, dict) else None
+    entry_price = _safe_float((plan or {}).get("entry_price"), None)
+    current_price = _safe_float((plan or {}).get("current_price"), None)
+    if current_price is None:
+        current_price = _safe_float((plan or {}).get("price"), None)
+    if current_price is None and isinstance(item, dict):
+        current_price = _safe_float(item.get("price"), None)
+    stop_loss = _safe_float((plan or {}).get("stop_loss"), None)
+    if entry_price is None or current_price is None:
+        return "watch", "research_unknown_entry_distance"
+    distance_pct = abs(float(current_price) - float(entry_price)) / max(abs(float(entry_price)), 1e-9) * 100.0
+    distance_r = None
+    if isinstance(stop_loss, (int, float)) and float(stop_loss) != float(entry_price):
+        risk_dist = abs(float(entry_price) - float(stop_loss))
+        if risk_dist > 0:
+            distance_r = abs(float(current_price) - float(entry_price)) / float(risk_dist)
+    max_distance_pct = _safe_float(getattr(trad.config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_PCT", 2.5), 2.5)
+    max_distance_r = _safe_float(getattr(trad.config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_R", 1.1), 1.1)
+    if distance_pct <= float(max_distance_pct) or (distance_r is not None and distance_r <= float(max_distance_r)):
+        return "entry", f"research_fresh_entry:d_pct={distance_pct:.4f},d_r={distance_r:.4f}" if distance_r is not None else f"research_fresh_entry:d_pct={distance_pct:.4f}"
+    return "watch", f"research_stretched_entry:d_pct={distance_pct:.4f},d_r={distance_r:.4f}" if distance_r is not None else f"research_stretched_entry:d_pct={distance_pct:.4f}"
+
+
+def build_research_supplement_candidates(*, trad, results, existing_candidates, supplement_strategies, pa_min_confidence, pa_min_score):
+    supplements = []
+    enabled = {str(value or "").strip().upper() for value in (supplement_strategies or []) if str(value or "").strip()}
+    if "PA15" not in enabled:
+        return supplements
+    existing_keys = {
+        (
+            str(row.get("strategy") or "").strip().upper(),
+            str(row.get("symbol") or "").strip().upper(),
+            str(row.get("signal") or "").strip().upper(),
+            str(row.get("cache_key") or "").strip(),
+        )
+        for row in (existing_candidates or [])
+        if isinstance(row, dict)
+    }
+    for item in results or []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        plan = item.get("price_action_15m")
+        if not symbol or not isinstance(plan, dict):
+            continue
+        signal = str(plan.get("research_signal") or "").strip().upper()
+        confidence = _safe_float(plan.get("research_confidence"), None)
+        score = _safe_float(plan.get("research_score"), None)
+        entry_price = _safe_float(plan.get("entry_price"), None)
+        stop_loss = _safe_float(plan.get("stop_loss"), None)
+        take_profit = _safe_float(plan.get("take_profit"), None)
+        if signal not in {"BUY", "SELL"}:
+            continue
+        if confidence is None or confidence < float(pa_min_confidence):
+            continue
+        if score is None or score < float(pa_min_score):
+            continue
+        if entry_price is None or stop_loss is None or take_profit is None:
+            continue
+        plan_copy = dict(plan)
+        plan_copy["signal"] = signal
+        plan_copy["alert"] = True
+        plan_copy["confidence"] = float(confidence)
+        plan_copy["score"] = float(score)
+        if not plan_copy.get("detected_pattern") and plan_copy.get("research_detected_pattern"):
+            plan_copy["detected_pattern"] = plan_copy.get("research_detected_pattern")
+        cache_key = "PA15RESEARCH|{symbol}|{signal}|{context}".format(
+            symbol=symbol,
+            signal=signal,
+            context=str(plan.get("last_signal_time") or plan.get("research_detected_pattern") or plan.get("market_structure") or "na"),
+        )
+        dedupe_key = ("PA15", symbol, signal, cache_key)
+        if dedupe_key in existing_keys:
+            continue
+        candidate = {
+            "symbol": symbol,
+            "strategy": "PA15",
+            "signal": signal,
+            "score": float(score),
+            "confidence": float(confidence),
+            "plan": plan_copy,
+            "item": item,
+            "source_count": int(plan.get("proxy_source_count") or 0),
+            "message": None,
+            "cache_key": cache_key,
+            "research_candidate": True,
+            "research_source": "phase1_relaxed_pa15",
+        }
+        intent, intent_reason = _research_entry_intent(trad=trad, candidate=candidate)
+        candidate["alert_intent"] = intent
+        candidate["alert_intent_reason"] = intent_reason
+        supplements.append(candidate)
+        existing_keys.add(dedupe_key)
+    return supplements
 
 
 def simulate_candidate_outcome(
@@ -520,7 +761,9 @@ def collect_candidate_rows(
             "quality_drop_confidence": int(quality_drop_counts.get("candidate_profile_confidence_below_min") or 0),
             "quality_drop_entry_window": int(quality_drop_counts.get("primary_watch_intent_filtered") or 0),
             "price_at_checkpoint": _safe_float(anchor_price, None),
-            "source_count": len(candidate.get("sources") or []) if isinstance(candidate.get("sources"), list) else 0,
+            "source_count": int(candidate.get("source_count") or 0)
+            if isinstance(candidate.get("source_count"), (int, float))
+            else (len(candidate.get("sources") or []) if isinstance(candidate.get("sources"), list) else 0),
         }
         row.update(snapshot)
         row.update(outcome)
@@ -537,6 +780,9 @@ def run_checkpoint(
     groups,
     max_hold_bars,
     entry_fill_tolerance_pct,
+    research_supplements,
+    research_pa_min_confidence,
+    research_pa_min_score,
 ):
     if str(root) not in sys.path:
         sys.path.insert(0, str(root))
@@ -584,6 +830,17 @@ def run_checkpoint(
                 dynamic_min_conf,
                 runtime_context=runtime_context,
             )
+            primary_candidates = list(primary_candidates or [])
+            research_candidates = build_research_supplement_candidates(
+                trad=trad,
+                results=results,
+                existing_candidates=primary_candidates,
+                supplement_strategies=research_supplements,
+                pa_min_confidence=research_pa_min_confidence,
+                pa_min_score=research_pa_min_score,
+            )
+            if research_candidates:
+                primary_candidates.extend(research_candidates)
             primary_rows = collect_candidate_rows(
                 now=now,
                 trad=trad,
@@ -599,6 +856,8 @@ def run_checkpoint(
             )
             dataset_rows.extend(primary_rows)
             group_counts["primary"] = len(primary_rows)
+            if research_candidates:
+                group_counts["primary_research_supplement"] = len(research_candidates)
 
         if "trend_radar" in groups:
             radar_candidates = trad._build_trend_radar_candidates(results, runtime_context=runtime_context)
@@ -673,7 +932,7 @@ def run_checkpoint(
         trad._build_alert_runtime_context = orig_build_ctx
 
 
-def build_summary(*, rows, checkpoints, args, watchlist, groups, cache_coverage=None, cache_refresh=None):
+def build_summary(*, rows, checkpoints, args, watchlist, groups, cache_coverage=None, cache_refresh=None, workers=1):
     by_group = Counter()
     by_strategy = Counter()
     by_status = Counter()
@@ -703,6 +962,10 @@ def build_summary(*, rows, checkpoints, args, watchlist, groups, cache_coverage=
         "groups": list(groups),
         "max_hold_bars": int(args.max_hold_bars),
         "entry_fill_tolerance_pct": float(args.entry_fill_tolerance_pct),
+        "research_strategy_supplements": parse_csv_upper(getattr(args, "research_strategy_supplements", "")),
+        "research_pa_min_confidence": float(getattr(args, "research_pa_min_confidence", 56.0)),
+        "research_pa_min_score": float(getattr(args, "research_pa_min_score", 58.0)),
+        "workers": int(workers),
         "checkpoints": int(len(checkpoints)),
         "cache_requested_days": float((cache_coverage or {}).get("requested_days") or 0.0),
         "cache_available_days": float((cache_coverage or {}).get("available_days") or 0.0),
@@ -758,7 +1021,9 @@ def main():
     root = Path(__file__).resolve().parents[1]
     watchlist = parse_watchlist(args.watchlist)
     groups = parse_groups(args.groups)
+    research_supplements = parse_csv_upper(args.research_strategy_supplements)
     output_dir = resolve_output_dir(root, args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     cache_refresh = []
     if args.refresh_cache:
         cache_refresh = refresh_cache(root, watchlist, args.days)
@@ -773,21 +1038,109 @@ def main():
         end_at=args.end_at,
         allow_partial_coverage=bool(args.allow_partial_coverage),
     )
+    total_points = len(points)
+    if total_points <= 0:
+        raise RuntimeError("No checkpoints generated for Phase 1 replay")
+    workers = resolve_worker_count(args.workers, total_points)
+    progress_every = max(1, int(args.progress_every or 1))
+    started_at = time.perf_counter()
+    print(
+        f"[phase1] Starting replay with {total_points} checkpoints, workers={workers}, "
+        f"groups={','.join(groups)}, step={args.step}, research_supplements={','.join(research_supplements) or 'none'}, output={output_dir}",
+        flush=True,
+    )
+    write_progress(
+        output_dir,
+        {
+            "status": "starting",
+            "completed_checkpoints": 0,
+            "total_checkpoints": int(total_points),
+            "progress_pct": 0.0,
+            "elapsed_seconds": 0.0,
+            "eta_seconds": None,
+            "workers": int(workers),
+            "candidates_collected": 0,
+            "last_checkpoint_at": None,
+            "last_checkpoint_candidates": 0,
+            "updated_at": pd.Timestamp.now().isoformat(),
+        },
+    )
 
     dataset_rows = []
     checkpoint_rows = []
-    for now in points:
-        rows, checkpoint_summary = run_checkpoint(
-            root=root,
-            cache=cache,
-            checkpoint_at=now,
-            watchlist=watchlist,
-            groups=groups,
-            max_hold_bars=args.max_hold_bars,
-            entry_fill_tolerance_pct=args.entry_fill_tolerance_pct,
-        )
-        dataset_rows.extend(rows)
-        checkpoint_rows.append(checkpoint_summary)
+    candidate_total = 0
+    if workers <= 1:
+        for index, now in enumerate(points, start=1):
+            rows, checkpoint_summary = run_checkpoint(
+                root=root,
+                cache=cache,
+                checkpoint_at=now,
+                watchlist=watchlist,
+                groups=groups,
+                max_hold_bars=args.max_hold_bars,
+                entry_fill_tolerance_pct=args.entry_fill_tolerance_pct,
+                research_supplements=research_supplements,
+                research_pa_min_confidence=args.research_pa_min_confidence,
+                research_pa_min_score=args.research_pa_min_score,
+            )
+            dataset_rows.extend(rows)
+            checkpoint_rows.append(checkpoint_summary)
+            candidate_total += len(rows)
+            if index == 1 or index == total_points or index % progress_every == 0:
+                emit_progress(
+                    output_dir=output_dir,
+                    completed=index,
+                    total=total_points,
+                    started_at=started_at,
+                    candidate_total=candidate_total,
+                    workers=workers,
+                    checkpoint_at=now,
+                    last_candidate_count=len(rows),
+                )
+    else:
+        ordered_rows = [None] * total_points
+        ordered_checkpoints = [None] * total_points
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_worker,
+            initargs=(
+                str(root),
+                cache,
+                watchlist,
+                groups,
+                args.max_hold_bars,
+                args.entry_fill_tolerance_pct,
+                research_supplements,
+                args.research_pa_min_confidence,
+                args.research_pa_min_score,
+            ),
+        ) as executor:
+            future_map = {
+                executor.submit(_run_checkpoint_worker, index, now): (index, now)
+                for index, now in enumerate(points)
+            }
+            completed = 0
+            for future in as_completed(future_map):
+                index, checkpoint_at = future_map[future]
+                _, rows, checkpoint_summary = future.result()
+                ordered_rows[index] = rows
+                ordered_checkpoints[index] = checkpoint_summary
+                completed += 1
+                candidate_total += len(rows)
+                if completed == 1 or completed == total_points or completed % progress_every == 0:
+                    emit_progress(
+                        output_dir=output_dir,
+                        completed=completed,
+                        total=total_points,
+                        started_at=started_at,
+                        candidate_total=candidate_total,
+                        workers=workers,
+                        checkpoint_at=checkpoint_at,
+                        last_candidate_count=len(rows),
+                    )
+        for rows in ordered_rows:
+            dataset_rows.extend(rows or [])
+        checkpoint_rows = [row for row in ordered_checkpoints if row is not None]
 
     summary = build_summary(
         rows=dataset_rows,
@@ -797,6 +1150,7 @@ def main():
         groups=groups,
         cache_coverage=cache_coverage,
         cache_refresh=cache_refresh,
+        workers=workers,
     )
     written = write_outputs(output_dir, dataset_rows, checkpoint_rows, summary)
     payload = {

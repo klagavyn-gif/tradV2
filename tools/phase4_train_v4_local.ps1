@@ -8,6 +8,10 @@ param(
     [int]$MinClassRows = 20,
     [string]$Backend = "auto",
     [string]$Device = "auto",
+    [string]$CalibrationMethod = "platt",
+    [int]$CalibrationDays = 21,
+    [int]$CalibrationMinRows = 60,
+    [int]$CalibrationMinTrainDays = 60,
     [double]$EntryThresholdMin = 0.65,
     [double]$EntryThresholdMax = 0.95,
     [double]$EntryThresholdStep = 0.05,
@@ -49,7 +53,11 @@ param(
     [double]$WatchMinDirectionScore = 0.46,
     [double]$WatchMinEntryPrecisionScore = 0.18,
     [double]$WatchMinExitQualityScore = 0.34,
-    [double]$WatchMinExecutionUtilityScore = 0.40
+    [double]$WatchMinExecutionUtilityScore = 0.40,
+    [double]$PolicyCalibrationTargetWeight = 0.10,
+    [double]$PolicyCalibrationAvoidWeight = 0.06,
+    [double]$PolicyCalibrationOverconfidencePenaltyWeight = 0.08,
+    [int]$StrategyPolicyMinHoldoutRows = 90
 )
 
 $ErrorActionPreference = "Stop"
@@ -75,8 +83,10 @@ try {
     Write-Host "Strategies: $Strategies"
     Write-Host "Backend: $Backend"
     Write-Host "Device: $Device"
+    Write-Host "Calibration: $CalibrationMethod"
     Write-Host "Holdout days: $TestDays"
     Write-Host "Min train days: $MinTrainDays"
+    Write-Host "Strategy policy min holdout rows: $StrategyPolicyMinHoldoutRows"
     Write-Host "Premium target alerts/day: $PremiumTargetAlertsPerDay"
     Write-Host "Standard target alerts/day: $StandardTargetAlertsPerDay"
     Write-Host "Watch target alerts/day: $WatchTargetAlertsPerDay"
@@ -95,6 +105,10 @@ try {
         "--min-class-rows", $MinClassRows,
         "--backend", $Backend,
         "--device", $Device,
+        "--calibration-method", $CalibrationMethod,
+        "--calibration-days", $CalibrationDays,
+        "--calibration-min-rows", $CalibrationMinRows,
+        "--calibration-min-train-days", $CalibrationMinTrainDays,
         "--entry-threshold-min", $EntryThresholdMin,
         "--entry-threshold-max", $EntryThresholdMax,
         "--entry-threshold-step", $EntryThresholdStep,
@@ -136,7 +150,12 @@ try {
         "--watch-min-direction-score", $WatchMinDirectionScore,
         "--watch-min-entry-precision-score", $WatchMinEntryPrecisionScore,
         "--watch-min-exit-quality-score", $WatchMinExitQualityScore,
-        "--watch-min-execution-utility-score", $WatchMinExecutionUtilityScore
+        "--watch-min-execution-utility-score", $WatchMinExecutionUtilityScore,
+        "--policy-calibration-target-weight", $PolicyCalibrationTargetWeight,
+        "--policy-calibration-avoid-weight", $PolicyCalibrationAvoidWeight,
+        "--policy-calibration-overconfidence-penalty-weight", $PolicyCalibrationOverconfidencePenaltyWeight,
+        "--strategy-policy-enable",
+        "--strategy-policy-min-holdout-rows", $StrategyPolicyMinHoldoutRows
     )
     if (-not [string]::IsNullOrWhiteSpace($Strategies)) {
         $pythonArgs += @("--strategies", $Strategies)

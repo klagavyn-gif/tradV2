@@ -8,6 +8,7 @@ from pathlib import Path
 import joblib
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
+from sklearn.isotonic import IsotonicRegression
 from sklearn.pipeline import Pipeline
 
 from run_phase2_walkforward import filter_dataset, load_dataset, parse_csv_list, resolve_input_path
@@ -27,8 +28,8 @@ from train_phase3_entry_quality_model import (
 
 LABEL_TO_INDEX = {label: idx for idx, label in enumerate(LABELS)}
 INDEX_TO_LABEL = {idx: label for label, idx in LABEL_TO_INDEX.items()}
-MODEL_VERSION = "v4_utf_v1"
-MODEL_TYPE = "phase4_entry_quality_v4_utf_prototype"
+MODEL_VERSION = "v4_utf_v2"
+MODEL_TYPE = "phase4_entry_quality_v4_utf_calibrated"
 ARTIFACT_PREFIX = "phase4_entry_quality_v4"
 DEFAULT_OUTPUT_DIRNAME = "phase4_entry_quality_v4"
 LOG_PREFIX = "v4"
@@ -87,6 +88,30 @@ def build_parser():
         choices=("auto", "cpu", "cuda"),
         default="auto",
         help="Preferred compute device. cuda is used only when xgboost is available.",
+    )
+    parser.add_argument(
+        "--calibration-method",
+        choices=("none", "platt", "isotonic"),
+        default="platt",
+        help="Optional probability calibration layer applied after base model training",
+    )
+    parser.add_argument(
+        "--calibration-days",
+        type=int,
+        default=21,
+        help="Tail window in days, taken from the training split, reserved for calibration",
+    )
+    parser.add_argument(
+        "--calibration-min-rows",
+        type=int,
+        default=60,
+        help="Minimum number of calibration rows required before enabling the calibrator",
+    )
+    parser.add_argument(
+        "--calibration-min-train-days",
+        type=int,
+        default=60,
+        help="Minimum chronological span to preserve for the model-fit split before calibration",
     )
     parser.add_argument(
         "--entry-threshold-min",
@@ -197,6 +222,42 @@ def build_parser():
         help="Minimum average return for Premium policy",
     )
     parser.add_argument(
+        "--premium-entry-threshold-min",
+        type=float,
+        default=0.60,
+        help="Minimum entry threshold to scan for the Premium policy",
+    )
+    parser.add_argument(
+        "--premium-entry-threshold-max",
+        type=float,
+        default=0.85,
+        help="Maximum entry threshold to scan for the Premium policy",
+    )
+    parser.add_argument(
+        "--premium-entry-threshold-step",
+        type=float,
+        default=0.02,
+        help="Entry threshold scan step for the Premium policy",
+    )
+    parser.add_argument(
+        "--premium-avoid-threshold-min",
+        type=float,
+        default=0.75,
+        help="Minimum avoid threshold to scan for the Premium policy",
+    )
+    parser.add_argument(
+        "--premium-avoid-threshold-max",
+        type=float,
+        default=0.95,
+        help="Maximum avoid threshold to scan for the Premium policy",
+    )
+    parser.add_argument(
+        "--premium-avoid-threshold-step",
+        type=float,
+        default=0.05,
+        help="Avoid threshold scan step for the Premium policy",
+    )
+    parser.add_argument(
         "--standard-min-selected-rows",
         type=int,
         default=80,
@@ -231,6 +292,42 @@ def build_parser():
         type=float,
         default=1.5,
         help="Minimum average return for Standard policy",
+    )
+    parser.add_argument(
+        "--standard-entry-threshold-min",
+        type=float,
+        default=0.55,
+        help="Minimum entry threshold to scan for the Standard policy",
+    )
+    parser.add_argument(
+        "--standard-entry-threshold-max",
+        type=float,
+        default=0.80,
+        help="Maximum entry threshold to scan for the Standard policy",
+    )
+    parser.add_argument(
+        "--standard-entry-threshold-step",
+        type=float,
+        default=0.02,
+        help="Entry threshold scan step for the Standard policy",
+    )
+    parser.add_argument(
+        "--standard-avoid-threshold-min",
+        type=float,
+        default=0.70,
+        help="Minimum avoid threshold to scan for the Standard policy",
+    )
+    parser.add_argument(
+        "--standard-avoid-threshold-max",
+        type=float,
+        default=0.90,
+        help="Maximum avoid threshold to scan for the Standard policy",
+    )
+    parser.add_argument(
+        "--standard-avoid-threshold-step",
+        type=float,
+        default=0.05,
+        help="Avoid threshold scan step for the Standard policy",
     )
     parser.add_argument(
         "--watch-min-selected-rows",
@@ -339,6 +436,36 @@ def build_parser():
         type=float,
         default=0.34,
         help="Minimum v4_exit_quality_score required for a Watch candidate",
+    )
+    parser.add_argument(
+        "--policy-calibration-target-weight",
+        type=float,
+        default=0.10,
+        help="Objective weight for selected-label probability alignment during policy optimization",
+    )
+    parser.add_argument(
+        "--policy-calibration-avoid-weight",
+        type=float,
+        default=0.06,
+        help="Objective weight for avoid-probability alignment during policy optimization",
+    )
+    parser.add_argument(
+        "--policy-calibration-overconfidence-penalty-weight",
+        type=float,
+        default=0.08,
+        help="Penalty weight when selected-label probability is materially above realized rate",
+    )
+    parser.add_argument(
+        "--strategy-policy-enable",
+        action="store_true",
+        default=True,
+        help="Optimize additional policy thresholds per strategy on the holdout split",
+    )
+    parser.add_argument(
+        "--strategy-policy-min-holdout-rows",
+        type=int,
+        default=90,
+        help="Minimum number of holdout rows required before a strategy gets its own policy set",
     )
     return parser
 
@@ -676,6 +803,362 @@ def resolve_device_order(backend, requested_device):
     return ["cuda", "cpu"]
 
 
+def _clip_probability(value, eps=1e-6):
+    numeric = _safe_float(value, None)
+    if numeric is None:
+        return None
+    return float(min(max(float(numeric), float(eps)), 1.0 - float(eps)))
+
+
+def _normalize_probability_row(scores, fallback_scores=None):
+    cleaned = []
+    for score in ([] if scores is None else scores):
+        numeric = _safe_float(score, 0.0)
+        cleaned.append(max(float(numeric), 0.0))
+    total = float(sum(cleaned))
+    if total <= 0:
+        fallback = []
+        for score in ([] if fallback_scores is None else fallback_scores):
+            numeric = _safe_float(score, 0.0)
+            fallback.append(max(float(numeric), 0.0))
+        fallback_total = float(sum(fallback))
+        if fallback_total > 0:
+            return [float(value) / float(fallback_total) for value in fallback]
+        if not cleaned:
+            return []
+        uniform = 1.0 / float(len(cleaned))
+        return [uniform for _ in cleaned]
+    return [float(value) / float(total) for value in cleaned]
+
+
+def bundle_predict_proba_raw(bundle, df):
+    feature_cols = bundle["feature_columns"]
+    if bundle["backend"] == "xgboost":
+        X_encoded = bundle["preprocessor"].transform(df[feature_cols])
+        predicted = bundle["model"].predict_proba(X_encoded)
+    else:
+        predicted = bundle["estimator"].predict_proba(df[feature_cols])
+    classes = [str(label) for label in (bundle.get("classes") or [])]
+    return predicted, classes
+
+
+def _apply_binary_probability_calibrator(model_info, raw_probability):
+    raw_prob = _clip_probability(raw_probability, eps=1e-6)
+    if raw_prob is None:
+        return None
+    if not isinstance(model_info, dict):
+        return raw_prob
+    calibrator_type = str(model_info.get("type") or "identity").strip().lower()
+    if calibrator_type == "platt" and model_info.get("model") is not None:
+        model = model_info["model"]
+        predicted = model.predict_proba(pd.DataFrame({"raw_prob": [raw_prob]}))[0][1]
+        return _clip_probability(predicted, eps=1e-6)
+    if calibrator_type == "isotonic" and model_info.get("model") is not None:
+        model = model_info["model"]
+        predicted = model.predict([raw_prob])[0]
+        return _clip_probability(predicted, eps=1e-6)
+    return raw_prob
+
+
+def apply_probability_calibrator(bundle, predicted, classes):
+    calibrator = bundle.get("probability_calibrator")
+    if not isinstance(calibrator, dict) or not bool(calibrator.get("enabled")):
+        return predicted
+    models = calibrator.get("models") or {}
+    calibrated_rows = []
+    for row in ([] if predicted is None else predicted):
+        row_scores = []
+        for idx, label in enumerate(classes or []):
+            raw_value = row[idx] if idx < len(row) else None
+            row_scores.append(_apply_binary_probability_calibrator(models.get(str(label)), raw_value))
+        calibrated_rows.append(_normalize_probability_row(row_scores, fallback_scores=row))
+    return calibrated_rows
+
+
+def bundle_predict_proba(bundle, df):
+    predicted, classes = bundle_predict_proba_raw(bundle, df)
+    return apply_probability_calibrator(bundle, predicted, classes)
+
+
+def probability_maps_from_matrix(probability_matrix, classes):
+    rows = []
+    classes = [str(label) for label in (classes or [])]
+    for row_prob in ([] if probability_matrix is None else probability_matrix):
+        rows.append(
+            {
+                label: float(row_prob[classes.index(label)]) if label in classes else 0.0
+                for label in LABELS
+            }
+        )
+    return rows
+
+
+def _binary_probability_metrics(probabilities, targets, *, bin_count=10):
+    usable = []
+    for probability, target in zip(probabilities or [], targets or []):
+        prob_value = _clip_probability(probability, eps=1e-6)
+        if prob_value is None:
+            continue
+        usable.append((float(prob_value), 1.0 if bool(target) else 0.0))
+    if not usable:
+        return {"row_count": 0}
+
+    probs = [item[0] for item in usable]
+    actuals = [item[1] for item in usable]
+    row_count = len(usable)
+    positives = int(sum(actuals))
+    brier_score = sum((prob - actual) ** 2 for prob, actual in usable) / float(row_count)
+    log_loss = -sum(
+        (actual * math.log(prob)) + ((1.0 - actual) * math.log(1.0 - prob))
+        for prob, actual in usable
+    ) / float(row_count)
+
+    bins = []
+    ece = 0.0
+    mce = 0.0
+    bin_count = max(int(bin_count), 4)
+    for idx in range(bin_count):
+        lower = float(idx) / float(bin_count)
+        upper = float(idx + 1) / float(bin_count)
+        is_last_bin = idx == bin_count - 1
+        bucket = [
+            (prob, actual)
+            for prob, actual in usable
+            if ((prob >= lower and prob <= upper) if is_last_bin else (prob >= lower and prob < upper))
+        ]
+        if not bucket:
+            continue
+        avg_predicted = sum(prob for prob, _ in bucket) / float(len(bucket))
+        actual_rate = sum(actual for _, actual in bucket) / float(len(bucket))
+        gap_abs = abs(avg_predicted - actual_rate)
+        bucket_payload = {
+            "bin_index": int(idx),
+            "prob_lower": lower,
+            "prob_upper": upper,
+            "row_count": int(len(bucket)),
+            "share_pct": (float(len(bucket)) / float(row_count)) * 100.0,
+            "avg_predicted_prob": float(avg_predicted),
+            "actual_positive_rate": float(actual_rate),
+            "gap_abs": float(gap_abs),
+        }
+        bins.append(bucket_payload)
+        ece += gap_abs * (float(len(bucket)) / float(row_count))
+        mce = max(mce, gap_abs)
+    return {
+        "row_count": int(row_count),
+        "positives": int(positives),
+        "positive_rate": float(sum(actuals) / float(row_count)),
+        "avg_predicted_prob": float(sum(probs) / float(row_count)),
+        "brier_score": float(brier_score),
+        "log_loss": float(log_loss),
+        "ece": float(ece),
+        "mce": float(mce),
+        "bins": bins,
+    }
+
+
+def summarize_probability_calibration(prob_maps, actual_labels):
+    labels = [str(label) for label in (actual_labels or [])]
+    summary = {}
+    for target_label in LABELS:
+        summary[target_label] = _binary_probability_metrics(
+            [prob_map.get(target_label) if isinstance(prob_map, dict) else None for prob_map in (prob_maps or [])],
+            [label == target_label for label in labels],
+        )
+    return summary
+
+
+def _policy_probability_alignment(selected_rows, *, selected_label):
+    if not selected_rows:
+        return {
+            "selected_target_prob_mean": None,
+            "selected_target_actual_rate": None,
+            "selected_target_gap_abs": None,
+            "selected_target_alignment_score": None,
+            "avoid_prob_mean": None,
+            "avoid_actual_rate": None,
+            "avoid_gap_abs": None,
+            "avoid_alignment_score": None,
+            "overconfidence_penalty": None,
+        }
+    selected_label = str(selected_label or "entry").strip().lower()
+    target_prob_values = []
+    avoid_prob_values = []
+    target_hits = []
+    avoid_hits = []
+    for row in selected_rows:
+        if selected_label == "watch":
+            target_prob_values.append(_safe_float(row.get("prob_watch"), None))
+        else:
+            target_prob_values.append(_safe_float(row.get("prob_entry"), None))
+        avoid_prob_values.append(_safe_float(row.get("prob_avoid"), None))
+        actual_label = str(row.get("actual_label") or "").strip().lower()
+        target_hits.append(1.0 if actual_label == selected_label else 0.0)
+        avoid_hits.append(1.0 if actual_label == "avoid" else 0.0)
+
+    target_prob_mean = _mean(target_prob_values)
+    avoid_prob_mean = _mean(avoid_prob_values)
+    target_actual_rate = _mean(target_hits)
+    avoid_actual_rate = _mean(avoid_hits)
+    target_gap_abs = abs(float(target_prob_mean) - float(target_actual_rate)) if isinstance(target_prob_mean, float) and isinstance(target_actual_rate, float) else None
+    avoid_gap_abs = abs(float(avoid_prob_mean) - float(avoid_actual_rate)) if isinstance(avoid_prob_mean, float) and isinstance(avoid_actual_rate, float) else None
+    overconfidence_penalty = None
+    if isinstance(target_prob_mean, float) and isinstance(target_actual_rate, float):
+        overconfidence_penalty = _clamp01(float(target_prob_mean) - float(target_actual_rate))
+    return {
+        "selected_target_prob_mean": target_prob_mean,
+        "selected_target_actual_rate": target_actual_rate,
+        "selected_target_gap_abs": target_gap_abs,
+        "selected_target_alignment_score": (1.0 - float(target_gap_abs)) if isinstance(target_gap_abs, float) else None,
+        "avoid_prob_mean": avoid_prob_mean,
+        "avoid_actual_rate": avoid_actual_rate,
+        "avoid_gap_abs": avoid_gap_abs,
+        "avoid_alignment_score": (1.0 - float(avoid_gap_abs)) if isinstance(avoid_gap_abs, float) else None,
+        "overconfidence_penalty": overconfidence_penalty,
+    }
+
+
+def prepare_calibration_split(train_df, args):
+    requested_method = str(getattr(args, "calibration_method", "none") or "none").strip().lower()
+    details = {
+        "requested_method": requested_method,
+        "status": "disabled" if requested_method == "none" else "pending",
+        "reason": "calibration_disabled" if requested_method == "none" else None,
+        "fit_row_count": int(len(train_df)),
+        "calibration_row_count": 0,
+    }
+    if requested_method == "none":
+        return train_df, train_df.iloc[0:0].copy(), details
+
+    calibration_days = max(int(getattr(args, "calibration_days", 21) or 21), 7)
+    calibration_min_train_days = max(int(getattr(args, "calibration_min_train_days", 60) or 60), 30)
+    fit_df, calibration_df = chronological_split(train_df, calibration_days, calibration_min_train_days)
+    if fit_df.empty or calibration_df.empty:
+        details.update({"status": "skipped", "reason": "calibration_split_empty"})
+        return train_df, train_df.iloc[0:0].copy(), details
+    if len(calibration_df) < int(getattr(args, "calibration_min_rows", 60) or 60):
+        details.update(
+            {
+                "status": "skipped",
+                "reason": "calibration_rows_below_minimum",
+                "calibration_row_count": int(len(calibration_df)),
+            }
+        )
+        return train_df, train_df.iloc[0:0].copy(), details
+    fit_label_counts = label_counts(fit_df["entry_quality_label"])
+    too_small_fit = [label for label, count in fit_label_counts.items() if count < int(args.min_class_rows)]
+    if too_small_fit:
+        details.update(
+            {
+                "status": "skipped",
+                "reason": f"fit_split_insufficient_classes:{','.join(too_small_fit)}",
+                "calibration_row_count": int(len(calibration_df)),
+            }
+        )
+        return train_df, train_df.iloc[0:0].copy(), details
+    details.update(
+        {
+            "status": "enabled",
+            "reason": None,
+            "fit_row_count": int(len(fit_df)),
+            "calibration_row_count": int(len(calibration_df)),
+            "fit_label_counts": fit_label_counts,
+            "calibration_label_counts": label_counts(calibration_df["entry_quality_label"]),
+        }
+    )
+    return fit_df, calibration_df, details
+
+
+def fit_probability_calibrator(bundle, calibration_df, *, method):
+    info = {
+        "requested_method": str(method or "none"),
+        "status": "skipped",
+        "applied_method": None,
+        "row_count": int(len(calibration_df)),
+        "classes": list(bundle.get("classes") or []),
+        "per_label_models": {},
+    }
+    if calibration_df is None or calibration_df.empty:
+        info["reason"] = "empty_calibration_df"
+        return bundle, info
+
+    raw_predicted, classes = bundle_predict_proba_raw(bundle, calibration_df)
+    if raw_predicted is None or not len(raw_predicted):
+        info["reason"] = "raw_predict_proba_unavailable"
+        return bundle, info
+
+    actual_labels = calibration_df["entry_quality_label"].astype(str).tolist()
+    models = {}
+    for label in LABELS:
+        if label not in classes:
+            models[label] = {"type": "identity", "reason": "class_missing_from_bundle"}
+            info["per_label_models"][label] = {"type": "identity", "reason": "class_missing_from_bundle"}
+            continue
+        class_index = classes.index(label)
+        raw_probs = [_clip_probability(row[class_index], eps=1e-6) or 0.5 for row in raw_predicted]
+        targets = [1 if actual == label else 0 for actual in actual_labels]
+        positives = int(sum(targets))
+        negatives = int(len(targets) - positives)
+        if positives < 2 or negatives < 2:
+            models[label] = {
+                "type": "identity",
+                "reason": "insufficient_class_support",
+                "positives": positives,
+                "negatives": negatives,
+            }
+            info["per_label_models"][label] = {
+                "type": "identity",
+                "reason": "insufficient_class_support",
+                "positives": positives,
+                "negatives": negatives,
+            }
+            continue
+        try:
+            if str(method).strip().lower() == "isotonic":
+                model = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+                model.fit(raw_probs, targets)
+                model_type = "isotonic"
+            else:
+                model = LogisticRegression(max_iter=400)
+                model.fit(pd.DataFrame({"raw_prob": raw_probs}), targets)
+                model_type = "platt"
+            models[label] = {
+                "type": model_type,
+                "model": model,
+                "positives": positives,
+                "negatives": negatives,
+            }
+            info["per_label_models"][label] = {
+                "type": model_type,
+                "positives": positives,
+                "negatives": negatives,
+            }
+        except Exception as exc:
+            models[label] = {
+                "type": "identity",
+                "reason": f"fit_failed:{exc}",
+                "positives": positives,
+                "negatives": negatives,
+            }
+            info["per_label_models"][label] = {
+                "type": "identity",
+                "reason": f"fit_failed:{exc}",
+                "positives": positives,
+                "negatives": negatives,
+            }
+
+    bundle["probability_calibrator"] = {
+        "enabled": True,
+        "method": str(method).strip().lower(),
+        "classes": list(classes),
+        "models": models,
+    }
+    info["status"] = "applied"
+    info["applied_method"] = str(method).strip().lower()
+    info["reason"] = None
+    return bundle, info
+
+
 def train_logreg_bundle(train_df, feature_cols, categorical_features, numeric_features):
     preprocessor = build_preprocessor(categorical_features, numeric_features)
     classifier = Pipeline(
@@ -769,14 +1252,6 @@ def train_bundle(train_df, feature_cols, categorical_features, numeric_features,
     return train_logreg_bundle(train_df, feature_cols, categorical_features, numeric_features)
 
 
-def bundle_predict_proba(bundle, df):
-    feature_cols = bundle["feature_columns"]
-    if bundle["backend"] == "xgboost":
-        X_encoded = bundle["preprocessor"].transform(df[feature_cols])
-        return bundle["model"].predict_proba(X_encoded)
-    return bundle["estimator"].predict_proba(df[feature_cols])
-
-
 def iter_thresholds(min_value, max_value, step):
     current = float(min_value)
     values = []
@@ -815,6 +1290,9 @@ def evaluate_policy(
     min_entry_precision_score=0.0,
     min_exit_quality_score=0.0,
     min_execution_utility_score=0.0,
+    calibration_target_weight=0.10,
+    calibration_avoid_weight=0.06,
+    calibration_overconfidence_penalty_weight=0.08,
 ):
     predictions = [threshold_label(prob_map, entry_threshold, avoid_threshold) for prob_map in prob_maps]
     metrics = classification_metrics(holdout_df["entry_quality_label"].astype(str).tolist(), predictions)
@@ -830,7 +1308,17 @@ def evaluate_policy(
         row_exit_quality_score = _safe_float(row.get("v4_exit_quality_score"), None)
         row_execution_utility_score = _safe_float(row.get("v4_execution_utility_score"), None)
         row_master_score = _safe_float(row.get("v4_master_score"), None)
-        if selected_label == "watch":
+        if any(
+            float(threshold) > 0.0
+            for threshold in (
+                min_master_score,
+                min_regime_score,
+                min_direction_score,
+                min_entry_precision_score,
+                min_exit_quality_score,
+                min_execution_utility_score,
+            )
+        ):
             if row_master_score is None or row_master_score < float(min_master_score):
                 continue
             if row_regime_score is None or row_regime_score < float(min_regime_score):
@@ -854,6 +1342,10 @@ def evaluate_policy(
                 "v4_exit_quality_score": row_exit_quality_score,
                 "v4_execution_utility_score": row_execution_utility_score,
                 "v4_master_score": row_master_score,
+                "prob_entry": _safe_float(prob_maps[idx].get("entry"), None) if isinstance(prob_maps[idx], dict) else None,
+                "prob_watch": _safe_float(prob_maps[idx].get("watch"), None) if isinstance(prob_maps[idx], dict) else None,
+                "prob_avoid": _safe_float(prob_maps[idx].get("avoid"), None) if isinstance(prob_maps[idx], dict) else None,
+                "actual_label": str(row.get("entry_quality_label") or "").strip().lower() or None,
             }
         )
     holdout_days = holdout_span_days(holdout_df)
@@ -909,6 +1401,28 @@ def evaluate_policy(
         if isinstance(avg_return_pct, float) and avg_return_pct < float(min_avg_return_pct)
         else 0.0
     )
+    probability_alignment = _policy_probability_alignment(selected_rows, selected_label=selected_label)
+    selected_target_alignment_score = _clamp01(
+        probability_alignment.get("selected_target_alignment_score"),
+        default=0.0,
+    )
+    avoid_alignment_score = _clamp01(
+        probability_alignment.get("avoid_alignment_score"),
+        default=0.0,
+    )
+    overconfidence_penalty = _clamp01(
+        probability_alignment.get("overconfidence_penalty"),
+        default=0.0,
+    )
+    sample_confidence_score = _clamp01(float(count) / float(max(int(min_selected_rows), 1)))
+    quality_pocket_score = _clamp01(
+        0.34 * win_rate_score
+        + 0.18 * expected_return_score
+        + 0.16 * float(metrics.get("balanced_accuracy") or 0.0)
+        + 0.16 * selected_target_alignment_score
+        + 0.10 * avoid_alignment_score
+        + 0.06 * float(avg_execution_utility_score or 0.0)
+    )
     objective_score = None
     objective_components = None
     if isinstance(win_rate_pct, float) and isinstance(avg_return_pct, float):
@@ -926,34 +1440,45 @@ def evaluate_policy(
                 + 0.06 * float(avg_master_score or 0.0)
                 + 0.03 * float(frequency_score)
                 + 0.04 * balanced_accuracy_score
+                + float(calibration_target_weight) * selected_target_alignment_score
+                + float(calibration_avoid_weight) * avoid_alignment_score
                 - 0.28 * overfilter_penalty
                 - 0.05 * low_frequency_penalty
                 - 0.42 * over_frequency_penalty
                 - 0.30 * low_win_rate_penalty
                 - 0.20 * low_return_penalty
+                - float(calibration_overconfidence_penalty_weight) * overconfidence_penalty
             )
         else:
             objective_score = (
-                0.28 * win_rate_score
-                + 0.10 * win_rate_band_score
-                + 0.22 * expected_return_score
-                + 0.08 * float(avg_regime_score or 0.0)
-                + 0.08 * float(avg_direction_score or 0.0)
-                + 0.10 * float(avg_entry_precision_score or 0.0)
-                + 0.08 * float(avg_exit_quality_score or 0.0)
+                0.22 * quality_pocket_score
+                + 0.22 * win_rate_score
+                + 0.08 * win_rate_band_score
+                + 0.12 * expected_return_score
+                + 0.07 * float(avg_regime_score or 0.0)
+                + 0.07 * float(avg_direction_score or 0.0)
+                + 0.07 * float(avg_entry_precision_score or 0.0)
+                + 0.06 * float(avg_exit_quality_score or 0.0)
                 + 0.08 * float(avg_execution_utility_score or 0.0)
-                + 0.06 * float(frequency_score)
+                + 0.04 * float(avg_master_score or 0.0)
+                + 0.03 * sample_confidence_score
+                + 0.03 * float(frequency_score)
                 + 0.06 * balanced_accuracy_score
-                - 0.10 * overfilter_penalty
-                - 0.05 * low_frequency_penalty
-                - 0.20 * over_frequency_penalty
-                - 0.30 * low_win_rate_penalty
-                - 0.15 * low_return_penalty
+                + float(calibration_target_weight) * selected_target_alignment_score
+                + float(calibration_avoid_weight) * avoid_alignment_score
+                - 0.14 * overfilter_penalty
+                - 0.08 * low_frequency_penalty
+                - 0.22 * over_frequency_penalty
+                - 0.36 * low_win_rate_penalty
+                - 0.18 * low_return_penalty
+                - float(calibration_overconfidence_penalty_weight) * overconfidence_penalty
             )
         objective_components = {
             "win_rate_score": win_rate_score,
             "win_rate_band_score": win_rate_band_score,
             "expected_return_score": expected_return_score,
+            "quality_pocket_score": quality_pocket_score,
+            "sample_confidence_score": sample_confidence_score,
             "avg_regime_score": avg_regime_score,
             "avg_direction_score": avg_direction_score,
             "avg_entry_precision_score": avg_entry_precision_score,
@@ -967,6 +1492,13 @@ def evaluate_policy(
             "over_frequency_penalty": over_frequency_penalty,
             "low_win_rate_penalty": low_win_rate_penalty,
             "low_return_penalty": low_return_penalty,
+            "selected_target_alignment_score": selected_target_alignment_score,
+            "avoid_alignment_score": avoid_alignment_score,
+            "overconfidence_penalty": overconfidence_penalty,
+            "selected_target_prob_mean": probability_alignment.get("selected_target_prob_mean"),
+            "selected_target_actual_rate": probability_alignment.get("selected_target_actual_rate"),
+            "avoid_prob_mean": probability_alignment.get("avoid_prob_mean"),
+            "avoid_actual_rate": probability_alignment.get("avoid_actual_rate"),
         }
     return {
         "policy_name": str(policy_name),
@@ -986,6 +1518,13 @@ def evaluate_policy(
         "avg_master_score": avg_master_score,
         "objective_score": objective_score,
         "objective_components": objective_components,
+        "selected_target_alignment_score": probability_alignment.get("selected_target_alignment_score"),
+        "avoid_alignment_score": probability_alignment.get("avoid_alignment_score"),
+        "overconfidence_penalty": probability_alignment.get("overconfidence_penalty"),
+        "selected_target_prob_mean": probability_alignment.get("selected_target_prob_mean"),
+        "selected_target_actual_rate": probability_alignment.get("selected_target_actual_rate"),
+        "avoid_prob_mean": probability_alignment.get("avoid_prob_mean"),
+        "avoid_actual_rate": probability_alignment.get("avoid_actual_rate"),
         "balanced_accuracy": metrics.get("balanced_accuracy"),
         "macro_f1": metrics.get("macro_f1"),
         "is_viable": bool(is_viable),
@@ -997,12 +1536,12 @@ def build_policy_profiles(args):
         "premium": {
             "name": "premium",
             "selected_label": "entry",
-            "entry_threshold_min": float(args.entry_threshold_min),
-            "entry_threshold_max": float(args.entry_threshold_max),
-            "entry_threshold_step": float(args.entry_threshold_step),
-            "avoid_threshold_min": float(args.avoid_threshold_min),
-            "avoid_threshold_max": float(args.avoid_threshold_max),
-            "avoid_threshold_step": float(args.avoid_threshold_step),
+            "entry_threshold_min": float(args.premium_entry_threshold_min),
+            "entry_threshold_max": float(args.premium_entry_threshold_max),
+            "entry_threshold_step": float(args.premium_entry_threshold_step),
+            "avoid_threshold_min": float(args.premium_avoid_threshold_min),
+            "avoid_threshold_max": float(args.premium_avoid_threshold_max),
+            "avoid_threshold_step": float(args.premium_avoid_threshold_step),
             "min_selected_rows": int(args.premium_min_selected_rows),
             "min_alerts_per_day": float(args.min_alerts_per_day),
             "target_alerts_per_day": float(args.premium_target_alerts_per_day),
@@ -1016,16 +1555,19 @@ def build_policy_profiles(args):
             "min_entry_precision_score": 0.0,
             "min_exit_quality_score": 0.0,
             "min_execution_utility_score": 0.0,
+            "calibration_target_weight": float(args.policy_calibration_target_weight),
+            "calibration_avoid_weight": float(args.policy_calibration_avoid_weight),
+            "calibration_overconfidence_penalty_weight": float(args.policy_calibration_overconfidence_penalty_weight),
         },
         "standard": {
             "name": "standard",
             "selected_label": "entry",
-            "entry_threshold_min": float(args.entry_threshold_min),
-            "entry_threshold_max": float(args.entry_threshold_max),
-            "entry_threshold_step": float(args.entry_threshold_step),
-            "avoid_threshold_min": float(args.avoid_threshold_min),
-            "avoid_threshold_max": float(args.avoid_threshold_max),
-            "avoid_threshold_step": float(args.avoid_threshold_step),
+            "entry_threshold_min": float(args.standard_entry_threshold_min),
+            "entry_threshold_max": float(args.standard_entry_threshold_max),
+            "entry_threshold_step": float(args.standard_entry_threshold_step),
+            "avoid_threshold_min": float(args.standard_avoid_threshold_min),
+            "avoid_threshold_max": float(args.standard_avoid_threshold_max),
+            "avoid_threshold_step": float(args.standard_avoid_threshold_step),
             "min_selected_rows": int(args.standard_min_selected_rows),
             "min_alerts_per_day": float(args.min_alerts_per_day),
             "target_alerts_per_day": float(args.standard_target_alerts_per_day),
@@ -1039,6 +1581,9 @@ def build_policy_profiles(args):
             "min_entry_precision_score": 0.0,
             "min_exit_quality_score": 0.0,
             "min_execution_utility_score": 0.0,
+            "calibration_target_weight": float(args.policy_calibration_target_weight),
+            "calibration_avoid_weight": float(args.policy_calibration_avoid_weight),
+            "calibration_overconfidence_penalty_weight": float(args.policy_calibration_overconfidence_penalty_weight),
         },
         "watch": {
             "name": "watch",
@@ -1062,12 +1607,411 @@ def build_policy_profiles(args):
             "min_entry_precision_score": float(args.watch_min_entry_precision_score),
             "min_exit_quality_score": float(args.watch_min_exit_quality_score),
             "min_execution_utility_score": float(args.watch_min_execution_utility_score),
+            "calibration_target_weight": float(args.policy_calibration_target_weight),
+            "calibration_avoid_weight": float(args.policy_calibration_avoid_weight),
+            "calibration_overconfidence_penalty_weight": float(args.policy_calibration_overconfidence_penalty_weight),
         },
     }
 
 
-def optimize_policy_thresholds(holdout_df, prob_maps, args):
+def _profile_score_quantile(df, column_name, quantile_value, *, fallback, floor=None, ceil=None):
+    if df is None or column_name not in df.columns:
+        return float(fallback)
+    values = pd.to_numeric(df[column_name], errors="coerce").dropna()
+    if values.empty:
+        return float(fallback)
+    out = float(values.quantile(float(quantile_value)))
+    if floor is not None:
+        out = max(out, float(floor))
+    if ceil is not None:
+        out = min(out, float(ceil))
+    return float(out)
+
+
+def _profile_probability_quantile(prob_maps, label_name, quantile_value, *, fallback, floor=None, ceil=None):
+    if not prob_maps:
+        return float(fallback)
+    values = []
+    for prob_map in prob_maps:
+        if not isinstance(prob_map, dict):
+            continue
+        value = _safe_float(prob_map.get(label_name), None)
+        if value is None:
+            continue
+        values.append(float(value))
+    if not values:
+        return float(fallback)
+    out = float(pd.Series(values, dtype="float64").quantile(float(quantile_value)))
+    if floor is not None:
+        out = max(out, float(floor))
+    if ceil is not None:
+        out = min(out, float(ceil))
+    return float(out)
+
+
+def _filter_prob_maps(prob_maps, row_mask):
+    if not prob_maps or row_mask is None:
+        return []
+    out = []
+    for idx, keep in enumerate(list(row_mask)):
+        if not keep or idx >= len(prob_maps):
+            continue
+        prob_map = prob_maps[idx]
+        if isinstance(prob_map, dict):
+            out.append(prob_map)
+    return out
+
+
+def build_strategy_specific_policy_profiles(args, strategy_name, holdout_df, prob_maps=None):
     profiles = build_policy_profiles(args)
+    strategy_key = str(strategy_name or "").strip().upper()
+    if strategy_key != "PA15" or holdout_df is None or holdout_df.empty:
+        return profiles, {}
+
+    label_series = holdout_df["entry_quality_label"].astype(str).str.strip().str.lower()
+    target_mask = label_series.isin({"entry", "watch"})
+    entry_mask = label_series == "entry"
+    target_rows = holdout_df[target_mask].copy()
+    entry_rows = holdout_df[entry_mask].copy()
+    target_prob_maps = _filter_prob_maps(prob_maps, target_mask.tolist())
+    entry_prob_maps = _filter_prob_maps(prob_maps, entry_mask.tolist())
+    if target_rows.empty:
+        return profiles, {}
+
+    premium_profile = dict(profiles.get("premium") or {})
+    original_premium_profile = dict(premium_profile)
+    standard_profile = dict(profiles.get("standard") or {})
+    original_standard_profile = dict(standard_profile)
+    watch_profile = dict(profiles.get("watch") or {})
+    original_watch_profile = dict(watch_profile)
+
+    if not entry_rows.empty:
+        premium_profile["min_selected_rows"] = min(int(premium_profile["min_selected_rows"]), 4)
+        premium_profile["min_alerts_per_day"] = min(float(premium_profile["min_alerts_per_day"]), 0.08)
+        premium_profile["target_alerts_per_day"] = min(float(premium_profile["target_alerts_per_day"]), 0.35)
+        premium_profile["max_alerts_per_day"] = min(float(premium_profile["max_alerts_per_day"]), 0.80)
+        premium_profile["min_win_rate_pct"] = min(float(premium_profile["min_win_rate_pct"]), 52.0)
+        premium_profile["max_win_rate_pct"] = min(float(premium_profile["max_win_rate_pct"]), 60.0)
+        premium_profile["min_avg_return_pct"] = min(float(premium_profile["min_avg_return_pct"]), 0.10)
+        premium_profile["entry_threshold_min"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "entry",
+            0.10,
+            fallback=premium_profile["entry_threshold_min"],
+            floor=0.02,
+            ceil=0.20,
+        )
+        premium_profile["entry_threshold_max"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "entry",
+            0.90,
+            fallback=premium_profile["entry_threshold_max"],
+            floor=max(float(premium_profile["entry_threshold_min"]) + 0.06, 0.08),
+            ceil=0.45,
+        )
+        premium_profile["avoid_threshold_min"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "avoid",
+            0.10,
+            fallback=premium_profile["avoid_threshold_min"],
+            floor=0.55,
+            ceil=0.75,
+        )
+        premium_profile["avoid_threshold_max"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "avoid",
+            0.90,
+            fallback=premium_profile["avoid_threshold_max"],
+            floor=max(float(premium_profile["avoid_threshold_min"]) + 0.05, 0.65),
+            ceil=0.85,
+        )
+        premium_profile["min_master_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_master_score",
+            0.10,
+            fallback=premium_profile["min_master_score"],
+            floor=0.18,
+        )
+        premium_profile["min_regime_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_regime_score",
+            0.10,
+            fallback=premium_profile["min_regime_score"],
+            floor=0.40,
+        )
+        premium_profile["min_direction_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_direction_score",
+            0.10,
+            fallback=premium_profile["min_direction_score"],
+            floor=0.40,
+        )
+        premium_profile["min_entry_precision_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_entry_precision_score",
+            0.10,
+            fallback=premium_profile["min_entry_precision_score"],
+            floor=0.26,
+        )
+        premium_profile["min_exit_quality_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_exit_quality_score",
+            0.10,
+            fallback=premium_profile["min_exit_quality_score"],
+            floor=0.44,
+        )
+        premium_profile["min_execution_utility_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_execution_utility_score",
+            0.10,
+            fallback=premium_profile["min_execution_utility_score"],
+            floor=0.24,
+        )
+
+        standard_profile["min_selected_rows"] = min(int(standard_profile["min_selected_rows"]), 8)
+        standard_profile["min_alerts_per_day"] = min(float(standard_profile["min_alerts_per_day"]), 0.16)
+        standard_profile["target_alerts_per_day"] = min(float(standard_profile["target_alerts_per_day"]), 0.40)
+        standard_profile["max_alerts_per_day"] = min(float(standard_profile["max_alerts_per_day"]), 0.90)
+        standard_profile["min_win_rate_pct"] = min(float(standard_profile["min_win_rate_pct"]), 48.0)
+        standard_profile["max_win_rate_pct"] = min(float(standard_profile["max_win_rate_pct"]), 58.0)
+        standard_profile["min_avg_return_pct"] = min(float(standard_profile["min_avg_return_pct"]), 0.05)
+        standard_profile["entry_threshold_min"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "entry",
+            0.20,
+            fallback=standard_profile["entry_threshold_min"],
+            floor=0.03,
+            ceil=0.12,
+        )
+        standard_profile["entry_threshold_max"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "entry",
+            0.60,
+            fallback=standard_profile["entry_threshold_max"],
+            floor=max(float(standard_profile["entry_threshold_min"]) + 0.04, 0.08),
+            ceil=0.20,
+        )
+        standard_profile["avoid_threshold_min"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "avoid",
+            0.55,
+            fallback=standard_profile["avoid_threshold_min"],
+            floor=0.70,
+            ceil=0.80,
+        )
+        standard_profile["avoid_threshold_max"] = _profile_probability_quantile(
+            entry_prob_maps,
+            "avoid",
+            0.90,
+            fallback=standard_profile["avoid_threshold_max"],
+            floor=max(float(standard_profile["avoid_threshold_min"]) + 0.05, 0.78),
+            ceil=0.85,
+        )
+        standard_profile["min_master_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_master_score",
+            0.15,
+            fallback=standard_profile["min_master_score"],
+            floor=0.20,
+        )
+        standard_profile["min_regime_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_regime_score",
+            0.15,
+            fallback=standard_profile["min_regime_score"],
+            floor=0.42,
+        )
+        standard_profile["min_direction_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_direction_score",
+            0.15,
+            fallback=standard_profile["min_direction_score"],
+            floor=0.41,
+        )
+        standard_profile["min_entry_precision_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_entry_precision_score",
+            0.15,
+            fallback=standard_profile["min_entry_precision_score"],
+            floor=0.29,
+        )
+        standard_profile["min_exit_quality_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_exit_quality_score",
+            0.15,
+            fallback=standard_profile["min_exit_quality_score"],
+            floor=0.46,
+        )
+        standard_profile["min_execution_utility_score"] = _profile_score_quantile(
+            entry_rows,
+            "v4_execution_utility_score",
+            0.15,
+            fallback=standard_profile["min_execution_utility_score"],
+            floor=0.27,
+        )
+
+    watch_profile["min_master_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_master_score",
+        0.20,
+        fallback=watch_profile["min_master_score"],
+        floor=0.08,
+        ceil=watch_profile["min_master_score"],
+    )
+    watch_profile["min_regime_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_regime_score",
+        0.15,
+        fallback=watch_profile["min_regime_score"],
+        floor=0.32,
+        ceil=watch_profile["min_regime_score"],
+    )
+    watch_profile["min_direction_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_direction_score",
+        0.15,
+        fallback=watch_profile["min_direction_score"],
+        floor=0.34,
+        ceil=watch_profile["min_direction_score"],
+    )
+    watch_profile["min_entry_precision_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_entry_precision_score",
+        0.20,
+        fallback=watch_profile["min_entry_precision_score"],
+        floor=0.14,
+        ceil=watch_profile["min_entry_precision_score"],
+    )
+    watch_profile["min_exit_quality_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_exit_quality_score",
+        0.15,
+        fallback=watch_profile["min_exit_quality_score"],
+        floor=0.34,
+        ceil=watch_profile["min_exit_quality_score"],
+    )
+    watch_profile["min_execution_utility_score"] = _profile_score_quantile(
+        target_rows,
+        "v4_execution_utility_score",
+        0.20,
+        fallback=watch_profile["min_execution_utility_score"],
+        floor=0.15,
+        ceil=watch_profile["min_execution_utility_score"],
+    )
+    watch_profile["min_avg_return_pct"] = min(float(watch_profile["min_avg_return_pct"]), 0.0)
+    watch_profile["min_win_rate_pct"] = min(float(watch_profile["min_win_rate_pct"]), 42.0)
+    watch_profile["target_alerts_per_day"] = min(float(watch_profile["target_alerts_per_day"]), 2.0)
+    watch_profile["max_alerts_per_day"] = min(float(watch_profile["max_alerts_per_day"]), 4.0)
+    watch_profile["entry_threshold_min"] = _profile_probability_quantile(
+        prob_maps,
+        "entry",
+        0.99,
+        fallback=watch_profile["entry_threshold_min"],
+        floor=0.20,
+        ceil=watch_profile["entry_threshold_min"],
+    )
+    watch_profile["entry_threshold_max"] = _profile_probability_quantile(
+        prob_maps,
+        "entry",
+        0.999,
+        fallback=watch_profile["entry_threshold_max"],
+        floor=max(float(watch_profile["entry_threshold_min"]) + 0.10, 0.35),
+        ceil=watch_profile["entry_threshold_max"],
+    )
+    watch_profile["avoid_threshold_min"] = _profile_probability_quantile(
+        prob_maps,
+        "avoid",
+        0.25,
+        fallback=watch_profile["avoid_threshold_min"],
+        floor=0.40,
+        ceil=watch_profile["avoid_threshold_min"],
+    )
+    watch_profile["avoid_threshold_max"] = _profile_probability_quantile(
+        prob_maps,
+        "avoid",
+        0.75,
+        fallback=watch_profile["avoid_threshold_max"],
+        floor=max(float(watch_profile["avoid_threshold_min"]) + 0.10, 0.55),
+        ceil=watch_profile["avoid_threshold_max"],
+    )
+
+    profiles["premium"] = premium_profile
+    profiles["standard"] = standard_profile
+    profiles["watch"] = watch_profile
+    overrides = {
+        "strategy": strategy_key,
+        "premium": {
+            key: premium_profile[key]
+            for key in (
+                "entry_threshold_min",
+                "entry_threshold_max",
+                "avoid_threshold_min",
+                "avoid_threshold_max",
+                "min_selected_rows",
+                "min_alerts_per_day",
+                "target_alerts_per_day",
+                "max_alerts_per_day",
+                "min_win_rate_pct",
+                "max_win_rate_pct",
+                "min_avg_return_pct",
+                "min_master_score",
+                "min_regime_score",
+                "min_direction_score",
+                "min_entry_precision_score",
+                "min_exit_quality_score",
+                "min_execution_utility_score",
+            )
+            if premium_profile.get(key) != original_premium_profile.get(key)
+        },
+        "standard": {
+            key: standard_profile[key]
+            for key in (
+                "entry_threshold_min",
+                "entry_threshold_max",
+                "avoid_threshold_min",
+                "avoid_threshold_max",
+                "min_selected_rows",
+                "min_alerts_per_day",
+                "target_alerts_per_day",
+                "max_alerts_per_day",
+                "min_win_rate_pct",
+                "max_win_rate_pct",
+                "min_avg_return_pct",
+                "min_master_score",
+                "min_regime_score",
+                "min_direction_score",
+                "min_entry_precision_score",
+                "min_exit_quality_score",
+                "min_execution_utility_score",
+            )
+            if standard_profile.get(key) != original_standard_profile.get(key)
+        },
+        "watch": {
+            key: watch_profile[key]
+            for key in (
+                "entry_threshold_min",
+                "entry_threshold_max",
+                "avoid_threshold_min",
+                "avoid_threshold_max",
+                "min_master_score",
+                "min_regime_score",
+                "min_direction_score",
+                "min_entry_precision_score",
+                "min_exit_quality_score",
+                "min_execution_utility_score",
+                "min_win_rate_pct",
+                "min_avg_return_pct",
+                "target_alerts_per_day",
+                "max_alerts_per_day",
+            )
+            if watch_profile.get(key) != original_watch_profile.get(key)
+        },
+    }
+    return profiles, overrides
+
+
+def optimize_policy_thresholds(holdout_df, prob_maps, args, *, profiles=None):
+    profiles = profiles or build_policy_profiles(args)
     candidates_by_profile = {name: [] for name in profiles}
     threshold_pairs_by_profile = {}
     total_pairs = 0
@@ -1114,6 +2058,9 @@ def optimize_policy_thresholds(holdout_df, prob_maps, args):
                 min_entry_precision_score=profile["min_entry_precision_score"],
                 min_exit_quality_score=profile["min_exit_quality_score"],
                 min_execution_utility_score=profile["min_execution_utility_score"],
+                calibration_target_weight=profile["calibration_target_weight"],
+                calibration_avoid_weight=profile["calibration_avoid_weight"],
+                calibration_overconfidence_penalty_weight=profile["calibration_overconfidence_penalty_weight"],
             )
             candidates_by_profile[profile_name].append(candidate)
             completed += 1
@@ -1154,10 +2101,129 @@ def optimize_policy_thresholds(holdout_df, prob_maps, args):
     return best_by_profile, ranked_by_profile
 
 
-def build_holdout_prediction_rows(holdout_df, prob_maps, premium_policy, standard_policy, watch_policy):
+def _subset_prob_maps_for_indices(df, prob_maps, indices):
+    if not indices:
+        return []
+    index_to_position = {index_value: idx for idx, index_value in enumerate(df.index.tolist())}
+    out = []
+    for index_value in indices:
+        position = index_to_position.get(index_value)
+        if position is None or position >= len(prob_maps):
+            continue
+        out.append(prob_maps[position])
+    return out
+
+
+def optimize_strategy_specific_policies(holdout_df, prob_maps, args):
+    if not bool(getattr(args, "strategy_policy_enable", True)):
+        return {}
+    if holdout_df is None or holdout_df.empty or "strategy" not in holdout_df.columns:
+        return {}
+
+    min_holdout_rows = max(int(getattr(args, "strategy_policy_min_holdout_rows", 90) or 90), 30)
+    strategy_results = {}
+    strategy_series = holdout_df["strategy"].fillna("").astype(str).str.strip().str.upper()
+    for strategy_name, strategy_df in holdout_df.groupby(strategy_series):
+        strategy_key = str(strategy_name or "").strip().upper()
+        if not strategy_key:
+            continue
+        if len(strategy_df) < min_holdout_rows:
+            continue
+        strategy_prob_maps = _subset_prob_maps_for_indices(holdout_df, prob_maps, strategy_df.index.tolist())
+        if len(strategy_prob_maps) != len(strategy_df):
+            continue
+        strategy_profiles, profile_overrides = build_strategy_specific_policy_profiles(
+            args,
+            strategy_key,
+            strategy_df,
+            strategy_prob_maps,
+        )
+        best_policies, top_policies = optimize_policy_thresholds(
+            strategy_df,
+            strategy_prob_maps,
+            args,
+            profiles=strategy_profiles,
+        )
+        premium_policy = best_policies.get("premium")
+        standard_policy = best_policies.get("standard")
+        watch_policy = best_policies.get("watch")
+        if not isinstance(premium_policy, dict) or not isinstance(standard_policy, dict) or not isinstance(watch_policy, dict):
+            continue
+
+        y_strategy = strategy_df["entry_quality_label"].astype(str).tolist()
+        premium_predictions = [
+            threshold_label(prob_map, premium_policy["entry_threshold"], premium_policy["avoid_threshold"])
+            for prob_map in strategy_prob_maps
+        ]
+        standard_predictions = [
+            threshold_label(prob_map, standard_policy["entry_threshold"], standard_policy["avoid_threshold"])
+            for prob_map in strategy_prob_maps
+        ]
+        watch_predictions = [
+            threshold_label(prob_map, watch_policy["entry_threshold"], watch_policy["avoid_threshold"])
+            for prob_map in strategy_prob_maps
+        ]
+        strategy_results[strategy_key] = {
+            "strategy": strategy_key,
+            "holdout_row_count": int(len(strategy_df)),
+            "holdout_label_counts": label_counts(strategy_df["entry_quality_label"]),
+            "recommended_premium_policy": premium_policy,
+            "recommended_standard_policy": standard_policy,
+            "recommended_watch_policy": watch_policy,
+            "premium_policy_metrics": classification_metrics(y_strategy, premium_predictions),
+            "standard_policy_metrics": classification_metrics(y_strategy, standard_predictions),
+            "watch_policy_metrics": classification_metrics(y_strategy, watch_predictions),
+            "top_premium_policy_candidates": top_policies.get("premium", []),
+            "top_standard_policy_candidates": top_policies.get("standard", []),
+            "top_watch_policy_candidates": top_policies.get("watch", []),
+            "policy_profile_overrides": profile_overrides,
+        }
+    return strategy_results
+
+
+def summarize_strategy_row_counts(*, usable_df, train_df, model_train_df, calibration_df, holdout_df, args):
+    def _select_strategy_rows(df, strategy_name):
+        if df is None or "strategy" not in df.columns:
+            return pd.DataFrame()
+        if df.empty:
+            return df.iloc[0:0].copy()
+        mask = df["strategy"].fillna("").astype(str).str.strip().str.upper() == strategy_name
+        return df[mask].copy()
+
+    strategy_names = set()
+    for df in (usable_df, train_df, model_train_df, calibration_df, holdout_df):
+        if df is not None and not df.empty and "strategy" in df.columns:
+            strategy_names.update(
+                str(value).strip().upper()
+                for value in df["strategy"].fillna("").astype(str).tolist()
+                if str(value).strip()
+            )
+    out = {}
+    min_holdout_rows = max(int(getattr(args, "strategy_policy_min_holdout_rows", 90) or 90), 30)
+    for strategy_name in sorted(strategy_names):
+        usable_rows = _select_strategy_rows(usable_df, strategy_name)
+        train_rows = _select_strategy_rows(train_df, strategy_name)
+        model_train_rows = _select_strategy_rows(model_train_df, strategy_name)
+        calibration_rows = _select_strategy_rows(calibration_df, strategy_name)
+        holdout_rows = _select_strategy_rows(holdout_df, strategy_name)
+        out[strategy_name] = {
+            "usable_rows": int(len(usable_rows)),
+            "train_rows": int(len(train_rows)),
+            "model_train_rows": int(len(model_train_rows)),
+            "calibration_rows": int(len(calibration_rows)),
+            "holdout_rows": int(len(holdout_rows)),
+            "holdout_label_counts": label_counts(holdout_rows["entry_quality_label"]) if len(holdout_rows) else {},
+            "strategy_policy_min_holdout_rows": int(min_holdout_rows),
+            "strategy_policy_eligible": bool(len(holdout_rows) >= min_holdout_rows),
+        }
+    return out
+
+
+def build_holdout_prediction_rows(holdout_df, prob_maps, premium_policy, standard_policy, watch_policy, *, raw_prob_maps=None):
     rows = []
     for idx, (_, row) in enumerate(holdout_df.iterrows()):
         prob_map = prob_maps[idx]
+        raw_prob_map = raw_prob_maps[idx] if isinstance(raw_prob_maps, list) and idx < len(raw_prob_maps) else None
         predicted_argmax = max(prob_map.items(), key=lambda item: item[1])[0]
         predicted_premium = threshold_label(prob_map, premium_policy["entry_threshold"], premium_policy["avoid_threshold"])
         predicted_standard = threshold_label(prob_map, standard_policy["entry_threshold"], standard_policy["avoid_threshold"])
@@ -1181,6 +2247,9 @@ def build_holdout_prediction_rows(holdout_df, prob_maps, premium_policy, standar
                 "prob_entry": float(prob_map.get("entry", 0.0)),
                 "prob_watch": float(prob_map.get("watch", 0.0)),
                 "prob_avoid": float(prob_map.get("avoid", 0.0)),
+                "raw_prob_entry": float(raw_prob_map.get("entry", 0.0)) if isinstance(raw_prob_map, dict) else None,
+                "raw_prob_watch": float(raw_prob_map.get("watch", 0.0)) if isinstance(raw_prob_map, dict) else None,
+                "raw_prob_avoid": float(raw_prob_map.get("avoid", 0.0)) if isinstance(raw_prob_map, dict) else None,
                 "label_win": bool(row.get("label_win")) if pd.notna(row.get("label_win")) else None,
                 "label_return_pct": _safe_float(row.get("label_return_pct"), None),
                 "v4_regime_score": _safe_float(row.get("v4_regime_score"), None),
@@ -1213,7 +2282,7 @@ def main():
     args = parser.parse_args()
     overall_started_at = time.time()
 
-    _print_step(1, 5, "Load dataset")
+    _print_step(1, 6, "Load dataset")
     root = Path(__file__).resolve().parents[1]
     input_path = resolve_input_path(root, args.input_path)
     if not input_path.exists():
@@ -1226,7 +2295,7 @@ def main():
     strategies = [value.strip().upper() for value in parse_csv_list(args.strategies)]
     df = filter_dataset(df, groups=groups, strategies=strategies)
 
-    _print_step(2, 5, "Build V4 features")
+    _print_step(2, 6, "Build V4 features")
     df = build_features(df)
     df = augment_v4_features(df)
     if "label_filled" not in df.columns or "label_win" not in df.columns:
@@ -1253,13 +2322,16 @@ def main():
             f"Training split has insufficient rows per class: {too_small_train} with counts {train_label_counts}"
         )
 
-    categorical_features, numeric_features = available_features(train_df)
-    categorical_features, numeric_features = extend_v4_numeric_features(train_df, categorical_features, numeric_features)
+    fit_df, calibration_df, calibration_plan = prepare_calibration_split(train_df, args)
+    model_train_df = fit_df if str(calibration_plan.get("status") or "") == "enabled" else train_df
+
+    categorical_features, numeric_features = available_features(model_train_df)
+    categorical_features, numeric_features = extend_v4_numeric_features(model_train_df, categorical_features, numeric_features)
     feature_cols = categorical_features + numeric_features
 
-    _print_step(3, 5, "Train model backend")
+    _print_step(3, 6, "Train model backend")
     bundle = train_bundle(
-        train_df,
+        model_train_df,
         feature_cols,
         categorical_features,
         numeric_features,
@@ -1268,23 +2340,56 @@ def main():
     )
     print(f"[{LOG_PREFIX}] backend={bundle['backend']} | device={bundle['device']} | features={len(feature_cols)}", flush=True)
 
+    _print_step(4, 6, "Fit calibration layer")
+    calibration_info = dict(calibration_plan)
+    calibration_info.update(
+        {
+            "method_requested": str(args.calibration_method),
+            "days": int(args.calibration_days),
+            "min_rows": int(args.calibration_min_rows),
+            "min_train_days": int(args.calibration_min_train_days),
+            "model_train_row_count": int(len(model_train_df)),
+            "train_row_count_before_calibration": int(len(train_df)),
+        }
+    )
+    if str(calibration_plan.get("status") or "") == "enabled":
+        bundle, fitted_calibration_info = fit_probability_calibrator(
+            bundle,
+            calibration_df,
+            method=args.calibration_method,
+        )
+        calibration_info.update(fitted_calibration_info)
+        calibration_raw_matrix, calibration_classes = bundle_predict_proba_raw(bundle, calibration_df[feature_cols])
+        calibration_raw_prob_maps = probability_maps_from_matrix(calibration_raw_matrix, calibration_classes)
+        calibration_calibrated_matrix = apply_probability_calibrator(bundle, calibration_raw_matrix, calibration_classes)
+        calibration_prob_maps = probability_maps_from_matrix(calibration_calibrated_matrix, calibration_classes)
+        calibration_labels = calibration_df["entry_quality_label"].astype(str).tolist()
+        calibration_info["calibration_split_probability_metrics_raw"] = summarize_probability_calibration(
+            calibration_raw_prob_maps,
+            calibration_labels,
+        )
+        calibration_info["calibration_split_probability_metrics_calibrated"] = summarize_probability_calibration(
+            calibration_prob_maps,
+            calibration_labels,
+        )
+    else:
+        bundle["probability_calibrator"] = None
+
     X_holdout = holdout_df[feature_cols]
     y_holdout = holdout_df["entry_quality_label"].astype(str)
-    holdout_prob = bundle_predict_proba(bundle, X_holdout)
-    classes = list(bundle["classes"])
-    prob_maps = []
-    for row_prob in holdout_prob:
-        prob_maps.append(
-            {
-                label: float(row_prob[classes.index(label)]) if label in classes else 0.0
-                for label in LABELS
-            }
-        )
+    raw_holdout_prob, classes = bundle_predict_proba_raw(bundle, X_holdout)
+    holdout_prob = apply_probability_calibrator(bundle, raw_holdout_prob, classes)
+    raw_prob_maps = probability_maps_from_matrix(raw_holdout_prob, classes)
+    prob_maps = probability_maps_from_matrix(holdout_prob, classes)
 
+    raw_argmax_predictions = [max(prob_map.items(), key=lambda item: item[1])[0] for prob_map in raw_prob_maps]
+    raw_argmax_metrics = classification_metrics(y_holdout.tolist(), raw_argmax_predictions)
     argmax_predictions = [max(prob_map.items(), key=lambda item: item[1])[0] for prob_map in prob_maps]
     argmax_metrics = classification_metrics(y_holdout.tolist(), argmax_predictions)
+    calibration_info["holdout_probability_metrics_raw"] = summarize_probability_calibration(raw_prob_maps, y_holdout.tolist())
+    calibration_info["holdout_probability_metrics_calibrated"] = summarize_probability_calibration(prob_maps, y_holdout.tolist())
 
-    _print_step(4, 5, "Scan threshold policy")
+    _print_step(5, 6, "Scan threshold policy")
     best_policies, top_policies = optimize_policy_thresholds(holdout_df, prob_maps, args)
     premium_policy = best_policies.get("premium")
     standard_policy = best_policies.get("standard")
@@ -1307,12 +2412,30 @@ def main():
     premium_policy_metrics = classification_metrics(y_holdout.tolist(), premium_predictions)
     standard_policy_metrics = classification_metrics(y_holdout.tolist(), standard_predictions)
     watch_policy_metrics = classification_metrics(y_holdout.tolist(), watch_predictions)
+    strategy_specific_policies = optimize_strategy_specific_policies(holdout_df, prob_maps, args)
+    strategy_row_counts = summarize_strategy_row_counts(
+        usable_df=usable_df,
+        train_df=train_df,
+        model_train_df=model_train_df,
+        calibration_df=calibration_df,
+        holdout_df=holdout_df,
+        args=args,
+    )
+    for strategy_name, strategy_summary in strategy_row_counts.items():
+        print(
+            f"[{LOG_PREFIX}] strategy={strategy_name} | usable={strategy_summary['usable_rows']} | "
+            f"holdout={strategy_summary['holdout_rows']} | "
+            f"strategy_policy_eligible={str(strategy_summary['strategy_policy_eligible']).lower()}",
+            flush=True,
+        )
+
     holdout_rows = build_holdout_prediction_rows(
         holdout_df,
         prob_maps,
         premium_policy,
         standard_policy,
         watch_policy,
+        raw_prob_maps=raw_prob_maps,
     )
 
     entry_probabilities = sorted(
@@ -1353,9 +2476,20 @@ def main():
         "train_label_counts": train_label_counts,
         "holdout_label_counts": holdout_label_counts,
         "overall_label_counts": overall_label_counts,
+        "calibration": calibration_info,
+        "policy_optimization": {
+            "probability_source": "calibrated" if isinstance(bundle.get("probability_calibrator"), dict) and bool(bundle["probability_calibrator"].get("enabled")) else "raw",
+            "calibration_target_weight": float(args.policy_calibration_target_weight),
+            "calibration_avoid_weight": float(args.policy_calibration_avoid_weight),
+            "calibration_overconfidence_penalty_weight": float(args.policy_calibration_overconfidence_penalty_weight),
+            "strategy_policy_enable": bool(args.strategy_policy_enable),
+            "strategy_policy_min_holdout_rows": int(args.strategy_policy_min_holdout_rows),
+        },
+        "strategy_row_counts": strategy_row_counts,
+        "strategy_specific_policies": strategy_specific_policies,
     }
 
-    _print_step(5, 5, "Write artifacts")
+    _print_step(6, 6, "Write artifacts")
     artifact_path = output_dir / f"{ARTIFACT_PREFIX}_model.joblib"
     metrics_path = output_dir / f"{ARTIFACT_PREFIX}_metrics.json"
     predictions_path = output_dir / f"{ARTIFACT_PREFIX}_holdout_predictions.jsonl"
@@ -1383,10 +2517,17 @@ def main():
         "overall_label_counts": overall_label_counts,
         "train_label_counts": train_label_counts,
         "holdout_label_counts": holdout_label_counts,
+        "row_count_model_train": int(len(model_train_df)),
+        "row_count_calibration": int(len(calibration_df)),
+        "raw_argmax_metrics": raw_argmax_metrics,
         "argmax_metrics": argmax_metrics,
         "premium_policy_metrics": premium_policy_metrics,
         "standard_policy_metrics": standard_policy_metrics,
         "watch_policy_metrics": watch_policy_metrics,
+        "calibration": calibration_info,
+        "policy_optimization": bundle["metadata"].get("policy_optimization"),
+        "strategy_row_counts": strategy_row_counts,
+        "strategy_specific_policies": strategy_specific_policies,
         "recommended_policy": premium_policy,
         "recommended_premium_policy": premium_policy,
         "recommended_standard_policy": standard_policy,

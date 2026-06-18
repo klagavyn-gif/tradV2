@@ -3,6 +3,10 @@ param(
     [string]$Step = "4h",
     [string]$Groups = "primary,daily",
     [string]$OutputDir = ".data\research\phase1",
+    [int]$MaxHoldBars = 64,
+    [double]$EntryFillTolerancePct = 0.15,
+    [int]$Workers = 0,
+    [int]$ProgressEvery = 25,
     [switch]$NoRefreshCache,
     [switch]$NoAllowPartialCoverage
 )
@@ -34,6 +38,10 @@ $arguments = @(
     "--step", $Step
     "--groups", $Groups
     "--output-dir", $OutputDir
+    "--max-hold-bars", $MaxHoldBars
+    "--entry-fill-tolerance-pct", $EntryFillTolerancePct
+    "--workers", $Workers
+    "--progress-every", $ProgressEvery
 )
 
 if ($refreshCache) {
@@ -49,16 +57,18 @@ Write-Host "Days: $Days"
 Write-Host "Step: $Step"
 Write-Host "Groups: $Groups"
 Write-Host "Output: $OutputDirAbs"
+Write-Host "Max hold bars: $MaxHoldBars"
+Write-Host "Entry fill tolerance pct: $EntryFillTolerancePct"
+Write-Host "Workers: $Workers"
+Write-Host "Progress every: $ProgressEvery"
 Write-Host "Refresh market cache: $refreshCache"
 Write-Host "Allow partial coverage: $allowPartialCoverage"
 Write-Host "Log: $logPath"
 Write-Host ""
 
-$output = & python @arguments 2>&1
+# Stream Python output live to both the console and the log file for long Phase 1 runs.
+& python @arguments 2>&1 | Tee-Object -FilePath $logPath
 $exitCode = $LASTEXITCODE
-
-$outputText = ($output | Out-String)
-$outputText | Tee-Object -FilePath $logPath
 
 if ($exitCode -ne 0) {
     Write-Host ""

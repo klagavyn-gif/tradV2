@@ -3,6 +3,10 @@ param(
     [string]$Step = "4h",
     [string]$Groups = "primary,daily",
     [string]$OutputDir = ".data\research\phase1",
+    [int]$MaxHoldBars = 64,
+    [double]$EntryFillTolerancePct = 0.15,
+    [int]$Workers = 0,
+    [int]$ProgressEvery = 25,
     [switch]$NoRefreshCache,
     [switch]$NoAllowPartialCoverage
 )
@@ -26,7 +30,11 @@ $arguments = @(
     "-Days", $Days,
     "-Step", $Step,
     "-Groups", $Groups,
-    "-OutputDir", $OutputDir
+    "-OutputDir", $OutputDir,
+    "-MaxHoldBars", $MaxHoldBars,
+    "-EntryFillTolerancePct", $EntryFillTolerancePct,
+    "-Workers", $Workers,
+    "-ProgressEvery", $ProgressEvery
 )
 
 if ($NoRefreshCache.IsPresent) {

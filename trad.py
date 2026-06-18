@@ -3440,6 +3440,211 @@ def _entry_ai_metadata_policy_threshold(metadata, policy_name, threshold_name, f
     return fallback
 
 
+def _entry_ai_strategy_policy_bundle(metadata, strategy):
+    if not isinstance(metadata, dict):
+        return None
+    strategy_key = _safe_upper_text(strategy, "")
+    if not strategy_key:
+        return None
+    strategy_policies = metadata.get("strategy_specific_policies")
+    if not isinstance(strategy_policies, dict):
+        return None
+    strategy_policy_root = strategy_policies.get(strategy_key)
+    if not isinstance(strategy_policy_root, dict):
+        return None
+    return strategy_policy_root
+
+
+def _entry_ai_strategy_promotion_allowlist():
+    raw = str(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_STRATEGY_PROMOTION_ALLOWLIST", "") or "").strip()
+    if not raw:
+        return {}
+    out = {}
+    for chunk in raw.split(";"):
+        text = str(chunk or "").strip()
+        if not text or ":" not in text:
+            continue
+        strategy_name, tiers_raw = text.split(":", 1)
+        strategy_key = _safe_upper_text(strategy_name, "")
+        if not strategy_key:
+            continue
+        allowed = set()
+        for part in str(tiers_raw or "").replace("|", ",").split(","):
+            tier = str(part or "").strip().lower()
+            if tier in {"premium", "standard", "watch", "avoid"}:
+                allowed.add(tier)
+        if allowed:
+            out[strategy_key] = allowed
+    return out
+
+
+def _entry_ai_strategy_policy_live_allowed(strategy, policy_tier):
+    strategy_key = _safe_upper_text(strategy, "")
+    tier_key = str(policy_tier or "").strip().lower()
+    if not strategy_key or not tier_key:
+        return True
+    allowlist = _entry_ai_strategy_promotion_allowlist()
+    if not allowlist:
+        return True
+    allowed_tiers = allowlist.get(strategy_key)
+    if allowed_tiers is None:
+        return False
+    return tier_key in allowed_tiers
+
+
+def _entry_ai_decision_from_prob_map(
+    prob_map,
+    metadata,
+    *,
+    strategy=None,
+    model_type=None,
+    is_v4_native=None,
+    prefer_strategy_specific=True,
+    entry_threshold_override=None,
+    avoid_threshold_override=None,
+):
+    if not isinstance(prob_map, dict):
+        return None
+    if not isinstance(metadata, dict):
+        metadata = {}
+    strategy = _safe_upper_text(strategy, "")
+    if is_v4_native is None:
+        is_v4_native = _is_v4_entry_ai_bundle({"metadata": metadata, "model_type": model_type or ""}, metadata)
+
+    ranked_labels = [(label, prob_map.get(label)) for label in ("entry", "watch", "avoid") if isinstance(prob_map.get(label), float)]
+    if not ranked_labels:
+        return None
+
+    def _resolve_policy_decision(strategy_lookup):
+        entry_threshold = _safe_float(entry_threshold_override, None)
+        if entry_threshold is None:
+            entry_threshold = _safe_float(metadata.get("entry_threshold"), 0.45)
+        avoid_threshold = _safe_float(avoid_threshold_override, None)
+        if avoid_threshold is None:
+            avoid_threshold = _safe_float(metadata.get("avoid_threshold"), 0.55)
+
+        standard_entry_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "standard",
+            "entry_threshold",
+            entry_threshold,
+            strategy=strategy_lookup,
+        )
+        standard_avoid_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "standard",
+            "avoid_threshold",
+            avoid_threshold,
+            strategy=strategy_lookup,
+        )
+        premium_entry_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "premium",
+            "entry_threshold",
+            _safe_float(metadata.get("recommended_entry_threshold"), standard_entry_threshold),
+            strategy=strategy_lookup,
+        )
+        premium_avoid_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "premium",
+            "avoid_threshold",
+            _safe_float(metadata.get("recommended_avoid_threshold"), standard_avoid_threshold),
+            strategy=strategy_lookup,
+        )
+        watch_entry_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "watch",
+            "entry_threshold",
+            standard_entry_threshold,
+            strategy=strategy_lookup,
+        )
+        watch_avoid_threshold = _entry_ai_metadata_policy_threshold(
+            metadata,
+            "watch",
+            "avoid_threshold",
+            standard_avoid_threshold,
+            strategy=strategy_lookup,
+        )
+        strategy_policy_bundle = _entry_ai_strategy_policy_bundle(metadata, strategy_lookup)
+
+        predicted_bucket = max(ranked_labels, key=lambda item: item[1])[0]
+        if isinstance(prob_map.get("avoid"), float) and isinstance(avoid_threshold, float) and prob_map["avoid"] >= float(avoid_threshold):
+            predicted_bucket = "avoid"
+        elif isinstance(prob_map.get("entry"), float) and isinstance(entry_threshold, float) and prob_map["entry"] >= float(entry_threshold):
+            predicted_bucket = "entry"
+        else:
+            predicted_bucket = "watch"
+
+        premium_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=premium_entry_threshold,
+            avoid_threshold=premium_avoid_threshold,
+        )
+        standard_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=standard_entry_threshold,
+            avoid_threshold=standard_avoid_threshold,
+        )
+        watch_label = _entry_ai_policy_threshold_label(
+            prob_map,
+            entry_threshold=watch_entry_threshold,
+            avoid_threshold=watch_avoid_threshold,
+        )
+        policy_mode = "premium_standard_v4" if is_v4_native else "premium_standard"
+        if (
+            not is_v4_native
+            and not str(model_type or "").strip().lower().startswith("phase3_entry_quality_v3")
+            and math.isclose(float(premium_entry_threshold), float(standard_entry_threshold), rel_tol=1e-9, abs_tol=1e-9)
+            and math.isclose(float(premium_avoid_threshold), float(standard_avoid_threshold), rel_tol=1e-9, abs_tol=1e-9)
+        ):
+            policy_mode = "single"
+
+        if premium_label == "entry":
+            policy_tier = "premium"
+            predicted_bucket = "entry"
+        elif standard_label == "entry":
+            policy_tier = "standard"
+            predicted_bucket = "entry"
+        elif watch_label == "avoid" or standard_label == "avoid" or premium_label == "avoid":
+            policy_tier = "avoid"
+            predicted_bucket = "avoid"
+        elif is_v4_native and watch_label in {"entry", "watch"}:
+            policy_tier = "watch"
+            predicted_bucket = "watch"
+        else:
+            policy_tier = "watch"
+            predicted_bucket = "watch"
+
+        return {
+            "entry_ai_bucket": predicted_bucket,
+            "entry_ai_label": predicted_bucket,
+            "entry_ai_policy_mode": policy_mode,
+            "entry_ai_policy_tier": policy_tier,
+            "entry_ai_premium_label": premium_label,
+            "entry_ai_standard_label": standard_label,
+            "entry_ai_watch_label": watch_label,
+            "entry_ai_premium_entry_threshold": float(premium_entry_threshold),
+            "entry_ai_premium_avoid_threshold": float(premium_avoid_threshold),
+            "entry_ai_standard_entry_threshold": float(standard_entry_threshold),
+            "entry_ai_standard_avoid_threshold": float(standard_avoid_threshold),
+            "entry_ai_watch_entry_threshold": float(watch_entry_threshold),
+            "entry_ai_watch_avoid_threshold": float(watch_avoid_threshold),
+            "entry_ai_strategy_policy": strategy if isinstance(strategy_policy_bundle, dict) and strategy_lookup else None,
+            "entry_ai_strategy_policy_applied": bool(isinstance(strategy_policy_bundle, dict) and strategy_lookup),
+        }
+
+    global_decision = _resolve_policy_decision(None)
+    if not prefer_strategy_specific or not strategy:
+        return global_decision
+
+    strategy_decision = _resolve_policy_decision(strategy)
+    if not bool(strategy_decision.get("entry_ai_strategy_policy_applied")):
+        return global_decision
+    if _entry_ai_strategy_policy_live_allowed(strategy, strategy_decision.get("entry_ai_policy_tier")):
+        return strategy_decision
+    return global_decision
+
+
 def _is_v4_entry_ai_bundle(bundle, metadata=None):
     if not isinstance(bundle, dict):
         return False
@@ -3461,6 +3666,67 @@ def _is_v4_entry_ai_bundle(bundle, metadata=None):
 def _live_entry_ai_bundle_predict_proba(bundle, frame):
     if not isinstance(bundle, dict):
         return None, []
+    def _clip_probability(value, eps=1e-6):
+        numeric = _safe_float(value, None)
+        if numeric is None:
+            return None
+        return float(min(max(float(numeric), float(eps)), 1.0 - float(eps)))
+
+    def _normalize_probability_row(scores, fallback_scores=None):
+        cleaned = []
+        for score in scores or []:
+            numeric = _safe_float(score, 0.0)
+            cleaned.append(max(float(numeric), 0.0))
+        total = float(sum(cleaned))
+        if total <= 0:
+            fallback = []
+            for score in fallback_scores or []:
+                numeric = _safe_float(score, 0.0)
+                fallback.append(max(float(numeric), 0.0))
+            fallback_total = float(sum(fallback))
+            if fallback_total > 0:
+                return [float(value) / float(fallback_total) for value in fallback]
+            if not cleaned:
+                return []
+            uniform = 1.0 / float(len(cleaned))
+            return [uniform for _ in cleaned]
+        return [float(value) / float(total) for value in cleaned]
+
+    def _apply_binary_probability_calibrator(model_info, raw_probability):
+        raw_prob = _clip_probability(raw_probability, eps=1e-6)
+        if raw_prob is None:
+            return None
+        if not isinstance(model_info, dict):
+            return raw_prob
+        calibrator_type = str(model_info.get("type") or "identity").strip().lower()
+        if calibrator_type == "platt" and model_info.get("model") is not None:
+            model = model_info["model"]
+            predicted_value = model.predict_proba(pd.DataFrame({"raw_prob": [raw_prob]}))[0][1]
+            return _clip_probability(predicted_value, eps=1e-6)
+        if calibrator_type == "isotonic" and model_info.get("model") is not None:
+            model = model_info["model"]
+            predicted_value = model.predict([raw_prob])[0]
+            return _clip_probability(predicted_value, eps=1e-6)
+        return raw_prob
+
+    def _apply_probability_calibrator(predicted_matrix, class_labels):
+        calibrator = bundle.get("probability_calibrator")
+        if not isinstance(calibrator, dict) or not bool(calibrator.get("enabled")):
+            return predicted_matrix
+        models = calibrator.get("models") or {}
+        calibrated_rows = []
+        if predicted_matrix is None:
+            predicted_rows = []
+        else:
+            predicted_rows = predicted_matrix
+        for row in predicted_rows:
+            row_scores = []
+            for idx, label in enumerate(class_labels or []):
+                raw_value = row[idx] if idx < len(row) else None
+                row_scores.append(_apply_binary_probability_calibrator(models.get(str(label)), raw_value))
+            calibrated_rows.append(_normalize_probability_row(row_scores, fallback_scores=row))
+        return calibrated_rows
+
     feature_columns = list(bundle.get("feature_columns") or [])
     backend = str(bundle.get("backend") or "").strip().lower()
     raw_classes = list(bundle.get("classes") or [])
@@ -3469,14 +3735,16 @@ def _live_entry_ai_bundle_predict_proba(bundle, frame):
         predicted = classifier.predict_proba(frame)
         if not raw_classes:
             raw_classes = list(getattr(classifier, "classes_", None) or [])
-        return predicted, [str(value) for value in raw_classes]
+        classes = [str(value) for value in raw_classes]
+        return _apply_probability_calibrator(predicted, classes), classes
 
     estimator = bundle.get("estimator")
     if estimator is not None:
         predicted = estimator.predict_proba(frame[feature_columns] if feature_columns else frame)
         if not raw_classes:
             raw_classes = list(getattr(estimator, "classes_", None) or [])
-        return predicted, [str(value) for value in raw_classes]
+        classes = [str(value) for value in raw_classes]
+        return _apply_probability_calibrator(predicted, classes), classes
 
     model = bundle.get("model")
     preprocessor = bundle.get("preprocessor")
@@ -3489,7 +3757,8 @@ def _live_entry_ai_bundle_predict_proba(bundle, frame):
         predicted = model.predict_proba(frame[feature_columns] if feature_columns else frame)
     if not raw_classes:
         raw_classes = list(getattr(model, "classes_", None) or [])
-    return predicted, [str(value) for value in raw_classes]
+    classes = [str(value) for value in raw_classes]
+    return _apply_probability_calibrator(predicted, classes), classes
 
 
 def _load_live_ai_model_bundle():
@@ -3829,6 +4098,7 @@ def _score_candidate_with_live_entry_ai(candidate):
         feature_columns = list(bundle.get("feature_columns") or [])
         if not feature_columns:
             return candidate
+        strategy = _safe_upper_text(candidate.get("strategy"), "")
         row = _candidate_ai_features(candidate)
         frame = pd.DataFrame([{column: row.get(column) for column in feature_columns}])
         predicted, classes = _live_entry_ai_bundle_predict_proba(bundle, frame)
@@ -3850,103 +4120,36 @@ def _score_candidate_with_live_entry_ai(candidate):
         label_schema_version = str(metadata.get("label_schema_version") or "").strip() or None
         policy_schema_version = str(metadata.get("policy_schema_version") or "").strip() or None
         is_v4_native = _is_v4_entry_ai_bundle(bundle, metadata)
-        entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", None), None)
-        if entry_threshold is None:
-            entry_threshold = _safe_float(metadata.get("entry_threshold"), 0.45)
-        avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", None), None)
-        if avoid_threshold is None:
-            avoid_threshold = _safe_float(metadata.get("avoid_threshold"), 0.55)
-        standard_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "standard", "entry_threshold", None)
-        if standard_entry_threshold is None:
-            standard_entry_threshold = entry_threshold
-        standard_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "standard", "avoid_threshold", None)
-        if standard_avoid_threshold is None:
-            standard_avoid_threshold = avoid_threshold
-        premium_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "premium", "entry_threshold", None)
-        if premium_entry_threshold is None:
-            premium_entry_threshold = _safe_float(metadata.get("recommended_entry_threshold"), None)
-        if premium_entry_threshold is None:
-            premium_entry_threshold = standard_entry_threshold
-        premium_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "premium", "avoid_threshold", None)
-        if premium_avoid_threshold is None:
-            premium_avoid_threshold = _safe_float(metadata.get("recommended_avoid_threshold"), None)
-        if premium_avoid_threshold is None:
-            premium_avoid_threshold = standard_avoid_threshold
-        watch_entry_threshold = _entry_ai_metadata_policy_threshold(metadata, "watch", "entry_threshold", None)
-        if watch_entry_threshold is None:
-            watch_entry_threshold = standard_entry_threshold
-        watch_avoid_threshold = _entry_ai_metadata_policy_threshold(metadata, "watch", "avoid_threshold", None)
-        if watch_avoid_threshold is None:
-            watch_avoid_threshold = standard_avoid_threshold
-
-        ranked_labels = [(label, prob_map.get(label)) for label in ("entry", "watch", "avoid") if isinstance(prob_map.get(label), float)]
-        if not ranked_labels:
+        decision = _entry_ai_decision_from_prob_map(
+            prob_map,
+            metadata,
+            strategy=strategy,
+            model_type=model_type,
+            is_v4_native=is_v4_native,
+            prefer_strategy_specific=True,
+            entry_threshold_override=_safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", None), None),
+            avoid_threshold_override=_safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", None), None),
+        )
+        if not isinstance(decision, dict):
             return candidate
-        predicted_bucket = max(ranked_labels, key=lambda item: item[1])[0]
-        if isinstance(prob_map.get("avoid"), float) and prob_map["avoid"] >= float(avoid_threshold):
-            predicted_bucket = "avoid"
-        elif isinstance(prob_map.get("entry"), float) and prob_map["entry"] >= float(entry_threshold):
-            predicted_bucket = "entry"
-        else:
-            predicted_bucket = "watch"
 
-        premium_label = _entry_ai_policy_threshold_label(
-            prob_map,
-            entry_threshold=premium_entry_threshold,
-            avoid_threshold=premium_avoid_threshold,
-        )
-        standard_label = _entry_ai_policy_threshold_label(
-            prob_map,
-            entry_threshold=standard_entry_threshold,
-            avoid_threshold=standard_avoid_threshold,
-        )
-        watch_label = _entry_ai_policy_threshold_label(
-            prob_map,
-            entry_threshold=watch_entry_threshold,
-            avoid_threshold=watch_avoid_threshold,
-        )
-        policy_mode = "premium_standard_v4" if is_v4_native else "premium_standard"
-        if (
-            not is_v4_native
-            and not str(model_type or "").strip().lower().startswith("phase3_entry_quality_v3")
-            and math.isclose(float(premium_entry_threshold), float(standard_entry_threshold), rel_tol=1e-9, abs_tol=1e-9)
-            and math.isclose(float(premium_avoid_threshold), float(standard_avoid_threshold), rel_tol=1e-9, abs_tol=1e-9)
-        ):
-            policy_mode = "single"
-
-        policy_tier = None
-        if premium_label == "entry":
-            policy_tier = "premium"
-            predicted_bucket = "entry"
-        elif standard_label == "entry":
-            policy_tier = "standard"
-            predicted_bucket = "entry"
-        elif watch_label == "avoid" or standard_label == "avoid" or premium_label == "avoid":
-            policy_tier = "avoid"
-            predicted_bucket = "avoid"
-        elif is_v4_native and watch_label in {"entry", "watch"}:
-            policy_tier = "watch"
-            predicted_bucket = "watch"
-        else:
-            policy_tier = "watch"
-            predicted_bucket = "watch"
-
-        candidate["entry_ai_bucket"] = predicted_bucket
-        candidate["entry_ai_label"] = predicted_bucket
+        candidate["entry_ai_bucket"] = decision.get("entry_ai_bucket")
+        candidate["entry_ai_label"] = decision.get("entry_ai_label")
         candidate["entry_ai_prob_entry"] = float(prob_map["entry"]) if isinstance(prob_map.get("entry"), float) else None
         candidate["entry_ai_prob_watch"] = float(prob_map["watch"]) if isinstance(prob_map.get("watch"), float) else None
         candidate["entry_ai_prob_avoid"] = float(prob_map["avoid"]) if isinstance(prob_map.get("avoid"), float) else None
-        candidate["entry_ai_policy_mode"] = policy_mode
-        candidate["entry_ai_policy_tier"] = policy_tier
-        candidate["entry_ai_premium_label"] = premium_label
-        candidate["entry_ai_standard_label"] = standard_label
-        candidate["entry_ai_watch_label"] = watch_label
-        candidate["entry_ai_premium_entry_threshold"] = float(premium_entry_threshold)
-        candidate["entry_ai_premium_avoid_threshold"] = float(premium_avoid_threshold)
-        candidate["entry_ai_standard_entry_threshold"] = float(standard_entry_threshold)
-        candidate["entry_ai_standard_avoid_threshold"] = float(standard_avoid_threshold)
-        candidate["entry_ai_watch_entry_threshold"] = float(watch_entry_threshold)
-        candidate["entry_ai_watch_avoid_threshold"] = float(watch_avoid_threshold)
+        candidate["entry_ai_policy_mode"] = decision.get("entry_ai_policy_mode")
+        candidate["entry_ai_policy_tier"] = decision.get("entry_ai_policy_tier")
+        candidate["entry_ai_premium_label"] = decision.get("entry_ai_premium_label")
+        candidate["entry_ai_standard_label"] = decision.get("entry_ai_standard_label")
+        candidate["entry_ai_watch_label"] = decision.get("entry_ai_watch_label")
+        candidate["entry_ai_premium_entry_threshold"] = decision.get("entry_ai_premium_entry_threshold")
+        candidate["entry_ai_premium_avoid_threshold"] = decision.get("entry_ai_premium_avoid_threshold")
+        candidate["entry_ai_standard_entry_threshold"] = decision.get("entry_ai_standard_entry_threshold")
+        candidate["entry_ai_standard_avoid_threshold"] = decision.get("entry_ai_standard_avoid_threshold")
+        candidate["entry_ai_watch_entry_threshold"] = decision.get("entry_ai_watch_entry_threshold")
+        candidate["entry_ai_watch_avoid_threshold"] = decision.get("entry_ai_watch_avoid_threshold")
+        candidate["entry_ai_strategy_policy"] = decision.get("entry_ai_strategy_policy")
         candidate["entry_ai_model_type"] = model_type
         candidate["entry_ai_model_version"] = model_version
         candidate["entry_ai_feature_schema_version"] = feature_schema_version
@@ -4768,101 +4971,16 @@ def _build_trend_radar_candidates(results, runtime_context=None):
 
 
 def _build_daily_summary_message(results, existing_candidates=None, min_conf=None):
-    enabled = bool(getattr(config, "TELEGRAM_DAILY_SUMMARY_ENABLED", True))
-    if not enabled:
-        return None
-    top_n = getattr(config, "TELEGRAM_DAILY_SUMMARY_TOP_N", 3)
-    try:
-        top_n = max(1, int(top_n))
-    except Exception:
-        top_n = 3
-    if not isinstance(min_conf, (int, float)):
-        min_conf = getattr(config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
-    try:
-        min_conf = float(min_conf)
-    except Exception:
-        min_conf = 58.0
-    ranked = []
-    if isinstance(existing_candidates, list):
-        ranked.extend([row for row in existing_candidates if isinstance(row, dict)])
-    if not ranked:
-        ranked, _ = _build_telegram_candidates(results or [], min_conf)
-    ranked = [row for row in ranked if isinstance(row, dict)]
-    ranked.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
-    unique_ranked = []
-    seen_symbols = set()
-    for row in ranked:
-        symbol = normalize_symbol(row.get("symbol") or "")
-        if not symbol or symbol in seen_symbols:
-            continue
-        seen_symbols.add(symbol)
-        unique_ranked.append(row)
-        if len(unique_ranked) >= top_n:
-            break
-    now_text = get_thai_now().strftime("%Y-%m-%d %H:%M")
-    lines = [
-        "<b>🗓️ Daily Telegram Summary</b>",
-        f"⏱️ <b>เวลา:</b> {now_text}",
-    ]
-    if unique_ranked:
-        wr_values = []
-        exp_values = []
-        trades_values = []
-        lines.append("📌 <b>Top backtest-qualified setups วันนี้:</b>")
-        for idx, row in enumerate(unique_ranked, start=1):
-            metrics = _candidate_edge_metrics(row)
-            wr = metrics.get("win_rate_pct")
-            exp = metrics.get("expectancy_rr")
-            trades = metrics.get("trades")
-            if isinstance(wr, (int, float)):
-                wr_values.append(float(wr))
-            if isinstance(exp, (int, float)):
-                exp_values.append(float(exp))
-            if isinstance(trades, (int, float)):
-                trades_values.append(float(trades))
-            lines.append(
-                f"{idx}. <b>{_html_escape(str(row.get('strategy') or 'ALERT'))}</b> | "
-                f"{_html_escape(str(row.get('signal') or 'WAIT'))} | "
-                f"{_html_escape(normalize_symbol(row.get('symbol') or '') or '-')}"
-            )
-            lines.append(
-                "   "
-                + f"Conf {float(row.get('confidence', 0.0)):.0f}%"
-                + f" | WR {float(wr):.1f}%"
-                + f" | ExpRR {float(exp):.2f}"
-                + f" | Trades {int(round(float(trades)))}"
-            )
-        lines.append("✅ ส่งเฉพาะสัญญาณที่มี backtest metrics ครบตามเกณฑ์")
-        return {
-            "strategy": "DAILY_SUMMARY",
-            "signal": "INFO",
-            "score": float(sum(wr_values) / len(wr_values)) if wr_values else 0.0,
-            "confidence": float(sum(wr_values) / len(wr_values)) if wr_values else 0.0,
-            "edge_metrics": {
-                "win_rate_pct": float(sum(wr_values) / len(wr_values)) if wr_values else None,
-                "expectancy_rr": float(sum(exp_values) / len(exp_values)) if exp_values else None,
-                "trades": float(sum(trades_values) / len(trades_values)) if trades_values else None,
-            },
-            "message": "\n".join(lines),
-            "cache_key": f"DAILYSUMMARY|{get_thai_now().strftime('%Y%m%d')}",
-        }
-    lines.append("🛑 <b>วันนี้ยังไม่มี setup ที่ผ่าน backtest gate สำหรับส่งเข้าเทรด</b>")
-    lines.append("✅ ระบบงดส่ง directional alert เพื่อคุมคุณภาพและรักษาอัตราชนะ")
-    lines.append(
-        "📏 เกณฑ์ขั้นต่ำ: "
-        + f"WR >= {float(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_HIST_WIN_RATE', 58.0)):.1f}%"
-        + f" | ExpRR >= {float(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_EXPECTANCY_RR', 0.05)):.2f}"
-        + f" | Trades >= {int(getattr(config, 'TELEGRAM_ALERT_ENTRY_MIN_HIST_TRADES', 8))}"
+    return _alerts_reporting_build_telegram_daily_summary_message(
+        results,
+        existing_candidates=existing_candidates,
+        min_conf=min_conf,
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+        history_lock=_ALERT_HISTORY_LOCK,
     )
-    return {
-        "strategy": "DAILY_SUMMARY",
-        "signal": "INFO",
-        "score": 0.0,
-        "confidence": 0.0,
-        "edge_metrics": {},
-        "message": "\n".join(lines),
-        "cache_key": f"DAILYSUMMARY|{get_thai_now().strftime('%Y%m%d')}",
-    }
 
 
 def _notify_telegram_from_results(results, runtime_context=None):
@@ -5099,6 +5217,38 @@ def _alert_realized_summary_file_path():
     return os.path.join(_alert_history_dir(), "realized_summary.json")
 
 
+def _alert_feedback_export_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_export.csv")
+
+
+def _alert_feedback_summary_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_summary.json")
+
+
+def _live_feedback_training_dataset_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_training_dataset.csv")
+
+
+def _live_feedback_training_summary_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_training_summary.json")
+
+
+def _live_feedback_calibration_dataset_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_calibration_dataset.csv")
+
+
+def _live_feedback_calibration_summary_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_calibration_summary.json")
+
+
+def _live_feedback_shadow_eval_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_shadow_eval.csv")
+
+
+def _live_feedback_shadow_summary_file_path():
+    return os.path.join(_alert_history_dir(), "live_feedback_shadow_summary.json")
+
+
 def _alert_auto_tune_enabled():
     return bool(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_ENABLE", True))
 
@@ -5312,6 +5462,28 @@ def _build_telegram_alert_realized_report(days=30, strategies=None, symbols=None
     )
 
 
+def _build_telegram_alert_feedback_export(days=90, strategies=None, symbols=None, include_open=False):
+    return _alerts_reporting_build_telegram_alert_feedback_export(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        include_open=include_open,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+    )
+
+
+def _build_live_feedback_training_dataset(days=90, strategies=None, symbols=None, include_open=False):
+    return _alerts_reporting_build_live_feedback_training_dataset(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        include_open=include_open,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+    )
+
+
 def _build_telegram_alert_live_preview(results, limit_examples_per_strategy=1, runtime_context=None):
     return _alerts_reporting_build_telegram_alert_live_preview(
         results,
@@ -5338,6 +5510,10 @@ def _reporting_module_helpers():
         "alert_realized_export_outcomes": _alert_realized_export_outcomes,
         "alert_outcomes_file_path": _alert_outcomes_file_path,
         "alert_realized_summary_file_path": _alert_realized_summary_file_path,
+        "alert_feedback_summary_file_path": _alert_feedback_summary_file_path,
+        "live_feedback_training_summary_file_path": _live_feedback_training_summary_file_path,
+        "live_feedback_calibration_summary_file_path": _live_feedback_calibration_summary_file_path,
+        "live_feedback_shadow_summary_file_path": _live_feedback_shadow_summary_file_path,
         "normalize_symbol": normalize_symbol,
         "pick_plan_value": _pick_plan_value,
         "candidate_backtest_snapshot": _candidate_backtest_snapshot,
@@ -5360,7 +5536,18 @@ def _reporting_module_helpers():
         "build_regime_alert_budget": _build_regime_alert_budget,
         "build_telegram_candidates": _build_telegram_candidates,
         "build_daily_best_pick_candidates": _build_daily_best_pick_candidates,
+        "entry_ai_model_path": lambda: getattr(config, "TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH", ""),
+        "entry_ai_live_enabled": lambda: bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE", True)),
+        "entry_ai_allowlist_text": lambda: str(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_STRATEGY_PROMOTION_ALLOWLIST", "") or "").strip(),
     }
+
+
+def _alert_feedback_export_fieldnames():
+    return _alerts_reporting_alert_feedback_export_fieldnames()
+
+
+def _live_feedback_training_fieldnames():
+    return _alerts_reporting_live_feedback_training_fieldnames()
 
 
 def _write_verify_output(output_path, payload):

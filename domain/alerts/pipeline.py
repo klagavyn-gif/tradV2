@@ -10,15 +10,91 @@ from domain.alerts.dispatch.delivery import (
 from domain.alerts.dispatch.throttling import coerce_float, coerce_int, resolve_dispatch_settings
 
 
-def _primary_candidate_sort_key(candidate):
+def _candidate_bars_since_signal(candidate):
     if not isinstance(candidate, dict):
-        return (0.0, 0.0, 0.0, 0.0, 0.0)
+        return None
+    for key in (
+        "short_trade_bars_since_signal",
+        "bars_since_signal",
+    ):
+        value = candidate.get(key)
+        try:
+            if value is not None:
+                return float(value)
+        except Exception:
+            continue
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    for key in ("bars_since_signal", "bars_since_entry", "bars_since_cross"):
+        value = plan.get(key)
+        try:
+            if value is not None:
+                return float(value)
+        except Exception:
+            continue
+    return None
+
+
+def _candidate_trigger(candidate):
+    if not isinstance(candidate, dict):
+        return ""
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    return str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+
+
+def _is_sell_continuation_candidate(candidate):
+    if not isinstance(candidate, dict):
+        return False
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    signal = str(candidate.get("signal") or "").strip().upper()
+    if strategy != "CDCVIX15" or signal != "SELL":
+        return False
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+    if mode in {"entry", "watch"}:
+        return True
+    return _candidate_trigger(candidate) == "TIME_STOP"
+
+
+def _is_stale_exit_candidate(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return False
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    if intent != "exit":
+        return False
+    if _candidate_trigger(candidate) != "TIME_STOP":
+        return False
+    bars_since = _candidate_bars_since_signal(candidate)
+    max_bars = coerce_int(getattr(config, "TELEGRAM_ALERT_PRIMARY_STALE_EXIT_MAX_BARS", 8), 8)
+    return isinstance(bars_since, float) and bars_since > float(max_bars)
+
+
+def _suppress_stale_primary_candidates(candidates, *, config, quality_drop_counts=None):
+    if not bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_STALE_EXIT_SUPPRESS", True)):
+        return list(candidates or [])
+    filtered = []
+    stale_exit_filtered = 0
+    for row in candidates or []:
+        if _is_stale_exit_candidate(row, config=config):
+            stale_exit_filtered += 1
+            continue
+        filtered.append(row)
+    if isinstance(quality_drop_counts, dict) and stale_exit_filtered > 0:
+        key = "primary_stale_exit_suppressed"
+        quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + int(stale_exit_filtered)
+    return filtered
+
+
+def _primary_candidate_sort_key(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     intent = str(candidate.get("alert_intent") or "").strip().lower()
     intent_priority = 0.0
     if intent == "entry":
-        intent_priority = 2.0
+        intent_priority = 3.0
     elif intent == "watch":
-        intent_priority = 1.0
+        intent_priority = 1.5
+    elif intent == "exit":
+        intent_priority = -1.0
     short_trade_bucket = str(candidate.get("short_trade_bucket") or "").strip().lower()
     short_trade_priority = 1.0
     if short_trade_bucket == "premium_entry":
@@ -33,6 +109,24 @@ def _primary_candidate_sort_key(candidate):
         ai_priority = 2.0
     elif ai_bucket == "low_conviction":
         ai_priority = 0.0
+    freshness_priority = 0.0
+    bars_since = _candidate_bars_since_signal(candidate)
+    fresh_entry_max_bars = coerce_int(getattr(config, "TELEGRAM_ALERT_PRIMARY_FRESH_ENTRY_MAX_BARS", 1), 1)
+    fresh_entry_bonus = coerce_float(getattr(config, "TELEGRAM_ALERT_PRIMARY_FRESH_ENTRY_BONUS", 3.0), 3.0)
+    fresh_continuation_max_bars = coerce_int(getattr(config, "TELEGRAM_ALERT_PRIMARY_FRESH_CONTINUATION_MAX_BARS", 3), 3)
+    fresh_continuation_bonus = coerce_float(getattr(config, "TELEGRAM_ALERT_PRIMARY_FRESH_CONTINUATION_BONUS", 2.0), 2.0)
+    stale_penalty_start_bars = coerce_int(getattr(config, "TELEGRAM_ALERT_PRIMARY_STALE_SIGNAL_PENALTY_START_BARS", 4), 4)
+    stale_penalty_per_bar = coerce_float(getattr(config, "TELEGRAM_ALERT_PRIMARY_STALE_SIGNAL_PENALTY_PER_BAR", 0.2), 0.2)
+    if isinstance(bars_since, float):
+        if intent == "entry" and bars_since <= float(fresh_entry_max_bars):
+            freshness_priority += float(fresh_entry_bonus)
+        elif intent in {"entry", "watch"} and _is_sell_continuation_candidate(candidate) and bars_since <= float(fresh_continuation_max_bars):
+            freshness_priority += float(fresh_continuation_bonus)
+        stale_bars = max(0.0, bars_since - float(stale_penalty_start_bars))
+        if stale_bars > 0.0:
+            freshness_priority -= min(12.0, stale_bars * float(stale_penalty_per_bar))
+    if _is_stale_exit_candidate(candidate, config=config):
+        freshness_priority -= 6.0
     try:
         score = float(candidate.get("score", 0.0))
     except Exception:
@@ -57,7 +151,7 @@ def _primary_candidate_sort_key(candidate):
         confidence = float(candidate.get("confidence", 0.0))
     except Exception:
         confidence = 0.0
-    return (intent_priority, short_trade_priority, ai_priority, score, confidence)
+    return (intent_priority, freshness_priority, short_trade_priority, ai_priority, score, confidence)
 
 
 def _tier_meets_minimum(tier, minimum):
@@ -280,8 +374,13 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             )
             return 0
 
+    candidates = _suppress_stale_primary_candidates(
+        candidates,
+        config=config,
+        quality_drop_counts=quality_drop_counts,
+    )
     raw_candidates = list(candidates or [])
-    candidates.sort(key=_primary_candidate_sort_key, reverse=True)
+    candidates.sort(key=lambda row: _primary_candidate_sort_key(row, config=config), reverse=True)
     candidates = _rebalance_primary_candidates(candidates, config=config, limits=limits)
     include_exit_candidates = bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_INCLUDE_EXIT", False))
     dispatch_candidates = _filter_candidates_by_intent(

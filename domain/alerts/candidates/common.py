@@ -562,15 +562,47 @@ def _sell_continuation_entry_window_override(candidate, *, config):
     ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
     if ai_bucket == "low_conviction":
         return None
+    forecast_score = _safe_float(candidate.get("forecast_score"), None)
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    if forecast_score is None and isinstance(plan, dict):
+        forecast_score = _safe_float(plan.get("forecast_score"), None)
+    strong_min_confidence = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_STRONG_MIN_CONFIDENCE", 89.0),
+        89.0,
+    )
+    strong_min_forecast_score = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_STRONG_MIN_FORECAST_SCORE", 88.0),
+        88.0,
+    )
+    strong_distance_pct_bonus = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_STRONG_MAX_DISTANCE_PCT_BONUS", 1.2),
+        1.2,
+    )
+    strong_distance_r_bonus = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_STRONG_MAX_DISTANCE_R_BONUS", 0.35),
+        0.35,
+    )
+    max_distance_pct = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_PCT", 3.6),
+        3.6,
+    )
+    max_distance_r = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_R", 1.5),
+        1.5,
+    )
+    is_strong_continuation = (
+        ai_bucket == "confirmed"
+        and confidence is not None
+        and confidence >= float(strong_min_confidence)
+        and forecast_score is not None
+        and forecast_score >= float(strong_min_forecast_score)
+    )
+    if is_strong_continuation:
+        max_distance_pct += max(0.0, float(strong_distance_pct_bonus))
+        max_distance_r += max(0.0, float(strong_distance_r_bonus))
     return {
-        "max_distance_pct": _safe_float(
-            getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_PCT", 3.6),
-            3.6,
-        ),
-        "max_distance_r": _safe_float(
-            getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_DISTANCE_R", 1.5),
-            1.5,
-        ),
+        "max_distance_pct": float(max_distance_pct),
+        "max_distance_r": float(max_distance_r),
     }
 
 

@@ -771,6 +771,89 @@ def collect_candidate_rows(
     return rows
 
 
+def _build_metric_bucket():
+    return {
+        "candidates": 0,
+        "filled_candidates": 0,
+        "wins": 0,
+        "return_sum": 0.0,
+        "return_count": 0,
+        "label_status": Counter(),
+    }
+
+
+def _update_metric_bucket(bucket, row):
+    bucket["candidates"] += 1
+    status = str(row.get("label_status") or "unknown")
+    bucket["label_status"][status] += 1
+    if bool(row.get("label_filled")):
+        bucket["filled_candidates"] += 1
+    if row.get("label_win") is True:
+        bucket["wins"] += 1
+    value = row.get("label_return_pct")
+    if isinstance(value, (int, float)):
+        bucket["return_sum"] += float(value)
+        bucket["return_count"] += 1
+
+
+def _finalize_metric_bucket(name, bucket):
+    total = int(bucket.get("candidates") or 0)
+    filled = int(bucket.get("filled_candidates") or 0)
+    wins = int(bucket.get("wins") or 0)
+    return_count = int(bucket.get("return_count") or 0)
+    return {
+        "name": name,
+        "candidates": total,
+        "filled_candidates": filled,
+        "fill_rate_pct": (float(filled) / float(total) * 100.0) if total > 0 else 0.0,
+        "wins": wins,
+        "win_rate_pct": (float(wins) / float(filled) * 100.0) if filled > 0 else 0.0,
+        "avg_return_pct": (float(bucket["return_sum"]) / float(return_count)) if return_count > 0 else None,
+        "by_label_status": dict(bucket.get("label_status") or {}),
+    }
+
+
+def _sorted_metric_rows(mapping):
+    rows = [_finalize_metric_bucket(name, bucket) for name, bucket in mapping.items()]
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(row.get("candidates") or 0),
+            -(float(row.get("win_rate_pct")) if isinstance(row.get("win_rate_pct"), (int, float)) else 0.0),
+            str(row.get("name") or ""),
+        ),
+    )
+
+
+def _collect_breakdowns(rows):
+    by_signal = {}
+    by_symbol = {}
+    by_strategy_signal = {}
+    by_strategy_symbol = {}
+    by_strategy_signal_symbol = {}
+    for row in rows:
+        strategy = str(row.get("strategy") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        signal = _normalize_signal(row.get("signal")) or str(row.get("signal") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        symbol = str(row.get("symbol") or "UNKNOWN").strip().upper() or "UNKNOWN"
+
+        _update_metric_bucket(by_signal.setdefault(signal, _build_metric_bucket()), row)
+        _update_metric_bucket(by_symbol.setdefault(symbol, _build_metric_bucket()), row)
+        _update_metric_bucket(by_strategy_signal.setdefault(f"{strategy}|{signal}", _build_metric_bucket()), row)
+        _update_metric_bucket(by_strategy_symbol.setdefault(f"{strategy}|{symbol}", _build_metric_bucket()), row)
+        _update_metric_bucket(
+            by_strategy_signal_symbol.setdefault(f"{strategy}|{signal}|{symbol}", _build_metric_bucket()),
+            row,
+        )
+
+    return {
+        "by_signal": _sorted_metric_rows(by_signal),
+        "by_symbol": _sorted_metric_rows(by_symbol),
+        "by_strategy_signal": _sorted_metric_rows(by_strategy_signal),
+        "by_strategy_symbol": _sorted_metric_rows(by_strategy_symbol),
+        "by_strategy_signal_symbol": _sorted_metric_rows(by_strategy_signal_symbol),
+    }
+
+
 def run_checkpoint(
     *,
     root,
@@ -953,6 +1036,7 @@ def build_summary(*, rows, checkpoints, args, watchlist, groups, cache_coverage=
             return_sum += float(value)
             return_count += 1
     total_rows = len(rows)
+    breakdowns = _collect_breakdowns(rows)
     return {
         "generated_at": pd.Timestamp.now().isoformat(),
         "window_days": int(args.days),
@@ -984,6 +1068,7 @@ def build_summary(*, rows, checkpoints, args, watchlist, groups, cache_coverage=
         "by_group": dict(by_group),
         "by_strategy": dict(by_strategy),
         "by_label_status": dict(by_status),
+        "breakdowns": breakdowns,
         "checkpoint_samples": checkpoints[:10],
     }
 

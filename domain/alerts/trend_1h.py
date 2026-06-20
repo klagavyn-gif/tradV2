@@ -14,7 +14,6 @@ def _collect_trend_votes(item):
         ("ActionZone 15m", item.get("actionzone_15m")),
         ("Price Action 15m", item.get("price_action_15m")),
         ("Trend Breakout 15m", item.get("trend_breakout_15m")),
-        ("Crypto Reversal 15m", item.get("crypto_reversal_15m")),
         ("Short Term 15m", item.get("short_term_15m")),
         ("Sniper 15m", item.get("sniper_15m")),
         ("Quantum 15m", item.get("quantum_15m")),

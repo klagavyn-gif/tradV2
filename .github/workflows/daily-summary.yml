@@ -1,0 +1,217 @@
+name: Telegram Daily Summary Backup
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: Symbols separated by comma
+        required: true
+        default: "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD"
+      period:
+        description: Period (15m, 1h, 1d, 5d, 1mo, 3mo, 6mo, 1y, ytd)
+        required: true
+        default: "15m"
+      force:
+        description: Force send outside the daily summary window
+        required: false
+        default: false
+        type: boolean
+  schedule:
+    - cron: "2,7,12,17,22,27 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-alerts
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 14
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_PROGRESS_BAR: "off"
+      PYTHONUNBUFFERED: "1"
+      SYMBOLS: ${{ github.event.inputs.symbols || vars.SYMBOLS || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD' }}
+      PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
+      FORCE_DAILY_SUMMARY: ${{ github.event.inputs.force || 'false' }}
+      MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'yahoo' }}
+      MARKET_HISTORY_STORE_DIR: ${{ vars.MARKET_HISTORY_STORE_DIR || '' }}
+      BINANCE_DEFAULT_QUOTE: ${{ vars.BINANCE_DEFAULT_QUOTE || 'USDT' }}
+      BINANCE_KLINE_LIMIT: ${{ vars.BINANCE_KLINE_LIMIT || '1000' }}
+      BINANCE_REQUEST_TIMEOUT_SECONDS: ${{ vars.BINANCE_REQUEST_TIMEOUT_SECONDS || '20' }}
+      TELEGRAM_ALERT_HISTORY_ENABLED: ${{ vars.TELEGRAM_ALERT_HISTORY_ENABLED || 'true' }}
+      TELEGRAM_ALERT_HISTORY_MAX_ROWS: ${{ vars.TELEGRAM_ALERT_HISTORY_MAX_ROWS || '5000' }}
+      TELEGRAM_ALERT_HISTORY_EXPORT_CSV: ${{ vars.TELEGRAM_ALERT_HISTORY_EXPORT_CSV || 'true' }}
+      TELEGRAM_ALERT_REALIZED_ENABLED: ${{ vars.TELEGRAM_ALERT_REALIZED_ENABLED || 'true' }}
+      TELEGRAM_ALERT_REALIZED_INTERVAL: ${{ vars.TELEGRAM_ALERT_REALIZED_INTERVAL || '15m' }}
+      TELEGRAM_ALERT_REALIZED_MAX_HOLD_BARS: ${{ vars.TELEGRAM_ALERT_REALIZED_MAX_HOLD_BARS || '64' }}
+      TELEGRAM_ALERT_REALIZED_REPORT_DAYS: ${{ vars.TELEGRAM_ALERT_REALIZED_REPORT_DAYS || '45' }}
+      TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES: ${{ vars.TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES || 'true' }}
+      TELEGRAM_ALERT_RUN_REPORT_ENABLED: ${{ vars.TELEGRAM_ALERT_RUN_REPORT_ENABLED || 'true' }}
+      TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS: ${{ vars.TELEGRAM_ALERT_RUN_REPORT_MAX_ROWS || '500' }}
+      TELEGRAM_DAILY_BEST_PICK_ENABLED: ${{ vars.TELEGRAM_DAILY_BEST_PICK_ENABLED || 'true' }}
+      TELEGRAM_DAILY_BEST_PICK_HOUR: ${{ vars.TELEGRAM_DAILY_BEST_PICK_HOUR || '9' }}
+      TELEGRAM_DAILY_BEST_PICK_MINUTE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_MINUTE || '0' }}
+      TELEGRAM_DAILY_BEST_PICK_WINDOW_MINUTES: ${{ vars.TELEGRAM_DAILY_BEST_PICK_WINDOW_MINUTES || '30' }}
+      TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE || '60.0' }}
+      TELEGRAM_DAILY_BEST_PICK_MIN_SCORE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_MIN_SCORE || '74.0' }}
+      TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY: ${{ vars.TELEGRAM_DAILY_BEST_PICK_MAX_PER_DAY || '2' }}
+      TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY: ${{ vars.TELEGRAM_DAILY_BEST_PICK_REQUIRE_QUALITY || 'true' }}
+      TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC: ${{ vars.TELEGRAM_DAILY_BEST_PICK_ALLOW_CDC || 'true' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_ENABLE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_ENABLE || 'true' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_CONFIDENCE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_CONFIDENCE || '57.0' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_SCORE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_SCORE || '68.0' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE || '55.0' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES || '4' }}
+      TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR || '0.0' }}
+      TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST: ${{ vars.TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD' }}
+      TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE || 'true' }}
+      TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE || '68.0' }}
+      TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP || '3' }}
+      TELEGRAM_DAILY_BEST_PICK_CDC_REQUIRE_RECLAIM: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_REQUIRE_RECLAIM || 'true' }}
+      TELEGRAM_DAILY_SUMMARY_ENABLED: ${{ vars.TELEGRAM_DAILY_SUMMARY_ENABLED || 'true' }}
+      TELEGRAM_DAILY_SUMMARY_ALWAYS_SEND: ${{ vars.TELEGRAM_DAILY_SUMMARY_ALWAYS_SEND || 'true' }}
+      TELEGRAM_DAILY_SUMMARY_TOP_N: ${{ vars.TELEGRAM_DAILY_SUMMARY_TOP_N || '3' }}
+      TELEGRAM_DAILY_SUMMARY_HISTORY_DAYS: ${{ vars.TELEGRAM_DAILY_SUMMARY_HISTORY_DAYS || '1.0' }}
+      TELEGRAM_DAILY_SUMMARY_REALIZED_DAYS: ${{ vars.TELEGRAM_DAILY_SUMMARY_REALIZED_DAYS || '45.0' }}
+      TELEGRAM_ALERT_AI_LIVE_ENABLE: ${{ vars.TELEGRAM_ALERT_AI_LIVE_ENABLE || 'true' }}
+      TELEGRAM_ALERT_AI_MODEL_PATH: ${{ vars.TELEGRAM_ALERT_AI_MODEL_PATH || '.data/research/live/phase3_meta_model.joblib' }}
+      TELEGRAM_ALERT_AI_MODEL_URL: ${{ secrets.TELEGRAM_ALERT_AI_MODEL_URL || vars.TELEGRAM_ALERT_AI_MODEL_URL || '' }}
+      TELEGRAM_ALERT_AI_MODEL_TOKEN: ${{ secrets.TELEGRAM_ALERT_AI_MODEL_TOKEN || '' }}
+      TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION: ${{ vars.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION || 'v1' }}
+      TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE || 'true' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH || '.data/research/live/phase4_entry_quality_v4_model.joblib' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_URL: ${{ secrets.TELEGRAM_ALERT_ENTRY_AI_MODEL_URL || vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_URL || '' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN: ${{ secrets.TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN || '' }}
+      TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION: ${{ vars.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION || 'v5_3' }}
+      YF_CACHE_TTL_SECONDS: ${{ vars.YF_CACHE_TTL_SECONDS || '180' }}
+      YF_INFO_CACHE_TTL_SECONDS: ${{ vars.YF_INFO_CACHE_TTL_SECONDS || '21600' }}
+      YF_HISTORY_STORE_ENABLE: ${{ vars.YF_HISTORY_STORE_ENABLE || 'true' }}
+      YF_HISTORY_STORE_MAX_ROWS: ${{ vars.YF_HISTORY_STORE_MAX_ROWS || '50000' }}
+      YF_PREFER_CHART_API: ${{ vars.YF_PREFER_CHART_API || 'true' }}
+      YF_FETCH_MAX_RETRIES: ${{ vars.YF_FETCH_MAX_RETRIES || '3' }}
+      YF_RETRY_BACKOFF_SECONDS: ${{ vars.YF_RETRY_BACKOFF_SECONDS || '1.25' }}
+      YF_SOURCE_HEALTH_RECENT_EVENTS: ${{ vars.YF_SOURCE_HEALTH_RECENT_EVENTS || '40' }}
+      YF_DISK_FALLBACK_ENABLE: ${{ vars.YF_DISK_FALLBACK_ENABLE || 'true' }}
+      YF_DISK_FALLBACK_MAX_AGE_MINUTES: ${{ vars.YF_DISK_FALLBACK_MAX_AGE_MINUTES || '720' }}
+      YF_DISK_FALLBACK_MAX_STALE_BARS: ${{ vars.YF_DISK_FALLBACK_MAX_STALE_BARS || '8' }}
+      YF_DISK_FALLBACK_GRACE_MINUTES: ${{ vars.YF_DISK_FALLBACK_GRACE_MINUTES || '5' }}
+      YF_AUTH_DISK_FALLBACK_ENABLE: ${{ vars.YF_AUTH_DISK_FALLBACK_ENABLE || 'true' }}
+      YF_AUTH_DISK_FALLBACK_GITHUB_ONLY: ${{ vars.YF_AUTH_DISK_FALLBACK_GITHUB_ONLY || 'true' }}
+      YF_AUTH_DISK_FALLBACK_MAX_AGE_MINUTES: ${{ vars.YF_AUTH_DISK_FALLBACK_MAX_AGE_MINUTES || '1440' }}
+      YF_AUTH_DISK_FALLBACK_MAX_STALE_BARS: ${{ vars.YF_AUTH_DISK_FALLBACK_MAX_STALE_BARS || '12' }}
+      YF_AUTH_DISK_FALLBACK_GRACE_MINUTES: ${{ vars.YF_AUTH_DISK_FALLBACK_GRACE_MINUTES || '5' }}
+      VERIFY_OUTPUT_PATH: ${{ vars.DAILY_SUMMARY_VERIFY_OUTPUT_PATH || '.data/telegram_alerts/workflow_verify_daily_summary.json' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+      - name: Restore Telegram alert history cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .data/telegram_alerts
+          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            telegram-alert-history-${{ github.ref_name }}-
+      - name: Restore live AI model cache
+        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true' }}
+        uses: actions/cache/restore@v5
+        with:
+          path: .data/research/live
+          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}-${{ env.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION }}
+      - name: Validate Telegram secrets
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN"
+          test -n "$TELEGRAM_CHAT_ID"
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt --no-input --prefer-binary
+      - name: Prepare live AI models
+        if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true' }}
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from urllib.request import Request, urlopen
+
+          def fetch_model(path_env, url_env, token_env, enable_env, label):
+              enabled = os.environ.get(enable_env, "").strip().lower() == "true"
+              if not enabled:
+                  print(f"{label} disabled; skip model fetch.")
+                  return
+              model_path = Path(os.environ[path_env]).expanduser()
+              model_url = os.environ.get(url_env, "").strip()
+              model_token = os.environ.get(token_env, "").strip()
+              if model_path.exists() and model_path.stat().st_size > 0:
+                  print(f"Using cached {label}: {model_path}")
+                  return
+              if not model_url:
+                  print(f"No {url_env} configured; {label} stays in safe no-op mode.")
+                  return
+              model_path.parent.mkdir(parents=True, exist_ok=True)
+              headers = {"User-Agent": "tradV2-live-ai-fetch/1.0"}
+              if model_token:
+                  headers["Authorization"] = f"Bearer {model_token}"
+                  headers["Accept"] = "application/octet-stream"
+              request = Request(model_url, headers=headers)
+              with urlopen(request, timeout=45) as response:
+                  payload = response.read()
+              if not payload:
+                  raise RuntimeError(f"Downloaded {label} is empty")
+              model_path.write_bytes(payload)
+              print(f"Downloaded {label} to {model_path} ({len(payload)} bytes)")
+
+          fetch_model(
+              "TELEGRAM_ALERT_AI_MODEL_PATH",
+              "TELEGRAM_ALERT_AI_MODEL_URL",
+              "TELEGRAM_ALERT_AI_MODEL_TOKEN",
+              "TELEGRAM_ALERT_AI_LIVE_ENABLE",
+              "live AI model",
+          )
+          fetch_model(
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH",
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_URL",
+              "TELEGRAM_ALERT_ENTRY_AI_MODEL_TOKEN",
+              "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE",
+              "live Entry AI model",
+          )
+          PY
+      - name: Run daily summary backup
+        run: |
+          EXTRA_ARGS=""
+          if [ "$FORCE_DAILY_SUMMARY" = "true" ]; then
+            EXTRA_ARGS="--force"
+          fi
+          python tools/send_daily_summary_only.py --symbols "$SYMBOLS" --period "$PERIOD" --verify-output "$VERIFY_OUTPUT_PATH" $EXTRA_ARGS
+      - name: Upload Telegram alert data
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: telegram-daily-summary-data
+          path: |
+            .data/telegram_alerts/**
+            ${{ env.VERIFY_OUTPUT_PATH }}
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Save Telegram alert history cache
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .data/telegram_alerts
+          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+      - name: Save live AI model cache
+        if: ${{ always() && (env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true') }}
+        uses: actions/cache/save@v5
+        with:
+          path: .data/research/live
+          key: telegram-alert-ai-model-${{ github.ref_name }}-${{ env.TELEGRAM_ALERT_AI_MODEL_CACHE_VERSION }}-${{ env.TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION }}

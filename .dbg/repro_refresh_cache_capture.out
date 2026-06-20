@@ -1,0 +1,5 @@
+﻿before imports
+after imports
+watchlist= 11
+refreshed= 22
+[{'symbol': 'BTC-USD', 'interval': '15m', 'period': '5d', 'provider': 'binance', 'rows': 457}, {'symbol': 'BTC-USD', 'interval': '1h', 'period': '5d', 'provider': 'binance', 'rows': 115}]

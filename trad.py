@@ -641,8 +641,6 @@ def _build_stop_context_lines(item, plan, signal=None, source_label=None):
         stop_reason = "อิงระยะเสี่ยงจาก ATR และจะถือว่ามุมมองผิดเมื่อโครงสร้าง EMA เสีย"
     elif "CDC" in source.upper() or "VIXFIX" in source.upper():
         stop_reason = "อิงจุดที่สมมติฐานการยืดตัวหรือกลับตัวเสีย ไม่ใช่ตั้ง stop แบบตายตัว"
-    elif "CRYPTO REVERSAL" in source.upper():
-        stop_reason = "อิง volatility reversal setup และจุดที่รูปแบบกลับตัวถูกลบล้าง"
     else:
         stop_reason = "ใช้เป็นจุดยกเลิกมุมมอง เมื่อราคาทะลุจุดนี้ให้ถือว่า setup เดิมผิด"
     invalidation_price = None
@@ -733,7 +731,6 @@ def _collect_alert_sources(item, min_conf, signal=None, require_quality=False, a
     add("EMA Cross 15m", item.get("ema_cross_15m"), setup_key="signal")
     add("ActionZone 15m", item.get("actionzone_15m"), setup_key="signal")
     add("CDC+VixFix 15m", item.get("cdc_vixfix_15m"), setup_key="signal", allow_label=allow_cdc)
-    add("Crypto Reversal 15m", item.get("crypto_reversal_15m"))
     sources.sort(key=lambda x: x[0], reverse=True)
     return [f"{text} ({conf:.0f}%)" for conf, text in sources[:3]]
 
@@ -992,7 +989,6 @@ def _price_action_proxy_metrics(item, signal):
         ("ActionZone 15m", item.get("actionzone_15m")),
         ("EMA Cross 15m", item.get("ema_cross_15m")),
         ("CDC+VixFix 15m", item.get("cdc_vixfix_15m")),
-        ("Crypto Reversal 15m", item.get("crypto_reversal_15m")),
         ("ShortTerm 15m", item.get("short_term_15m")),
         ("Sniper 15m", item.get("sniper_15m")),
         ("Quantum 15m", item.get("quantum_15m")),
@@ -1030,7 +1026,6 @@ def _signal_metric_plan_candidates(item, signal, require_quality=False, allow_cd
         ("EMA", item.get("ema_cross_15m"), True),
         ("AZ", item.get("actionzone_15m"), True),
         ("CDC", item.get("cdc_vixfix_15m"), allow_cdc),
-        ("REVERSAL", item.get("crypto_reversal_15m"), True),
     ]
     for _, plan, enabled in plan_rows:
         if not enabled or not isinstance(plan, dict):
@@ -1792,7 +1787,6 @@ def _get_best_confidence(item, signal=None, require_quality=False, allow_cdc=Tru
         (item.get("ema_cross_15m"), "signal", "confidence", True),
         (item.get("actionzone_15m"), "signal", "confidence", True),
         (item.get("cdc_vixfix_15m"), "signal", "confidence", allow_cdc),
-        (item.get("crypto_reversal_15m"), "setup", "confidence", True),
     ]
     for plan, setup_key, conf_key, enabled in candidates:
         if not enabled:
@@ -1825,7 +1819,6 @@ def _pick_primary_trade_plan(item, signal=None, require_quality=False, allow_cdc
         (item.get("short_term_15m"), True),
         (item.get("sniper_15m"), True),
         (item.get("quantum_15m"), True),
-        (item.get("crypto_reversal_15m"), True),
     ]
     best_plan = None
     best_conf = -1.0
@@ -2113,7 +2106,6 @@ _ALL_WEATHER_REGIME_WEIGHTS = {
         "ActionZone": 1.35,
         "EMACross": 1.28,
         "CDCVixFix": 0.82,
-        "CryptoReversal": 0.90,
         "ShortTerm": 1.00,
         "Sniper": 1.02,
         "Quantum": 0.95,
@@ -2122,7 +2114,6 @@ _ALL_WEATHER_REGIME_WEIGHTS = {
         "ActionZone": 0.92,
         "EMACross": 0.84,
         "CDCVixFix": 1.28,
-        "CryptoReversal": 1.20,
         "ShortTerm": 1.10,
         "Sniper": 1.08,
         "Quantum": 1.02,
@@ -2131,7 +2122,6 @@ _ALL_WEATHER_REGIME_WEIGHTS = {
         "ActionZone": 1.00,
         "EMACross": 0.80,
         "CDCVixFix": 1.30,
-        "CryptoReversal": 1.25,
         "ShortTerm": 0.95,
         "Sniper": 0.92,
         "Quantum": 0.90,
@@ -2160,7 +2150,6 @@ def _all_weather_market_regime(item):
     for plan, key in (
         (item.get("actionzone_15m"), "avg_range_pct"),
         (item.get("actionzone_15m"), "atr_pct"),
-        (item.get("crypto_reversal_15m"), "atr_pct"),
     ):
         if not isinstance(plan, dict):
             continue
@@ -2257,7 +2246,6 @@ def _all_weather_plan_candidates(item, regime):
         ("ActionZone", item.get("actionzone_15m")),
         ("EMACross", item.get("ema_cross_15m")),
         ("CDCVixFix", item.get("cdc_vixfix_15m")),
-        ("CryptoReversal", item.get("crypto_reversal_15m")),
         ("ShortTerm", item.get("short_term_15m")),
         ("Sniper", item.get("sniper_15m")),
         ("Quantum", item.get("quantum_15m")),
@@ -4854,6 +4842,7 @@ def _pipeline_module_helpers():
         "normalize_confidence": _normalize_confidence,
         "build_cdc_vixfix_message": _build_cdc_vixfix_message,
         "extract_plan_edge_metrics": _extract_plan_edge_metrics,
+        "price_action_proxy_metrics": _price_action_proxy_metrics,
         "alert_profile_score_adjustment": _alert_profile_score_adjustment,
         "format_price_value": _format_price_value,
         "evaluate_entry_quality_gate": _evaluate_entry_quality_gate,
@@ -8140,313 +8129,6 @@ class QuantumHunterStrategy:
             'reason': reason_text
         }
 
-class CryptoReversal15m:
-    @staticmethod
-    def analyze(symbol, data_15m=None, data_1h=None):
-        if not is_crypto_symbol(symbol):
-            return None
-        try:
-            sym = normalize_symbol(symbol)
-            if not isinstance(data_15m, pd.DataFrame) or data_15m.empty:
-                data_15m = _get_preferred_15m_history(sym)
-            if not isinstance(data_1h, pd.DataFrame) or data_1h.empty:
-                data_1h = _get_preferred_1h_history(sym)
-            if data_15m is None or data_1h is None or data_15m.empty or len(data_15m) < 60 or data_1h.empty or len(data_1h) < 40:
-                return None
-            df = data_15m.copy()
-            df['EMA20'] = df['Close'].ewm(span=20, adjust=False).mean()
-            df['EMA50'] = df['Close'].ewm(span=50, adjust=False).mean()
-            delta = df['Close'].diff()
-            gain = delta.where(delta > 0, 0).rolling(window=14).mean()
-            loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-            rs = gain / loss
-            df['RSI'] = 100 - (100 / (1 + rs))
-            df['H-L'] = df['High'] - df['Low']
-            df['H-PC'] = (df['High'] - df['Close'].shift(1)).abs()
-            df['L-PC'] = (df['Low'] - df['Close'].shift(1)).abs()
-            df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-            df['ATR'] = df['TR'].rolling(window=14).mean()
-            df['Vol_Avg'] = df['Volume'].rolling(window=20).mean()
-            df['RVOL'] = df['Volume'] / df['Vol_Avg']
-            df['ATR_PCT'] = (df['ATR'] / df['Close']) * 100
-            df['SMA20'] = df['Close'].rolling(window=20).mean()
-            std20 = df['Close'].rolling(window=20).std()
-            df['BB_Upper'] = df['SMA20'] + 2 * std20
-            df['BB_Lower'] = df['SMA20'] - 2 * std20
-            curr = df.iloc[-1]
-            prev = df.iloc[-2]
-            rvol = float(curr['RVOL']) if not pd.isna(curr['RVOL']) else None
-            atr_pct = float(curr['ATR_PCT']) if not pd.isna(curr['ATR_PCT']) else None
-            rsi = float(curr['RSI']) if not pd.isna(curr['RSI']) else None
-            atr = float(curr['ATR']) if not pd.isna(curr['ATR']) else None
-            price = float(curr['Close'])
-            body = curr['Close'] - curr['Open']
-            upper_shadow = curr['High'] - max(curr['Close'], curr['Open'])
-            lower_shadow = min(curr['Close'], curr['Open']) - curr['Low']
-            setup_type = "WAIT"
-            pattern = ""
-            score = 0
-            max_score = 10
-            if rsi is None or atr is None or atr <= 0:
-                return None
-            bb_low = float(curr['BB_Lower']) if not pd.isna(curr['BB_Lower']) else None
-            bb_up = float(curr['BB_Upper']) if not pd.isna(curr['BB_Upper']) else None
-            ema20 = float(curr['EMA20']) if not pd.isna(curr['EMA20']) else None
-            ema50 = float(curr['EMA50']) if not pd.isna(curr['EMA50']) else None
-            df_1h = data_1h.copy()
-            df_1h['EMA50'] = df_1h['Close'].ewm(span=50, adjust=False).mean()
-            df_1h['EMA200'] = df_1h['Close'].ewm(span=200, adjust=False).mean()
-            d_h = df_1h
-            d_h['H-L'] = d_h['High'] - d_h['Low']
-            d_h['H-PC'] = (d_h['High'] - d_h['Close'].shift(1)).abs()
-            d_h['L-PC'] = (d_h['Low'] - d_h['Close'].shift(1)).abs()
-            d_h['TR'] = d_h[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-            d_h['ATR'] = d_h['TR'].rolling(window=14).mean()
-            delta_h = d_h['Close'].diff()
-            gain_h = delta_h.where(delta_h > 0, 0).rolling(window=14).mean()
-            loss_h = (-delta_h.where(delta_h < 0, 0)).rolling(window=14).mean()
-            rs_h = gain_h / loss_h
-            d_h['RSI'] = 100 - (100 / (1 + rs_h))
-            plus_dm = d_h['High'].diff().clip(lower=0)
-            minus_dm = d_h['Low'].diff().clip(lower=0)
-            atr_h = d_h['ATR']
-            p_di = 100 * (plus_dm.ewm(alpha=1/14).mean() / atr_h)
-            m_di = 100 * (minus_dm.ewm(alpha=1/14).mean() / atr_h)
-            dx_h = (abs(p_di - m_di) / (p_di + m_di + 1e-9)) * 100
-            d_h['ADX'] = dx_h.rolling(14).mean()
-            curr_h = d_h.iloc[-1]
-            trend_1h = "UP" if curr_h['Close'] > curr_h['EMA50'] else "DOWN"
-            trend_strength_1h = "STRONG" if curr_h['ADX'] >= 25 else "WEAK"
-            was_oversold = prev['RSI'] < 25 if not pd.isna(prev['RSI']) else False
-            rsi_cross_up = was_oversold and rsi >= 25
-            was_overbought = prev['RSI'] > 75 if not pd.isna(prev['RSI']) else False
-            rsi_cross_down = was_overbought and rsi <= 75
-            near_lower_band = bb_low is not None and price <= bb_low * 1.005
-            near_upper_band = bb_up is not None and price >= bb_up * 0.995
-            squeeze = False
-            if not pd.isna(std20.iloc[-1]):
-                recent_std = df['Close'].rolling(window=40).std().iloc[-20:]
-                median_std = recent_std.median()
-                if median_std > 0 and std20.iloc[-1] < median_std * 0.7:
-                    squeeze = True
-            hammer_like = lower_shadow >= 2 * abs(body) and upper_shadow <= abs(body) * 0.6
-            shooting_star_like = upper_shadow >= 2 * abs(body) and lower_shadow <= abs(body) * 0.6
-            regime = "RANGE"
-            if atr_pct is not None:
-                if atr_pct >= 3.5:
-                    regime = "HIGH_VOL"
-                elif atr_pct <= 1.5:
-                    regime = "LOW_VOL"
-            reasons = []
-            smc_setup = "NONE"
-            smc_entry = None
-            smc_stop_loss = None
-            smc_take_profit = None
-            smc_rr = None
-            if rsi_cross_up and near_lower_band:
-                setup_type = "CRYPTO REVERSAL BUY"
-                pattern = "RSI cross up near lower Bollinger Band"
-                score += 4
-                reasons.append("RSI ฟื้นจากเขต Oversold ใกล้แนวล่าง Bollinger Band")
-                if squeeze:
-                    score += 1
-                    reasons.append("เกิด Bollinger Squeeze ก่อนหน้า มีโอกาสเกิดการระเบิดทิศทาง")
-                if ema20 is not None and price > ema20:
-                    score += 1
-                    reasons.append("ราคากลับขึ้นเหนือ EMA20")
-                if ema50 is not None and price > ema50:
-                    score += 1
-                    reasons.append("ราคายืนเหนือ EMA50 ระยะสั้น")
-                if hammer_like:
-                    score += 2
-                    reasons.append("แท่งเทียนมีเงาล่างยาว ลักษณะคล้าย Hammer")
-                if trend_1h == "UP":
-                    score += 1
-                    reasons.append("ทิศทาง 1H ยังเป็นขาขึ้น การกลับตัวนี้เป็นจังหวะย่อตัวในเทรนด์ใหญ่")
-                    if trend_strength_1h == "STRONG":
-                        score += 1
-                        reasons.append("แนวโน้ม 1H แข็งแรง สนับสนุนการดีดกลับ")
-                else:
-                    reasons.append("สัญญาณนี้สวนเทรนด์ 1H ต้องใช้การบริหารความเสี่ยงเข้มงวด")
-                if rvol is not None:
-                    if rvol > 1.2 and rvol < 3.0:
-                        score += 1
-                        reasons.append("ปริมาณการซื้อขายสูงกว่าค่าเฉลี่ย แต่อยู่ในระดับไม่สุดโต่ง")
-                    elif rvol <= 0.8:
-                        reasons.append("Volume บางกว่าปกติ อาจทำให้สัญญาณไม่น่าเชื่อถือเท่าที่ควร")
-                    else:
-                        reasons.append("Volume สูงมาก ผันผวนสูง ต้องตั้งจุดตัดขาดทุนให้ชัดเจน")
-            elif rsi_cross_down and near_upper_band:
-                setup_type = "CRYPTO REVERSAL SELL"
-                pattern = "RSI cross down near upper Bollinger Band"
-                score += 4
-                reasons.append("RSI อ่อนตัวจากเขต Overbought ใกล้แนวบน Bollinger Band")
-                if squeeze:
-                    score += 1
-                    reasons.append("เกิด Bollinger Squeeze ก่อนหน้า มีโอกาสกลับตัวแรง")
-                if ema20 is not None and price < ema20:
-                    score += 1
-                    reasons.append("ราคาหลุด EMA20 ลงมา")
-                if ema50 is not None and price < ema50:
-                    score += 1
-                    reasons.append("ราคาหลุด EMA50 ยืนยันการอ่อนแรง")
-                if shooting_star_like:
-                    score += 2
-                    reasons.append("แท่งเทียนมีเงาบนยาว ลักษณะคล้าย Shooting Star")
-                if trend_1h == "DOWN":
-                    score += 1
-                    reasons.append("ทิศทาง 1H ยังเป็นขาลง การกลับตัวนี้เป็นจังหวะเด้งในเทรนด์ใหญ่")
-                    if trend_strength_1h == "STRONG":
-                        score += 1
-                        reasons.append("แนวโน้ม 1H ขาลงแข็งแรง สนับสนุนสัญญาณขาย")
-                else:
-                    reasons.append("สัญญาณนี้สวนเทรนด์ 1H ต้องระวังการเด้งกลับแรง")
-                if rvol is not None:
-                    if rvol > 1.2 and rvol < 3.0:
-                        score += 1
-                        reasons.append("ปริมาณการซื้อขายหนาแน่นแต่ไม่ร้อนแรงเกินไป")
-                    elif rvol <= 0.8:
-                        reasons.append("Volume เบาบาง อาจเกิด False Break ได้ง่าย")
-                    else:
-                        reasons.append("Volume สูงผิดปกติ ต้องเฝ้าระวังความผันผวน")
-            else:
-                return {
-                    'setup': "WAIT",
-                    'confidence': 0,
-                    'current_price': price,
-                    'rsi': rsi,
-                    'atr': atr,
-                    'stop_loss': None,
-                    'take_profit': None,
-                    'pattern': "",
-                    'reason': "ยังไม่พบสัญญาณกลับตัวชัดเจน"
-                }
-            conf = 0
-            if score > 0 and max_score > 0:
-                conf = (score / max_score) * 100
-            if conf > 100:
-                conf = 100
-            if conf < 0:
-                conf = 0
-            base_sl_mult = 1.5
-            base_tp_mult = 2.5
-            if regime == "HIGH_VOL":
-                base_sl_mult = 1.8
-                base_tp_mult = 3.2
-            elif regime == "LOW_VOL":
-                base_sl_mult = 1.2
-                base_tp_mult = 2.0
-            if conf >= 80:
-                base_tp_mult += 0.5
-            elif conf <= 50:
-                base_tp_mult -= 0.3
-            if "BUY" in setup_type:
-                stop_loss = price - base_sl_mult * atr
-                take_profit = price + base_tp_mult * atr
-            elif "SELL" in setup_type:
-                stop_loss = price + base_sl_mult * atr
-                take_profit = price - base_tp_mult * atr
-            else:
-                stop_loss = None
-                take_profit = None
-            rr = None
-            if stop_loss is not None and take_profit is not None:
-                risk_dist = abs(price - stop_loss)
-                reward_dist = abs(take_profit - price)
-                if risk_dist > 0:
-                    rr = reward_dist / risk_dist
-            win_prob = conf
-            if rr is not None and rr > 0:
-                if rr < 1.2:
-                    win_prob = conf * 0.9
-                elif rr >= 2.0:
-                    win_prob = conf * 1.05
-            if win_prob is not None:
-                if win_prob > 98:
-                    win_prob = 98
-                if win_prob < 0:
-                    win_prob = 0
-            expected_move_pct = None
-            if take_profit is not None and price > 0:
-                if "BUY" in setup_type:
-                    expected_move_pct = ((take_profit - price) / price) * 100
-                elif "SELL" in setup_type:
-                    expected_move_pct = ((price - take_profit) / price) * 100
-            expected_holding_bars_15m = None
-            if expected_move_pct is not None and atr_pct is not None and atr_pct > 0:
-                approx_steps = abs(expected_move_pct) / atr_pct
-                if approx_steps <= 0:
-                    approx_steps = 1
-                expected_holding_bars_15m = int(max(1, min(48, round(approx_steps))))
-            df['EMA200'] = df['Close'].ewm(span=200, adjust=False).mean()
-            df['Swing_Low'] = np.where((df['Low'].shift(1) > df['Low']) & (df['Low'].shift(-1) > df['Low']), df['Low'], np.nan)
-            df['Swing_High'] = np.where((df['High'].shift(1) < df['High']) & (df['High'].shift(-1) < df['High']), df['High'], np.nan)
-            df['Last_Swing_Low'] = df['Swing_Low'].ffill()
-            df['Last_Swing_High'] = df['Swing_High'].ffill()
-            if len(df) > 200:
-                curr_idx = len(df) - 1
-                prev_idx = curr_idx - 1
-                if prev_idx >= 1:
-                    curr_smc = df.iloc[curr_idx]
-                    prev_smc = df.iloc[prev_idx]
-                    last_swing_low = prev_smc['Last_Swing_Low']
-                    last_swing_high = prev_smc['Last_Swing_High']
-                    if not pd.isna(prev_smc['ATR']) and prev_smc['ATR'] > 0 and not pd.isna(curr_smc['EMA200']):
-                        atr_buffer = curr_smc['ATR'] * 0.5
-                        rr_target = 1.5
-                        if not pd.isna(last_swing_low) and curr_smc['Close'] > curr_smc['EMA200']:
-                            if prev_smc['Low'] < last_swing_low and prev_smc['Close'] > last_swing_low and curr_smc['Close'] > prev_smc['High']:
-                                stop_loss_smc = prev_smc['Low'] - atr_buffer
-                                risk_smc = curr_smc['Close'] - stop_loss_smc
-                                if risk_smc > 0:
-                                    take_profit_smc = curr_smc['Close'] + (risk_smc * rr_target)
-                                    smc_setup = "SMC LONG"
-                                    smc_entry = float(curr_smc['Close'])
-                                    smc_stop_loss = float(stop_loss_smc)
-                                    smc_take_profit = float(take_profit_smc)
-                                    smc_rr = rr_target
-                        if not pd.isna(last_swing_high) and curr_smc['Close'] < curr_smc['EMA200']:
-                            if prev_smc['High'] > last_swing_high and prev_smc['Close'] < last_swing_high and curr_smc['Close'] < prev_smc['Low']:
-                                stop_loss_smc = prev_smc['High'] + atr_buffer
-                                risk_smc = stop_loss_smc - curr_smc['Close']
-                                if risk_smc > 0:
-                                    take_profit_smc = curr_smc['Close'] - (risk_smc * rr_target)
-                                    smc_setup = "SMC SHORT"
-                                    smc_entry = float(curr_smc['Close'])
-                                    smc_stop_loss = float(stop_loss_smc)
-                                    smc_take_profit = float(take_profit_smc)
-                                    smc_rr = rr_target
-            reason_text = "สัญญาณกลับตัว 15 นาทีสำหรับคริปโต โดยอิง RSI, Bollinger Bands และเทรนด์ 1H"
-            if reasons:
-                reason_text = " | ".join(reasons)
-            return {
-                'setup': setup_type,
-                'confidence': conf,
-                'current_price': price,
-                'rsi': rsi,
-                'atr': atr,
-                'stop_loss': stop_loss,
-                'take_profit': take_profit,
-                'pattern': pattern,
-                'reason': reason_text,
-                'trend_1h': trend_1h,
-                'trend_strength_1h': trend_strength_1h,
-                'rvol': rvol,
-                'atr_pct': atr_pct,
-                'regime': regime,
-                'risk_reward': rr,
-                'win_prob': win_prob,
-                'expected_move_pct': expected_move_pct,
-                'expected_holding_bars_15m': expected_holding_bars_15m,
-                'smc_setup': smc_setup,
-                'smc_entry': smc_entry,
-                'smc_stop_loss': smc_stop_loss,
-                'smc_take_profit': smc_take_profit,
-                'smc_rr': smc_rr
-            }
-        except Exception:
-            return None
-
 class EMACross15m:
     @staticmethod
     def analyze(symbol, data_15m=None):
@@ -9952,7 +9634,7 @@ def generate_gemini_particle_a_analysis(info, data, resonance_score, phase_statu
     return ui_signal, text
 
 
-def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, actionzone_plan, sovereign_plan, resonance_score, phase_status, crypto_plan=None, cdc_plan=None):
+def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_plan, actionzone_plan, sovereign_plan, resonance_score, phase_status, cdc_plan=None):
     up_score = 0.0
     down_score = 0.0
     conf_sum = 0.0
@@ -10001,8 +9683,6 @@ def build_prediction_summary(short_term_plan, sniper_plan, quantum_plan, ema_pla
             }
             process_plan(cdc_proxy)
             add_conf(cdc_plan.get("confidence"))
-    if isinstance(crypto_plan, dict):
-        process_plan(crypto_plan)
     if isinstance(sovereign_plan, dict):
         reco = str(sovereign_plan.get("recommendation", "")).upper()
         if "BUY" in reco:
@@ -10220,7 +9900,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
         sniper_plan = ShortTermStrategy.analyze_sniper_setup(symbol, data_15m=shared_15m, data_1h=shared_1h)
         quantum_plan = QuantumHunterStrategy.analyze(symbol, data_15m=shared_15m)
         sovereign_4h_plan = QuantumSovereign4H.analyze(symbol, data_1h=shared_1h)
-        crypto_reversal_plan = CryptoReversal15m.analyze(symbol, data_15m=shared_15m, data_1h=shared_1h)
         ema_cross_plan = EMACross15m.analyze(symbol, data_15m=shared_15m)
         actionzone_plan = _actionzone_15m_alert(symbol, data_15m=shared_15m, data_1h=shared_1h)
         cdc_vixfix_plan = _cdc_vixfix_15m_plan(symbol, data_15m=shared_15m)
@@ -10266,13 +9945,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             tp_keys=["take_profit", "exit_price"],
             context=exit_context,
         )
-        crypto_reversal_plan = _attach_exit_levels(
-            crypto_reversal_plan,
-            entry_keys=["current_price", "entry_price", "price"],
-            stop_keys=["stop_loss"],
-            tp_keys=["take_profit", "smc_take_profit"],
-            context=exit_context,
-        )
         cdc_vixfix_plan = _attach_exit_levels(
             cdc_vixfix_plan,
             entry_keys=["entry_price", "current_price", "price"],
@@ -10289,7 +9961,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             sovereign_4h_plan,
             resonance_score,
             phase_status,
-            crypto_reversal_plan,
             cdc_vixfix_plan,
         )
         price_action_plan = _price_action_15m_plan(
@@ -10299,7 +9970,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
                 "short_term_15m": short_term_plan,
                 "sniper_15m": sniper_plan,
                 "quantum_15m": quantum_plan,
-                "crypto_reversal_15m": crypto_reversal_plan,
                 "ema_cross_15m": ema_cross_plan,
                 "actionzone_15m": actionzone_plan,
                 "cdc_vixfix_15m": cdc_vixfix_plan,
@@ -10324,7 +9994,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
                 "short_term_15m": short_term_plan,
                 "sniper_15m": sniper_plan,
                 "quantum_15m": quantum_plan,
-                "crypto_reversal_15m": crypto_reversal_plan,
                 "ema_cross_15m": ema_cross_plan,
                 "actionzone_15m": actionzone_plan,
                 "cdc_vixfix_15m": cdc_vixfix_plan,
@@ -10358,7 +10027,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
                 "short_term_15m": short_term_plan,
                 "sniper_15m": sniper_plan,
                 "quantum_15m": quantum_plan,
-                "crypto_reversal_15m": crypto_reversal_plan,
                 "ema_cross_15m": ema_cross_plan,
                 "actionzone_15m": actionzone_plan,
                 "cdc_vixfix_15m": cdc_vixfix_plan,
@@ -10383,7 +10051,6 @@ def analyze_single_symbol(symbol, period, include_chart_data=True):
             "sniper_15m": sniper_plan,
             "quantum_15m": quantum_plan,
             "sovereign_4h": sovereign_4h_plan,
-            "crypto_reversal_15m": crypto_reversal_plan,
             "ema_cross_15m": ema_cross_plan,
             "actionzone_15m": actionzone_plan,
             "cdc_vixfix_15m": cdc_vixfix_plan,
@@ -10428,8 +10095,6 @@ def _get_primary_plan_source_label(item, plan):
         return "ActionZone 15m"
     if plan is item.get("ema_cross_15m"):
         return "EMA Cross 15m"
-    if plan is item.get("crypto_reversal_15m"):
-        return "Crypto Reversal 15m"
     if plan is item.get("short_term_15m"):
         return "Short Term 15m"
     if plan is item.get("sniper_15m"):

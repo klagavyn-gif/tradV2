@@ -13,6 +13,7 @@ on:
         default: "15m"
   schedule:
     - cron: "*/15 * * * *"
+    - cron: "5,10,20,25 2 * * *"
 
 permissions:
   contents: read

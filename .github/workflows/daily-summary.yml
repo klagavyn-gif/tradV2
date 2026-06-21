@@ -192,7 +192,7 @@ jobs:
           if [ "$FORCE_DAILY_SUMMARY" = "true" ]; then
             EXTRA_ARGS="--force"
           fi
-          python tools/send_daily_summary_only.py --symbols "$SYMBOLS" --period "$PERIOD" --verify-output "$VERIFY_OUTPUT_PATH" $EXTRA_ARGS
+          python -m tools.send_daily_summary_only --symbols "$SYMBOLS" --period "$PERIOD" --verify-output "$VERIFY_OUTPUT_PATH" $EXTRA_ARGS
       - name: Upload Telegram alert data
         if: always()
         uses: actions/upload-artifact@v6

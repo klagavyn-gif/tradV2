@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: telegram-alerts
+  group: telegram-daily-summary
   cancel-in-progress: false
 
 jobs:

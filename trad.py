@@ -1902,7 +1902,47 @@ def _alert_mode_usage_hint(mode_label=None):
     return None
 
 
-def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_label=None):
+def _resolve_alert_max_hold_bars(symbol=None, plan=None, source_label=None):
+    plan = plan if isinstance(plan, dict) else {}
+    hold_bars = plan.get("max_hold_bars")
+    if isinstance(hold_bars, (int, float)) and math.isfinite(float(hold_bars)):
+        hold_value = int(float(hold_bars))
+        if hold_value > 0:
+            return hold_value
+
+    source_text = str(source_label or "").strip().upper()
+    normalized_symbol = normalize_symbol(symbol or "")
+    if source_text and "CDC" in source_text:
+        symbol_profiles = getattr(config, "CDC_VIXFIX_15M_SYMBOL_PROFILES", {})
+        if isinstance(symbol_profiles, dict):
+            profile = symbol_profiles.get(normalized_symbol)
+            if isinstance(profile, dict):
+                profile_hold = profile.get("max_hold_bars")
+                if isinstance(profile_hold, (int, float)) and math.isfinite(float(profile_hold)):
+                    hold_value = int(float(profile_hold))
+                    if hold_value > 0:
+                        return hold_value
+        default_hold = getattr(config, "CDC_VIXFIX_15M_MAX_HOLD_BARS", None)
+        if isinstance(default_hold, (int, float)) and math.isfinite(float(default_hold)):
+            hold_value = int(float(default_hold))
+            if hold_value > 0:
+                return hold_value
+    return None
+
+
+def _format_hold_duration_text(max_hold_bars, timeframe_minutes=15):
+    if not isinstance(max_hold_bars, (int, float)) or not math.isfinite(float(max_hold_bars)):
+        return None
+    bars = int(float(max_hold_bars))
+    if bars <= 0:
+        return None
+    total_minutes = bars * int(timeframe_minutes)
+    total_hours = total_minutes / 60.0
+    duration_text = f"{int(total_hours)} ชม." if total_minutes % 60 == 0 else f"{total_hours:.1f} ชม."
+    return f"ถือได้ประมาณ {duration_text} ({bars} แท่ง 15m) ถ้าไม่ไปตามทางควรลดไม้หรือปิดรอบ"
+
+
+def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_label=None, symbol=None):
     signal_text = str(signal or "").strip().upper()
     if signal_text not in ("BUY", "SELL"):
         return None
@@ -1953,10 +1993,13 @@ def _build_trade_action_guidance(signal, plan=None, mode_label=None, source_labe
         primary_text = "ให้ปิด BUY เดิมหรือลดความเสี่ยงก่อน ยังไม่ควรตีความเป็น Short เต็มตัว"
         note_text = "เพราะ Forecast ยังเอนขึ้น แม้ CDC ฝั่งออกหรือกลับตัวระยะสั้นเริ่มทำงาน"
 
+    hold_bars = _resolve_alert_max_hold_bars(symbol=symbol, plan=plan, source_label=source_label)
+    hold_text = _format_hold_duration_text(hold_bars, timeframe_minutes=15)
     return {
         "action_code": action_code,
         "primary_text": primary_text,
         "note_text": note_text,
+        "hold_text": hold_text,
     }
 
 
@@ -2914,7 +2957,12 @@ def _build_actionzone_message(item, az_plan):
         edge_parts.append(f"Trades {int(trades)}")
     if edge_parts:
         lines.append("<b>🧪 Edge:</b> " + " | ".join([_html_escape(part) for part in edge_parts]))
-    action_guidance = _build_trade_action_guidance(signal, plan=az_plan, source_label="ActionZone 15m")
+    action_guidance = _build_trade_action_guidance(
+        signal,
+        plan=az_plan,
+        source_label="ActionZone 15m",
+        symbol=symbol,
+    )
     _append_trade_decision_lines_legacy(
         lines,
         az_plan,
@@ -2928,6 +2976,9 @@ def _build_actionzone_message(item, az_plan):
         note_text = str(action_guidance.get("note_text") or "").strip()
         if note_text:
             lines.append("<b>⚠️ Note:</b> " + _html_escape(note_text))
+        hold_text = str(action_guidance.get("hold_text") or "").strip()
+        if hold_text:
+            lines.append("<b>⏳ Hold Plan:</b> " + _html_escape(hold_text))
 
     fast_len = az_plan.get("fast_len")
     slow_len = az_plan.get("slow_len")
@@ -3024,6 +3075,7 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         plan=plan,
         mode_label=mode_label,
         source_label="CDC+VixFix 15m",
+        symbol=symbol,
     )
     _append_trade_decision_lines_legacy(
         lines,
@@ -3038,6 +3090,9 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         note_text = str(action_guidance.get("note_text") or "").strip()
         if note_text:
             lines.append("<b>⚠️ Note:</b> " + _html_escape(note_text))
+        hold_text = str(action_guidance.get("hold_text") or "").strip()
+        if hold_text:
+            lines.append("<b>⏳ Hold Plan:</b> " + _html_escape(hold_text))
 
     forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
     forecast_score = plan.get("forecast_score")

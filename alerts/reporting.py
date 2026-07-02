@@ -1146,7 +1146,7 @@ def build_telegram_daily_summary_message(
     )
     candidate_backtest_snapshot = helpers["candidate_backtest_snapshot"]
     lines = [
-        "<b>Daily 09:00 Executive Summary</b>",
+        "<b>Daily 09:00 Summary</b>",
         f"⏱️ <b>เวลา:</b> {html.escape(now_text)}",
     ]
 
@@ -1158,74 +1158,76 @@ def build_telegram_daily_summary_message(
         runtime_parts.append(f"ver {runtime['model_version']}")
     if runtime.get("trained_at"):
         runtime_parts.append(f"trained {runtime['trained_at']}")
-    lines.append("🤖 <b>Runtime:</b> " + " | ".join([html.escape(str(part)) for part in runtime_parts if str(part).strip()]))
-    if runtime.get("allowlist"):
-        lines.append(f"🧭 <b>Promotion:</b> {html.escape(runtime['allowlist'])}")
 
     if isinstance(latest_run, dict):
+        alert_budget = latest_run.get("alert_budget") if isinstance(latest_run.get("alert_budget"), dict) else {}
+        regime_text = str(alert_budget.get("market_regime") or "-").strip().upper() or "-"
+        run_cap = _fmt_count(alert_budget.get("adjusted_run_cap"))
+        daily_cap = _fmt_count(alert_budget.get("adjusted_daily_pick_cap"))
+        quality_drop_text = _top_quality_drop_counts(latest_run.get("quality_drop_counts"))
         lines.append(
-            "🧪 <b>Latest Run:</b> "
-            + f"{html.escape(str(latest_run.get('generated_at') or '-'))} | "
-            + f"raw {html.escape(_fmt_count(latest_run.get('raw_candidate_count')))}"
+            "🧭 <b>ภาพรวม:</b> "
+            + f"regime {html.escape(regime_text)}"
+            + f" | min conf {html.escape(_fmt_number(latest_run.get('dynamic_min_confidence'), digits=1, suffix='%'))}"
+            + f" | cap/run {html.escape(run_cap)} | daily pick {html.escape(daily_cap)}"
+        )
+        lines.append(
+            "🧪 <b>รอบล่าสุด:</b> "
+            + f"{html.escape(str(latest_run.get('generated_at') or '-'))}"
+            + f" | raw {html.escape(_fmt_count(latest_run.get('raw_candidate_count')))}"
             + f" -> cand {html.escape(_fmt_count(latest_run.get('candidate_count')))}"
             + f" -> sent {html.escape(_fmt_count(latest_run.get('sent_count')))}"
         )
         lines.append(
-            "📤 <b>Dispatch:</b> "
-            + f"daily_pick {html.escape(_fmt_count(latest_run.get('daily_pick_sent')))}"
-            + f" | daily_summary {html.escape(_fmt_count(latest_run.get('daily_summary_sent')))}"
-            + f" | quality drops {html.escape(_top_quality_drop_counts(latest_run.get('quality_drop_counts')))}"
+            "📤 <b>สถานะส่ง:</b> "
+            + f"daily pick {html.escape(_fmt_count(latest_run.get('daily_pick_sent')))}"
+            + f" | daily summary {html.escape(_fmt_count(latest_run.get('daily_summary_sent')))}"
         )
+        if quality_drop_text != "-":
+            lines.append(f"🚫 <b>เหตุที่ยังไม่ส่ง:</b> {html.escape(quality_drop_text)}")
     else:
-        lines.append("🧪 <b>Latest Run:</b> ยังไม่มี `latest_run.json` ใน runtime path")
+        lines.append("🧪 <b>รอบล่าสุด:</b> ยังไม่มี `latest_run.json` ใน runtime path")
 
     if recent_entries:
-        lines.append(
-            "📣 <b>Alert "
-            + f"{html.escape(_fmt_number(history_days, digits=1))}d:</b> "
-            + f"{len(recent_entries)} alerts | directional {directional_count}"
-            + f" | daily_pick {daily_pick_count} | symbols {len(symbols)}"
-        )
-        lines.append(
-            "📊 <b>Mix:</b> "
-            + f"intent {html.escape(_format_counter_items(dict(intents), limit=3))}"
-            + f" | tier {html.escape(_format_counter_items(dict(tiers), limit=4))}"
-        )
-        lines.append(
-            "🗂️ <b>Top Flow:</b> "
-            + f"strategy {html.escape(_format_counter_items(dict(strategies), limit=3))}"
-            + f" | symbol {html.escape(_format_counter_items(dict(symbols), limit=3))}"
+        activity_line = (
+            "📣 <b>กิจกรรมล่าสุด:</b> "
+            + f"{len(recent_entries)} alerts/{html.escape(_fmt_number(history_days, digits=1))}d"
+            + f" | directional {directional_count}"
+            + f" | daily pick {daily_pick_count}"
+            + f" | symbols {len(symbols)}"
         )
         if latest_alert_at:
-            lines.append(f"🕒 <b>Latest Alert:</b> {html.escape(latest_alert_at)}")
+            activity_line += f" | last {html.escape(latest_alert_at)}"
+        lines.append(activity_line)
+        lines.append(
+            "📊 <b>Flow:</b> "
+            + f"intent {html.escape(_format_counter_items(dict(intents), limit=3))}"
+            + f" | tier {html.escape(_format_counter_items(dict(tiers), limit=3))}"
+            + f" | strategy {html.escape(_format_counter_items(dict(strategies), limit=2))}"
+        )
+        lines.append(
+            "🗂️ <b>สัญลักษณ์เด่น:</b> "
+            + f"{html.escape(_format_counter_items(dict(symbols), limit=3))}"
+            + f" | signal {html.escape(_format_counter_items(dict(signals), limit=3))}"
+        )
     else:
-        lines.append(f"📣 <b>Alert {html.escape(_fmt_number(history_days, digits=1))}d:</b> ยังไม่มี alert ในช่วงล่าสุด")
+        lines.append(f"📣 <b>กิจกรรมล่าสุด:</b> ยังไม่มี alert ในช่วง {html.escape(_fmt_number(history_days, digits=1))} วัน")
 
     realized_generated_at = str(realized_summary.get("generated_at") or realized_payload.get("generated_at") or "").strip()
     lines.append(
-        "🎯 <b>Realized "
+        "🎯 <b>ผลงานจริง "
         + f"{html.escape(_fmt_number(realized_days, digits=0))}d:</b> "
-        + f"settled {html.escape(_fmt_count(realized_summary.get('settled_alerts')))}"
-        + f" | WR {html.escape(_fmt_number(realized_summary.get('win_rate_pct'), suffix='%'))}"
+        + f"WR {html.escape(_fmt_number(realized_summary.get('win_rate_pct'), suffix='%'))}"
         + f" | RR {html.escape(_fmt_number(realized_summary.get('avg_rr_realized'), digits=2))}"
         + f" | PnL {html.escape(_fmt_number(realized_summary.get('avg_pnl_pct'), digits=2, suffix='%'))}"
+        + f" | settled {html.escape(_fmt_count(realized_summary.get('settled_alerts')))}"
+        + f" | alerts/day {html.escape(_fmt_number(realized_summary.get('alerts_per_day_avg'), digits=1))}"
     )
     if realized_generated_at:
-        lines.append(f"📅 <b>Realized Updated:</b> {html.escape(realized_generated_at)}")
-
-    lines.append(
-        "🔁 <b>Feedback Loop:</b> "
-        + f"feedback {html.escape(_fmt_count(feedback_summary.get('training_ready_rows')))} ready"
-        + f" | train {html.escape(_fmt_count(training_summary.get('filled_rows')))} filled"
-        + f" | calibration {html.escape(_fmt_count(calibration_summary.get('filled_row_count')))}"
-        + f" | shadow {html.escape(_fmt_count(shadow_summary.get('filled_row_count')))}"
-    )
-    shadow_model_version = str(shadow_summary.get("model_version") or "").strip()
-    if shadow_model_version:
-        lines.append(f"🪞 <b>Shadow Model:</b> {html.escape(shadow_model_version)}")
+        lines.append(f"📅 <b>อัปเดตผลงาน:</b> {html.escape(realized_generated_at)}")
 
     if ranked:
-        lines.append("📌 <b>Top Candidates Now:</b>")
+        lines.append("📌 <b>ตัวเด่นตอนนี้:</b>")
         for idx, row in enumerate(ranked, start=1):
             metrics = candidate_backtest_snapshot(row)
             symbol = helpers["normalize_symbol"](row.get("symbol") or "") or "-"
@@ -1236,13 +1238,35 @@ def build_telegram_daily_summary_message(
             score = _safe_float(row.get("score"))
             wr = _safe_float(metrics.get("win_rate_pct"))
             lines.append(
-                f"{idx}. <b>{html.escape(strategy)}</b> | {html.escape(symbol)} | {html.escape(signal)} | "
-                + f"tier {html.escape(tier)} | conf {html.escape(_fmt_number(confidence, digits=0, suffix='%'))}"
+                f"{idx}. <b>{html.escape(symbol)}</b> | {html.escape(signal)} | {html.escape(strategy)}"
+                + f" | tier {html.escape(tier)}"
+                + f" | conf {html.escape(_fmt_number(confidence, digits=0, suffix='%'))}"
                 + f" | score {html.escape(_fmt_number(score, digits=1))}"
                 + f" | WR {html.escape(_fmt_number(wr, digits=1, suffix='%'))}"
             )
     else:
-        lines.append("📌 <b>Top Candidates Now:</b> ยังไม่มี candidate ที่ผ่าน gate ในรอบนี้")
+        no_candidate_reason = "-"
+        if isinstance(latest_run, dict):
+            no_candidate_reason = _top_quality_drop_counts(latest_run.get("quality_drop_counts"))
+        lines.append(
+            "📌 <b>ตัวเด่นตอนนี้:</b> ยังไม่มี candidate ที่ผ่าน gate"
+            + (f" | เหตุหลัก {html.escape(no_candidate_reason)}" if no_candidate_reason != "-" else "")
+        )
+
+    system_parts = list(runtime_parts)
+    if runtime.get("allowlist"):
+        system_parts.append(f"promote {runtime['allowlist']}")
+    shadow_model_version = str(shadow_summary.get("model_version") or "").strip()
+    if shadow_model_version:
+        system_parts.append(f"shadow {shadow_model_version}")
+    lines.append("🤖 <b>ระบบ:</b> " + " | ".join([html.escape(str(part)) for part in system_parts if str(part).strip()]))
+    lines.append(
+        "🔁 <b>Learning:</b> "
+        + f"feedback {html.escape(_fmt_count(feedback_summary.get('training_ready_rows')))} ready"
+        + f" | train {html.escape(_fmt_count(training_summary.get('filled_rows')))}"
+        + f" | calibration {html.escape(_fmt_count(calibration_summary.get('filled_row_count')))}"
+        + f" | shadow {html.escape(_fmt_count(shadow_summary.get('filled_row_count')))}"
+    )
 
     return {
         "strategy": "DAILY_SUMMARY",

@@ -1,5 +1,6 @@
 import math
 from collections import Counter
+from datetime import datetime, timedelta
 
 
 _EXIT_TRIGGERS = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
@@ -537,6 +538,297 @@ def _bars_since_signal(candidate):
     if isinstance(value, float):
         return value
     return None
+
+
+def _parse_candidate_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _candidate_timeframe_minutes(candidate):
+    if not isinstance(candidate, dict):
+        return 15
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    raw_values = [
+        candidate.get("timeframe"),
+        plan.get("timeframe"),
+        plan.get("interval"),
+        plan.get("period"),
+        candidate.get("strategy"),
+    ]
+    for raw_value in raw_values:
+        text = str(raw_value or "").strip().lower()
+        if not text:
+            continue
+        if "15m" in text or text.endswith("15"):
+            return 15
+        if "1h" in text or "60m" in text:
+            return 60
+        if "4h" in text:
+            return 240
+        if "1d" in text or text.endswith("d"):
+            return 1440
+    return 15
+
+
+def _candidate_signal_timestamp(candidate, *, analysis_dt=None):
+    if not isinstance(candidate, dict):
+        return None
+    cached = _parse_candidate_datetime(candidate.get("signal_timestamp"))
+    if isinstance(cached, datetime):
+        return cached
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    for key in ("signal_timestamp", "last_signal_time"):
+        parsed = _parse_candidate_datetime(plan.get(key))
+        if isinstance(parsed, datetime):
+            return parsed
+    bars_since = _bars_since_signal(candidate)
+    if isinstance(bars_since, float) and isinstance(analysis_dt, datetime):
+        timeframe_minutes = _candidate_timeframe_minutes(candidate)
+        try:
+            age_minutes = max(0.0, float(bars_since) * float(timeframe_minutes))
+        except Exception:
+            age_minutes = None
+        if isinstance(age_minutes, float):
+            return analysis_dt - timedelta(minutes=age_minutes)
+    return None
+
+
+def _entry_window_limits(candidate, *, config):
+    max_distance_pct = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_PCT", 2.5), 2.5)
+    max_distance_r = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_MAX_DISTANCE_R", 1.1), 1.1)
+    override = _sell_continuation_entry_window_override(candidate, config=config)
+    if isinstance(override, dict):
+        max_distance_pct = _safe_float(override.get("max_distance_pct"), max_distance_pct)
+        max_distance_r = _safe_float(override.get("max_distance_r"), max_distance_r)
+    return max_distance_pct, max_distance_r
+
+
+def _candidate_max_chase_price(candidate, *, config):
+    metrics = _plan_price_metrics(candidate)
+    entry_price = _safe_float(metrics.get("entry_price"), None)
+    stop_loss = _safe_float(metrics.get("stop_loss"), None)
+    if entry_price is None or entry_price == 0:
+        return None
+    signal = _signal_side(candidate)
+    if signal not in {"BUY", "SELL"}:
+        return None
+    max_distance_pct, max_distance_r = _entry_window_limits(candidate, config=config)
+    price_from_pct = None
+    if isinstance(max_distance_pct, float):
+        if signal == "BUY":
+            price_from_pct = float(entry_price) * (1.0 + (float(max_distance_pct) / 100.0))
+        else:
+            price_from_pct = float(entry_price) * (1.0 - (float(max_distance_pct) / 100.0))
+    price_from_r = None
+    if isinstance(stop_loss, float) and not math.isclose(float(stop_loss), float(entry_price), rel_tol=1e-9, abs_tol=1e-9):
+        risk = abs(float(entry_price) - float(stop_loss))
+        if risk > 0 and isinstance(max_distance_r, float):
+            if signal == "BUY":
+                price_from_r = float(entry_price) + (risk * float(max_distance_r))
+            else:
+                price_from_r = float(entry_price) - (risk * float(max_distance_r))
+    if signal == "BUY":
+        prices = [price for price in (price_from_pct, price_from_r) if isinstance(price, float)]
+        return min(prices) if prices else None
+    prices = [price for price in (price_from_pct, price_from_r) if isinstance(price, float)]
+    return max(prices) if prices else None
+
+
+def _candidate_dispatch_status(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason_group": "ข้อมูลไม่ครบ",
+            "reason_detail": "ยังไม่มีข้อมูลพอสำหรับประเมินจุดเข้า",
+        }
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    signal = _signal_side(candidate)
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+    continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+    plan_reason = str(plan.get("reason") or "").strip().lower()
+    exit_like = (
+        intent == "exit"
+        and continuation_mode not in {"entry", "watch"}
+        and (
+            trigger in _EXIT_TRIGGERS
+            or any(phrase in plan_reason for phrase in _EXIT_REASON_PHRASES)
+        )
+    )
+    if exit_like:
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "สัญญาณปิดรอบ",
+            "reason_detail": "เป็น exit/take-profit/time-stop ใช้ปิดสถานะเดิม ไม่ใช่จุดเปิดไม้ใหม่",
+        }
+
+    metrics = _plan_price_metrics(candidate)
+    entry_price = _safe_float(metrics.get("entry_price"), None)
+    stop_loss = _safe_float(metrics.get("stop_loss"), None)
+    rr_ratio = _safe_float(metrics.get("rr_ratio"), None)
+    if entry_price is None or stop_loss is None:
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "ระดับราคาไม่ครบ",
+            "reason_detail": "ไม่มี Entry/SL ที่ชัดพอสำหรับเปิดไม้",
+        }
+    if isinstance(rr_ratio, float) and rr_ratio < 1.0:
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "RR ต่ำเกินไป",
+            "reason_detail": f"reward/risk ปัจจุบัน {rr_ratio:.2f}R ยังไม่คุ้มสำหรับเล่นสั้น",
+        }
+
+    in_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
+    if in_window is False:
+        if isinstance(distance_pct, float):
+            detail = f"ราคาห่าง entry {distance_pct:.2f}% แล้ว จึงไม่ควรไล่ราคา"
+        elif isinstance(distance_r, float):
+            detail = f"ราคาห่าง entry {distance_r:.2f}R แล้ว จึงควรรอราคากลับเข้าโซน"
+        else:
+            detail = "ราคาห่างจาก entry zone เกินกรอบที่ตั้งไว้"
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason_group": "ราคาหนีจุดเข้า",
+            "reason_detail": detail,
+        }
+
+    entry_ai_bucket = str(candidate.get("entry_ai_bucket") or "").strip().lower()
+    entry_ai_reason = str(candidate.get("entry_ai_reason") or "").strip()
+    if entry_ai_bucket == "avoid":
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "Entry AI ปฏิเสธ",
+            "reason_detail": entry_ai_reason or "Entry AI ประเมินว่าจุดเข้ายังไม่คุ้ม",
+        }
+    if entry_ai_bucket == "watch":
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason_group": "ยังเป็น watch setup",
+            "reason_detail": entry_ai_reason or "ยังไม่ถึงจังหวะเข้า ให้รอเงื่อนไขครบกว่านี้",
+        }
+
+    short_trade_bucket = str(candidate.get("short_trade_bucket") or "").strip().lower()
+    short_trade_reason = str(candidate.get("short_trade_reason") or "").strip()
+    if short_trade_bucket == "watch" or intent == "watch":
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason_group": "คุณภาพจังหวะยังไม่ครบ",
+            "reason_detail": short_trade_reason or "แผนยังอยู่ในโหมดเฝ้าดู ต้องรอจังหวะเข้าเพิ่ม",
+        }
+
+    if signal in {"BUY", "SELL"}:
+        return {
+            "label": "เข้าได้",
+            "icon": "🟢",
+            "reason_group": "เข้าใกล้ entry zone",
+            "reason_detail": "ราคาและโครงสร้างยังอยู่ในกรอบที่เข้าตามแผนได้",
+        }
+    return {
+        "label": "รอ",
+        "icon": "🟡",
+        "reason_group": "ยังไม่ยืนยันทิศทาง",
+        "reason_detail": "ต้องรอการยืนยันทิศทางเพิ่มเติมก่อนเปิดไม้",
+    }
+
+
+def _attach_candidate_timing(candidate, *, analysis_dt=None):
+    if not isinstance(candidate, dict):
+        return candidate
+    if isinstance(analysis_dt, datetime):
+        candidate["analysis_generated_at"] = analysis_dt.strftime("%Y-%m-%d %H:%M:%S")
+    signal_dt = _candidate_signal_timestamp(candidate, analysis_dt=analysis_dt)
+    if isinstance(signal_dt, datetime):
+        candidate["signal_timestamp"] = signal_dt.strftime("%Y-%m-%d %H:%M:%S")
+    timeframe_minutes = _candidate_timeframe_minutes(candidate)
+    candidate["timeframe_minutes"] = int(timeframe_minutes)
+    bars_since = _bars_since_signal(candidate)
+    if isinstance(bars_since, float):
+        candidate["bars_since_signal"] = float(bars_since)
+        candidate["signal_age_bars_at_analysis"] = float(bars_since)
+    if isinstance(signal_dt, datetime) and isinstance(analysis_dt, datetime):
+        latency_seconds = max(0.0, (analysis_dt - signal_dt).total_seconds())
+        candidate["analysis_latency_seconds"] = float(latency_seconds)
+        candidate["signal_age_minutes_at_analysis"] = float(latency_seconds) / 60.0
+    return candidate
+
+
+def _append_dispatch_readiness_lines(message, candidate, *, config):
+    if not isinstance(message, str) or not message.strip() or not isinstance(candidate, dict):
+        return message
+    status = _candidate_dispatch_status(candidate, config=config)
+    candidate["dispatch_status_label"] = str(status.get("label") or "").strip() or None
+    candidate["dispatch_status_reason_group"] = str(status.get("reason_group") or "").strip() or None
+    candidate["dispatch_status_reason_detail"] = str(status.get("reason_detail") or "").strip() or None
+
+    if "<b>🧭 หมวดเหตุผล:</b>" not in message:
+        label = str(status.get("label") or "").strip()
+        reason_group = str(status.get("reason_group") or "").strip()
+        if label or reason_group:
+            reason_line = " ".join(part for part in (label, reason_group) if part).strip()
+            if reason_line:
+                message = _insert_message_line_before_footer(message, "<b>🧭 หมวดเหตุผล:</b> " + reason_line)
+    if "<b>📝 เหตุผลใช้งาน:</b>" not in message:
+        reason_detail = str(status.get("reason_detail") or "").strip()
+        if reason_detail:
+            message = _insert_message_line_before_footer(message, "<b>📝 เหตุผลใช้งาน:</b> " + reason_detail)
+
+    metrics = _plan_price_metrics(candidate)
+    entry_price = _safe_float(metrics.get("entry_price"), None)
+    max_distance_pct, max_distance_r = _entry_window_limits(candidate, config=config)
+    max_chase_price = _candidate_max_chase_price(candidate, config=config)
+    candidate["entry_window_max_distance_pct"] = float(max_distance_pct) if isinstance(max_distance_pct, float) else None
+    candidate["entry_window_max_distance_r"] = float(max_distance_r) if isinstance(max_distance_r, float) else None
+    candidate["max_chase_price"] = float(max_chase_price) if isinstance(max_chase_price, float) else None
+    if "<b>🎯 Entry Window:</b>" not in message:
+        parts = []
+        if isinstance(entry_price, float):
+            parts.append(f"Entry {entry_price:,.6f}".rstrip("0").rstrip("."))
+        if isinstance(max_distance_pct, float):
+            parts.append(f"ใกล้ entry ไม่เกิน {max_distance_pct:.2f}%")
+        if isinstance(max_distance_r, float):
+            parts.append(f"หรือ {max_distance_r:.2f}R")
+        if parts:
+            message = _insert_message_line_before_footer(message, "<b>🎯 Entry Window:</b> " + " | ".join(parts))
+    if "<b>🏃 Max Chase:</b>" not in message and isinstance(max_chase_price, float):
+        if _signal_side(candidate) == "SELL":
+            chase_text = f"SELL ไม่ควรไล่ต่ำกว่า {max_chase_price:,.6f}".rstrip("0").rstrip(".")
+        else:
+            chase_text = f"BUY ไม่ควรไล่สูงกว่า {max_chase_price:,.6f}".rstrip("0").rstrip(".")
+        message = _insert_message_line_before_footer(message, "<b>🏃 Max Chase:</b> " + chase_text)
+
+    if "<b>⏱️ อายุสัญญาณ:</b>" not in message:
+        timeframe_minutes = int(candidate.get("timeframe_minutes") or _candidate_timeframe_minutes(candidate))
+        age_parts = []
+        bars_since = _safe_float(candidate.get("signal_age_bars_at_analysis"), _bars_since_signal(candidate))
+        if isinstance(bars_since, float):
+            age_parts.append(f"{int(round(bars_since))} แท่ง {timeframe_minutes}m")
+            age_parts.append(f"~{int(round(bars_since * timeframe_minutes))} นาที")
+        signal_timestamp = str(candidate.get("signal_timestamp") or "").strip()
+        if signal_timestamp:
+            age_parts.append(signal_timestamp)
+        if age_parts:
+            message = _insert_message_line_before_footer(message, "<b>⏱️ อายุสัญญาณ:</b> " + " | ".join(age_parts))
+    return message
 
 
 def _sell_continuation_entry_window_override(candidate, *, config):
@@ -1151,6 +1443,7 @@ def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, ru
     if not isinstance(market_regime, dict):
         market_regime = build_market_regime_snapshot(results or [])
     symbol_regime_cache = dict((regime_context or {}).get("symbol_map") or {})
+    analysis_dt = _parse_candidate_datetime((runtime_context or {}).get("generated_at")) if isinstance(runtime_context, dict) else None
     return {
         "results": results or [],
         "min_conf": float(min_conf),
@@ -1166,6 +1459,7 @@ def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, ru
         "regime_context": regime_context if isinstance(regime_context, dict) else {},
         "market_regime": market_regime if isinstance(market_regime, dict) else {},
         "symbol_regime_cache": symbol_regime_cache,
+        "analysis_dt": analysis_dt,
     }
 
 def get_symbol_regime(context, item):
@@ -1207,7 +1501,9 @@ def append_candidate(context, row):
     if isinstance(confidence, float) and confidence < float(context["min_conf"]) + float(uplift):
         context["quality_drop_counts"]["regime_min_confidence_not_met"] += 1
         return
-    context["candidates"].append(adjusted if isinstance(adjusted, dict) else row)
+    candidate_row = adjusted if isinstance(adjusted, dict) else row
+    candidate_row = _attach_candidate_timing(candidate_row, analysis_dt=context.get("analysis_dt"))
+    context["candidates"].append(candidate_row)
 
 
 def add_quality_drop(context, reason, *, prefix=None):
@@ -1273,6 +1569,11 @@ def finalize_candidates(context):
         if callable(score_candidate_with_live_entry_ai):
             candidate = score_candidate_with_live_entry_ai(candidate)
         candidate = attach_entry_ai_context(candidate, config=context["config"])
+        candidate["message"] = _append_dispatch_readiness_lines(
+            candidate.get("message"),
+            candidate,
+            config=context["config"],
+        )
         if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
             context["quality_drop_counts"][str(candidate.get("short_trade_reason") or "short_trade_avoid")] += 1
             continue

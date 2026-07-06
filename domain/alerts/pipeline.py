@@ -398,6 +398,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     )
     primary_dispatch = dispatch_primary_candidates(
         dispatch_candidates,
+        get_now=get_now,
         send_telegram_alert=send_telegram_alert,
         telegram_alert_cache=telegram_alert_cache,
         record_telegram_alert_history=record_telegram_alert_history,
@@ -441,6 +442,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             daily_summary = build_daily_summary_message(results, existing_candidates=candidates, min_conf=dynamic_min_conf)
             if dispatch_daily_summary(
                 daily_summary,
+                get_now=get_now,
                 send_telegram_alert=send_telegram_alert,
                 telegram_alert_cache=telegram_alert_cache,
                 record_telegram_alert_history=record_telegram_alert_history,
@@ -473,6 +475,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         )
         trend_radar_dispatch = dispatch_trend_radar_candidates(
             trend_radar_dispatch_candidates,
+            get_now=get_now,
             send_telegram_alert=send_telegram_alert,
             telegram_alert_cache=telegram_alert_cache,
             record_telegram_alert_history=record_telegram_alert_history,
@@ -497,6 +500,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         trend_state_cooldown_minutes = coerce_int(getattr(config, "TREND_STATE_ALERT_COOLDOWN_MINUTES", 360), 360)
         trend_state_dispatch = dispatch_trend_state_candidates(
             trend_state_candidates,
+            get_now=get_now,
             send_telegram_alert=send_telegram_alert,
             telegram_alert_cache=telegram_alert_cache,
             record_telegram_alert_history=record_telegram_alert_history,

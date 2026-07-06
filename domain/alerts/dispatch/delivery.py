@@ -1,9 +1,41 @@
 from domain.alerts.dispatch.cache_policy import build_daily_pick_cache_key, cache_contains, cache_mark_sent
 
+from datetime import datetime
+
+
+def _parse_candidate_datetime(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+        try:
+            return datetime.strptime(text, fmt)
+        except Exception:
+            continue
+    return None
+
+
+def _mark_candidate_sent(candidate, *, get_now):
+    if not isinstance(candidate, dict) or not callable(get_now):
+        return candidate
+    sent_dt = get_now()
+    if not isinstance(sent_dt, datetime):
+        return candidate
+    candidate["telegram_sent_at"] = sent_dt.strftime("%Y-%m-%d %H:%M:%S")
+    analysis_dt = _parse_candidate_datetime(candidate.get("analysis_generated_at"))
+    signal_dt = _parse_candidate_datetime(candidate.get("signal_timestamp"))
+    if isinstance(analysis_dt, datetime):
+        candidate["analysis_to_send_seconds"] = max(0.0, (sent_dt - analysis_dt).total_seconds())
+    if isinstance(signal_dt, datetime):
+        candidate["signal_latency_seconds"] = max(0.0, (sent_dt - signal_dt).total_seconds())
+        candidate["signal_age_minutes_at_send"] = float(candidate["signal_latency_seconds"]) / 60.0
+    return candidate
+
 
 def dispatch_primary_candidates(
     candidates,
     *,
+    get_now,
     send_telegram_alert,
     telegram_alert_cache,
     record_telegram_alert_history,
@@ -39,6 +71,7 @@ def dispatch_primary_candidates(
             cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=limits["cooldown_ttl"])
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
+            _mark_candidate_sent(candidate, get_now=get_now)
             sent_candidates.append(candidate)
             record_telegram_alert_history(
                 candidate,
@@ -87,6 +120,7 @@ def dispatch_daily_candidates(
         if isinstance(daily_message, str) and daily_message.strip() and send_telegram_alert(daily_message):
             cache_mark_sent(telegram_alert_cache, daily_key, ttl_seconds=26 * 60 * 60)
             sent += 1
+            _mark_candidate_sent(daily_candidate, get_now=get_now)
             sent_candidates.append(daily_candidate)
             if daily_symbol:
                 per_symbol_sent[daily_symbol] = int(per_symbol_sent.get(daily_symbol, 0)) + 1
@@ -106,6 +140,7 @@ def dispatch_daily_candidates(
 def dispatch_daily_summary(
     daily_summary,
     *,
+    get_now,
     send_telegram_alert,
     telegram_alert_cache,
     record_telegram_alert_history,
@@ -124,6 +159,7 @@ def dispatch_daily_summary(
     if not send_telegram_alert(daily_message):
         return False
     cache_mark_sent(telegram_alert_cache, daily_key, ttl_seconds=26 * 60 * 60)
+    _mark_candidate_sent(daily_summary, get_now=get_now)
     record_telegram_alert_history(
         daily_summary,
         min_conf=limits["min_conf"],
@@ -136,6 +172,7 @@ def dispatch_daily_summary(
 def dispatch_trend_state_candidates(
     trend_state_candidates,
     *,
+    get_now,
     send_telegram_alert,
     telegram_alert_cache,
     record_telegram_alert_history,
@@ -177,6 +214,7 @@ def dispatch_trend_state_candidates(
         if symbol:
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
         sent += 1
+        _mark_candidate_sent(candidate, get_now=get_now)
         sent_candidates.append(candidate)
         record_telegram_alert_history(
             candidate,
@@ -198,6 +236,7 @@ def dispatch_trend_state_candidates(
 def dispatch_trend_radar_candidates(
     trend_radar_candidates,
     *,
+    get_now,
     send_telegram_alert,
     telegram_alert_cache,
     record_telegram_alert_history,
@@ -242,6 +281,7 @@ def dispatch_trend_radar_candidates(
         if symbol:
             per_symbol_sent[symbol] = existing_symbol_alerts + 1
         sent += 1
+        _mark_candidate_sent(candidate, get_now=get_now)
         sent_candidates.append(candidate)
         record_telegram_alert_history(
             candidate,

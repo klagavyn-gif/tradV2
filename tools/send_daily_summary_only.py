@@ -121,6 +121,7 @@ def main(argv=None):
             sent = bool(
                 dispatch_daily_summary(
                     daily_summary,
+                    get_now=trad.get_thai_now,
                     send_telegram_alert=trad.send_telegram_alert,
                     telegram_alert_cache=trad._TELEGRAM_ALERT_CACHE,
                     record_telegram_alert_history=trad._record_telegram_alert_history,

@@ -950,20 +950,17 @@ def _aggregate_summary_observations(observations):
         wr = row.get("win_rate_pct")
         exp = row.get("expectancy_rr")
         trades = row.get("trades")
-        conf = row.get("confidence")
         if isinstance(trades, (int, float)) and math.isfinite(float(trades)) and float(trades) > 0:
             weight = float(trades)
             total_trades += weight
-        elif isinstance(conf, (int, float)) and math.isfinite(float(conf)) and float(conf) > 0:
-            weight = max(1.0, float(conf) / 20.0)
         else:
-            weight = 1.0
+            weight = 0.0
         has_metric = False
-        if isinstance(wr, (int, float)) and math.isfinite(float(wr)):
+        if weight > 0 and isinstance(wr, (int, float)) and math.isfinite(float(wr)):
             total_wr_value += float(wr) * weight
             total_wr_weight += weight
             has_metric = True
-        if isinstance(exp, (int, float)) and math.isfinite(float(exp)):
+        if weight > 0 and isinstance(exp, (int, float)) and math.isfinite(float(exp)):
             total_exp_value += float(exp) * weight
             total_exp_weight += weight
             has_metric = True
@@ -1080,7 +1077,7 @@ def _build_strategy_summary_observations(item, min_conf=None):
                 {
                     "win_rate_pct": best_obs.get("estimated_win_rate_pct"),
                     "expectancy_rr": best_obs.get("average_expectancy_rr"),
-                    "trades": best_obs.get("total_historical_trades") or len(ss_rows),
+                    "trades": best_obs.get("total_historical_trades"),
                 },
                 confidence=_get_best_confidence(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc),
                 symbol=symbol,
@@ -1174,7 +1171,7 @@ def _build_strategy_summary_observations(item, min_conf=None):
                 {
                     "win_rate_pct": agg.get("estimated_win_rate_pct"),
                     "expectancy_rr": agg.get("average_expectancy_rr"),
-                    "trades": agg.get("total_historical_trades") or len(source_rows),
+                    "trades": agg.get("total_historical_trades"),
                 },
                 confidence=_get_best_confidence(item, signal=signal_hint, require_quality=False, allow_cdc=allow_cdc),
                 symbol=symbol,
@@ -2898,6 +2895,52 @@ def _append_trade_decision_lines_legacy(lines, plan, *, signal=None, strategy_la
         lines.append(f"<b>🚦 สถานะ:</b> {_html_escape(icon + ' ' + label)}")
     if reason:
         lines.append(f"<b>📝 Decision:</b> {_html_escape(reason)}")
+    return {
+        "label": label,
+        "reason": reason,
+        "icon": icon,
+    }
+
+
+def _harmonize_action_guidance_legacy(action_guidance, decision, *, signal=None):
+    guidance = dict(action_guidance) if isinstance(action_guidance, dict) else {}
+    decision = decision if isinstance(decision, dict) else {}
+    label = str(decision.get("label") or "").strip()
+    reason = str(decision.get("reason") or "").strip()
+    action_code = str(guidance.get("action_code") or "").strip().upper()
+    signal_text = str(signal or guidance.get("signal") or "BUY").strip().upper()
+
+    if label == "เข้าได้":
+        if signal_text == "SELL":
+            guidance["action_code"] = "ENTRY SHORT"
+            guidance["primary_text"] = "เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด SELL/Short ตามแผนได้"
+            guidance.setdefault("note_text", "วาง SL/TP ตามแผน และไม่ไล่ราคา")
+        else:
+            guidance["action_code"] = "ENTRY BUY"
+            guidance["primary_text"] = "เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด BUY/Long ตามแผนได้"
+            guidance.setdefault("note_text", "วาง SL/TP ตามแผน และไม่ไล่ราคา")
+        return guidance
+
+    if label == "รอ":
+        guidance["action_code"] = f"WATCH {signal_text}"
+        guidance["primary_text"] = "ยังไม่เข้า รอราคาใกล้ entry zone หรือรอแท่งยืนยันเพิ่ม"
+        guidance["note_text"] = reason or "ยังไม่ใช่จังหวะเปิดไม้ใหม่ทันที"
+        return guidance
+
+    if label == "ห้ามเข้า":
+        if action_code.startswith("EXIT"):
+            guidance["primary_text"] = "สัญญาณนี้ใช้ปิดกำไรหรือลดความเสี่ยง ไม่ใช่จุดเปิดไม้ใหม่"
+            guidance["note_text"] = "ถ้าไม่มีสถานะอยู่แล้วให้ข้ามข้อความนี้"
+        elif action_code == "SELL / RISK-OFF":
+            guidance["primary_text"] = "สัญญาณนี้ใช้ลดความเสี่ยงหรือปิดสถานะเดิมก่อน"
+            guidance["note_text"] = "ถ้าไม่มีสถานะอยู่แล้วให้ข้ามข้อความนี้"
+        else:
+            guidance["action_code"] = f"NO ENTRY {signal_text}"
+            guidance["primary_text"] = "ข้ามสัญญาณนี้"
+            guidance["note_text"] = reason or "reward/risk หรือจุดเข้ายังไม่คุ้ม"
+        return guidance
+
+    return guidance
 
 
 def _build_actionzone_message(item, az_plan):
@@ -2963,7 +3006,7 @@ def _build_actionzone_message(item, az_plan):
         source_label="ActionZone 15m",
         symbol=symbol,
     )
-    _append_trade_decision_lines_legacy(
+    decision = _append_trade_decision_lines_legacy(
         lines,
         az_plan,
         signal=signal,
@@ -2972,6 +3015,7 @@ def _build_actionzone_message(item, az_plan):
         current_price=curr_price,
     )
     if isinstance(action_guidance, dict):
+        action_guidance = _harmonize_action_guidance_legacy(action_guidance, decision, signal=signal)
         lines.append("<b>🎯 Action:</b> " + _html_escape(str(action_guidance.get("primary_text") or "")))
         note_text = str(action_guidance.get("note_text") or "").strip()
         if note_text:
@@ -3077,7 +3121,7 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         source_label="CDC+VixFix 15m",
         symbol=symbol,
     )
-    _append_trade_decision_lines_legacy(
+    decision = _append_trade_decision_lines_legacy(
         lines,
         plan,
         signal=signal,
@@ -3086,6 +3130,7 @@ def _build_cdc_vixfix_message(item, plan, mode_label=None):
         current_price=plan.get("current_price", item.get("price")),
     )
     if isinstance(action_guidance, dict):
+        action_guidance = _harmonize_action_guidance_legacy(action_guidance, decision, signal=signal)
         lines.append("<b>🎯 Action:</b> " + _html_escape(str(action_guidance.get("primary_text") or "")))
         note_text = str(action_guidance.get("note_text") or "").strip()
         if note_text:
@@ -4320,14 +4365,15 @@ def _build_alert_backtest_summary(results, min_conf=None):
         wr = edge.get("win_rate_pct")
         exp = edge.get("expectancy_rr")
         trades = edge.get("trades")
+        has_historical_trades = isinstance(trades, (int, float)) and math.isfinite(float(trades)) and float(trades) > 0
         alert_entry = {
             "symbol": str(candidate.get("symbol") or ""),
             "strategy": strategy,
             "signal": str(candidate.get("signal") or ""),
             "confidence": float(confidence) if isinstance(confidence, (int, float)) else None,
-            "historical_trades": int(trades) if isinstance(trades, (int, float)) else None,
-            "historical_win_rate_pct": float(wr) if isinstance(wr, (int, float)) else None,
-            "expectancy_rr": float(exp) if isinstance(exp, (int, float)) else None,
+            "historical_trades": int(trades) if has_historical_trades else 0,
+            "historical_win_rate_pct": float(wr) if has_historical_trades and isinstance(wr, (int, float)) else None,
+            "expectancy_rr": float(exp) if has_historical_trades and isinstance(exp, (int, float)) else None,
         }
         alerts.append(alert_entry)
         bucket = by_strategy.setdefault(

@@ -388,6 +388,7 @@
                 container.innerHTML = '<div class="empty-state">ยังไม่มีสรุปผลวิเคราะห์ในรอบนี้</div>';
                 return;
             }
+            const rawActionableCount = Number(summary.raw_actionable_count ?? summary.actionable_count ?? 0);
             const topSignal = summary.top_signal || null;
             const dominantSignal = String(summary.dominant_signal || 'WAIT').toUpperCase();
             let dominantText = 'รอสัญญาณเพิ่ม';
@@ -401,8 +402,8 @@
                         <strong>${summary.success_count}/${summary.requested_count}</strong>
                     </div>
                     <div class="summary-metric">
-                        <span>พร้อมเทรด</span>
-                        <strong>${summary.actionable_count}</strong>
+                        <span>สัญญาณดิบ BUY/SELL</span>
+                        <strong>${rawActionableCount}</strong>
                     </div>
                     <div class="summary-metric">
                         <span>BUY / SELL / WAIT</span>

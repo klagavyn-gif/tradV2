@@ -146,7 +146,7 @@ def build_analysis_summary(
     buy_count = 0
     sell_count = 0
     wait_count = 0
-    actionable = []
+    raw_actionable = []
     errors = []
     for item in returned:
         if not isinstance(item, dict):
@@ -173,7 +173,7 @@ def build_analysis_summary(
         else:
             wait_count += 1
         if signal in ("BUY", "SELL"):
-            actionable.append(
+            raw_actionable.append(
                 {
                     "symbol": symbol,
                     "name": str(item.get("name") or "").strip(),
@@ -185,7 +185,7 @@ def build_analysis_summary(
                     "change": float(item.get("change")) if isinstance(item.get("change"), (int, float)) else None,
                 }
             )
-    actionable.sort(
+    raw_actionable.sort(
         key=lambda item: (
             float(item.get("confidence") or 0.0),
             abs(float(item.get("change") or 0.0)),
@@ -210,13 +210,13 @@ def build_analysis_summary(
         "success_count": success_count,
         "error_count": error_count,
         "success_rate_pct": success_rate_pct,
-        "actionable_count": len(actionable),
+        "raw_actionable_count": len(raw_actionable),
         "buy_count": buy_count,
         "sell_count": sell_count,
         "wait_count": wait_count,
         "dominant_signal": dominant_signal,
         "period": str(period or ""),
-        "top_signal": actionable[0] if actionable else None,
-        "action_queue": actionable[:5],
+        "top_signal": raw_actionable[0] if raw_actionable else None,
+        "action_queue": raw_actionable[:5],
         "errors": errors[:3],
     }

@@ -1,4 +1,6 @@
 name: Telegram Alerts
+run-name: >-
+  Telegram Alerts [retry=${{ github.event.inputs.retry_attempt || '0' }}]
 
 on:
   workflow_dispatch:
@@ -11,6 +13,18 @@ on:
         description: Period (15m, 1h, 1d, 5d, 1mo, 3mo, 6mo, 1y, ytd)
         required: true
         default: "15m"
+      retry_attempt:
+        description: Internal retry counter for hosted runner recovery
+        required: false
+        default: "0"
+      retry_source_run_id:
+        description: Original workflow run id that triggered retry
+        required: false
+        default: ""
+      retry_reason:
+        description: Internal retry reason
+        required: false
+        default: ""
   schedule:
     - cron: "*/15 * * * *"
     - cron: "5,10,20,25 2 * * *"

@@ -1,0 +1,109 @@
+name: Retry Hosted Runner Failures
+run-name: >-
+  Retry hosted runner failure for ${{ github.event.workflow_run.name }}
+
+on:
+  workflow_run:
+    workflows:
+      - Telegram Alerts
+      - Telegram Daily Summary
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: retry-hosted-runner-failures-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+
+jobs:
+  retry:
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Wait before retry dispatch
+        run: sleep 180
+
+      - name: Retry hosted runner acquisition failures
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const run = context.payload.workflow_run;
+
+            const maxRetryAttempts = 2;
+            const displayTitle = String(run.display_title || "");
+            const retryMatch = displayTitle.match(/\[retry=(\d+)\]/);
+            const retryAttempt = retryMatch ? Number.parseInt(retryMatch[1], 10) : 0;
+
+            if (retryAttempt >= maxRetryAttempts) {
+              core.info(`Skip retry: retry_attempt=${retryAttempt} already reached limit ${maxRetryAttempts}.`);
+              return;
+            }
+
+            const jobs = await github.paginate(
+              github.rest.actions.listJobsForWorkflowRunAttempt,
+              {
+                owner,
+                repo,
+                run_id: run.id,
+                attempt_number: run.run_attempt,
+                per_page: 100,
+              },
+            );
+
+            core.info(`Found ${jobs.length} jobs for workflow run ${run.id}.`);
+
+            const infraFailureSignals = jobs.filter((job) => {
+              const steps = Array.isArray(job.steps) ? job.steps : [];
+              const hasRunner = Boolean(job.runner_name || job.runner_id);
+              const hasRealSteps = steps.length > 0;
+              return !hasRunner && !hasRealSteps;
+            });
+
+            if (infraFailureSignals.length === 0) {
+              core.info("Skip retry: failure does not look like hosted runner acquisition issue.");
+              return;
+            }
+
+            const workflowFileByName = {
+              "Telegram Alerts": "main.yml",
+              "Telegram Daily Summary": "daily-summary.yml",
+            };
+
+            const workflowId = workflowFileByName[run.name];
+            if (!workflowId) {
+              core.info(`Skip retry: unsupported workflow name ${run.name}.`);
+              return;
+            }
+
+            const defaultSymbols = "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD";
+            const inputs = {
+              symbols: defaultSymbols,
+              period: "15m",
+              retry_attempt: String(retryAttempt + 1),
+              retry_source_run_id: String(run.id),
+              retry_reason: "hosted_runner_acquisition_failure",
+            };
+
+            if (run.name === "Telegram Daily Summary") {
+              if (run.event === "schedule") {
+                inputs.force = "true";
+              }
+            }
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: workflowId,
+              ref: run.head_branch || context.payload.repository.default_branch,
+              inputs,
+            });
+
+            core.info(
+              `Dispatched ${run.name} retry ${retryAttempt + 1} from source run ${run.id} on ref ${run.head_branch || context.payload.repository.default_branch}.`,
+            );

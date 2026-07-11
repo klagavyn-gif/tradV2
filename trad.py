@@ -2300,9 +2300,31 @@ def _all_weather_plan_candidates(item, regime):
         confidence = _plan_confidence_value(plan)
         if not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
             continue
-        gate_ok, _, edge = _evaluate_entry_quality_gate(plan, direction)
+        gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(plan, direction)
+        aw_gate_relaxed = False
+        aw_score_penalty = 0.0
         if not gate_ok:
-            continue
+            relax_cdc_trades = bool(getattr(config, "ALL_WEATHER_15M_CDC_RELAX_TRADES_BELOW_MIN", True))
+            relax_min_conf = getattr(config, "ALL_WEATHER_15M_CDC_RELAX_MIN_CONFIDENCE", 82.0)
+            relax_penalty = getattr(config, "ALL_WEATHER_15M_CDC_RELAX_SCORE_PENALTY", 6.0)
+            try:
+                relax_min_conf = float(relax_min_conf)
+            except Exception:
+                relax_min_conf = 82.0
+            try:
+                relax_penalty = max(0.0, float(relax_penalty))
+            except Exception:
+                relax_penalty = 6.0
+            # Let high-confidence CDC setups survive low-history gating, but score them lower.
+            if not (
+                label == "CDCVixFix"
+                and relax_cdc_trades
+                and str(gate_reason or "").strip().lower() == "trades_below_min"
+                and float(confidence) >= float(relax_min_conf)
+            ):
+                continue
+            aw_gate_relaxed = True
+            aw_score_penalty = float(relax_penalty)
         bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
         win_rate = edge.get("win_rate_pct")
         expectancy = edge.get("expectancy_rr")
@@ -2311,6 +2333,7 @@ def _all_weather_plan_candidates(item, regime):
         freshness_bonus = _all_weather_freshness_bonus(bars_since)
         regime_weight = _all_weather_regime_weight(label, regime)
         score = float(confidence) + metrics_bonus + freshness_bonus + ((float(regime_weight) - 1.0) * 16.0)
+        score -= float(aw_score_penalty)
         candidates.append(
             {
                 "label": label,
@@ -2324,6 +2347,9 @@ def _all_weather_plan_candidates(item, regime):
                 "regime_weight": float(regime_weight),
                 "metrics_bonus": float(metrics_bonus),
                 "freshness_bonus": float(freshness_bonus),
+                "aw_gate_reason": str(gate_reason or "pass"),
+                "aw_gate_relaxed": bool(aw_gate_relaxed),
+                "aw_score_penalty": float(aw_score_penalty),
                 "score": float(score),
             }
         )
@@ -2423,6 +2449,9 @@ def _build_all_weather_report_entry(item, min_conf=None):
             "regime_weight": float(row.get("regime_weight", 1.0)),
             "metrics_bonus": float(row.get("metrics_bonus", 0.0)),
             "freshness_bonus": float(row.get("freshness_bonus", 0.0)),
+            "aw_gate_reason": str(row.get("aw_gate_reason") or "pass"),
+            "aw_gate_relaxed": bool(row.get("aw_gate_relaxed")),
+            "aw_score_penalty": float(row.get("aw_score_penalty", 0.0)),
             "win_rate_pct": float(row.get("win_rate_pct")) if isinstance(row.get("win_rate_pct"), (int, float)) else None,
             "expectancy_rr": float(row.get("expectancy_rr")) if isinstance(row.get("expectancy_rr"), (int, float)) else None,
             "trades": int(row.get("trades")) if isinstance(row.get("trades"), (int, float)) else None,

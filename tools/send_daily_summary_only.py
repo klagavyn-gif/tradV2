@@ -3,14 +3,11 @@ import json
 from pathlib import Path
 
 from application.services.service_support import (
-    analyze_symbols_batch,
-    get_telegram_alert_min_confidence,
     max_symbols_per_request,
     parse_symbols_input,
 )
 from domain.alerts.dispatch.cache_policy import cache_contains
 from domain.alerts.dispatch.delivery import dispatch_daily_summary
-from domain.alerts.dispatch.throttling import resolve_dispatch_settings
 
 
 def build_parser():
@@ -29,6 +26,29 @@ def _write_json(output_path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return str(path)
+
+
+def _read_json(path_text):
+    path = Path(str(path_text or "").strip())
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _load_summary_candidates(trad):
+    latest_run = _read_json(trad._alert_run_report_file_path())
+    if not isinstance(latest_run, dict):
+        return [], {}
+    for key in ("top_candidates", "raw_top_candidates"):
+        rows = latest_run.get(key)
+        if isinstance(rows, list):
+            candidates = [row for row in rows if isinstance(row, dict)]
+            if candidates:
+                return candidates, latest_run
+    return [], latest_run
 
 
 def main(argv=None):
@@ -85,26 +105,28 @@ def main(argv=None):
         print(json.dumps(payload, ensure_ascii=False))
         return 0
 
-    results = analyze_symbols_batch(
-        symbols,
-        period,
-        include_chart_data=False,
-        analyze_single_symbol=trad.analyze_single_symbol,
-        executor=trad._ANALYZE_EXECUTOR,
-        repeat_values=trad.repeat,
-    )
-    base_min_conf = get_telegram_alert_min_confidence(trad.config)
-    runtime_context = trad._build_alert_runtime_context(results, base_min_conf)
-    limits = resolve_dispatch_settings(trad.config, runtime_context)
-    dynamic_min_conf = float(limits["dynamic_min_conf"])
-    candidates, build_stats = trad._build_telegram_candidates(
-        results,
-        dynamic_min_conf,
-        runtime_context=runtime_context,
-    )
+    existing_candidates, latest_run = _load_summary_candidates(trad)
+    latest_run_budget = latest_run.get("alert_budget") if isinstance(latest_run.get("alert_budget"), dict) else {}
+    min_conf = latest_run.get("min_confidence")
+    if not isinstance(min_conf, (int, float)):
+        min_conf = getattr(trad.config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
+    min_conf = float(min_conf)
+    dynamic_min_conf = latest_run.get("dynamic_min_confidence")
+    if not isinstance(dynamic_min_conf, (int, float)):
+        dynamic_min_conf = min_conf
+    if not isinstance(dynamic_min_conf, (int, float)):
+        dynamic_min_conf = getattr(trad.config, "TELEGRAM_DAILY_BEST_PICK_MIN_CONFIDENCE", 58.0)
+    dynamic_min_conf = float(dynamic_min_conf)
+    limits = {
+        "min_conf": min_conf,
+        "dynamic_min_conf": dynamic_min_conf,
+        "run_cap": latest_run_budget.get("adjusted_run_cap"),
+        "per_symbol_cap": latest_run_budget.get("adjusted_per_symbol_cap"),
+        "daily_pick_cap": latest_run_budget.get("adjusted_daily_pick_cap"),
+    }
     daily_summary = trad._build_daily_summary_message(
-        results,
-        existing_candidates=candidates,
+        [],
+        existing_candidates=existing_candidates,
         min_conf=dynamic_min_conf,
     )
 
@@ -140,8 +162,8 @@ def main(argv=None):
         "cache_hit": cache_hit,
         "cache_key": cache_key or None,
         "generated_at": trad.get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
-        "candidate_count": len(candidates or []),
-        "quality_drop_counts": (build_stats or {}).get("quality_drop_counts") or {},
+        "candidate_count": len(existing_candidates or []),
+        "quality_drop_counts": latest_run.get("quality_drop_counts") if isinstance(latest_run, dict) else {},
     }
     if args.verify_output:
         payload["verify_output_path"] = _write_json(args.verify_output, payload)

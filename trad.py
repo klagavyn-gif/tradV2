@@ -2291,6 +2291,7 @@ def _all_weather_plan_candidates(item, regime):
         ("Quantum", item.get("quantum_15m")),
     ]
     candidates = []
+    rejected = []
     for label, plan in plans:
         if not isinstance(plan, dict):
             continue
@@ -2322,6 +2323,23 @@ def _all_weather_plan_candidates(item, regime):
                 and str(gate_reason or "").strip().lower() == "trades_below_min"
                 and float(confidence) >= float(relax_min_conf)
             ):
+                rejected.append(
+                    {
+                        "label": label,
+                        "plan": plan,
+                        "signal": direction,
+                        "confidence": float(confidence),
+                        "aw_gate_reason": str(gate_reason or "filtered"),
+                        "aw_gate_relaxed": False,
+                        "aw_score_penalty": 0.0,
+                        "win_rate_pct": float(edge.get("win_rate_pct")) if isinstance(edge.get("win_rate_pct"), (int, float)) else None,
+                        "expectancy_rr": float(edge.get("expectancy_rr")) if isinstance(edge.get("expectancy_rr"), (int, float)) else None,
+                        "trades": float(edge.get("trades")) if isinstance(edge.get("trades"), (int, float)) else None,
+                        "bars_since_signal": float(_pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"]))
+                        if isinstance(_pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"]), (int, float))
+                        else None,
+                    }
+                )
                 continue
             aw_gate_relaxed = True
             aw_score_penalty = float(relax_penalty)
@@ -2354,7 +2372,8 @@ def _all_weather_plan_candidates(item, regime):
             }
         )
     candidates.sort(key=lambda row: (float(row.get("score", 0.0)), float(row.get("confidence", 0.0))), reverse=True)
-    return candidates
+    rejected.sort(key=lambda row: (float(row.get("confidence", 0.0)), str(row.get("label") or "")), reverse=True)
+    return candidates, rejected
 
 
 def _all_weather_blended_metrics(rows):
@@ -2438,7 +2457,7 @@ def _build_all_weather_report_entry(item, min_conf=None):
     report["volatility_pct"] = float(regime_meta.get("volatility_pct") or 0.0)
     report["trend_score"] = float(regime_meta.get("trend_score") or 0.0)
 
-    candidates = _all_weather_plan_candidates(item, regime)
+    candidates, rejected_candidates = _all_weather_plan_candidates(item, regime)
     report["candidate_pool_count"] = len(candidates)
     report["candidates"] = [
         {
@@ -2458,6 +2477,22 @@ def _build_all_weather_report_entry(item, min_conf=None):
             "bars_since_signal": float(row.get("bars_since_signal")) if isinstance(row.get("bars_since_signal"), (int, float)) else None,
         }
         for row in candidates
+    ]
+    report["rejected_candidates"] = [
+        {
+            "label": str(row.get("label") or ""),
+            "signal": str(row.get("signal") or ""),
+            "confidence": float(row.get("confidence", 0.0)),
+            "aw_gate_reason": str(row.get("aw_gate_reason") or "filtered"),
+            "aw_gate_relaxed": bool(row.get("aw_gate_relaxed")),
+            "aw_score_penalty": float(row.get("aw_score_penalty", 0.0)),
+            "win_rate_pct": float(row.get("win_rate_pct")) if isinstance(row.get("win_rate_pct"), (int, float)) else None,
+            "expectancy_rr": float(row.get("expectancy_rr")) if isinstance(row.get("expectancy_rr"), (int, float)) else None,
+            "trades": int(row.get("trades")) if isinstance(row.get("trades"), (int, float)) else None,
+            "bars_since_signal": float(row.get("bars_since_signal")) if isinstance(row.get("bars_since_signal"), (int, float)) else None,
+            "plan": row.get("plan") if isinstance(row.get("plan"), dict) else None,
+        }
+        for row in rejected_candidates[:12]
     ]
     if not candidates:
         report["status"] = "no_actionable_subplans"
@@ -2612,6 +2647,8 @@ def _build_all_weather_signal(item, min_conf):
         "status": str(report.get("status") or "filtered") if isinstance(report, dict) else "filtered",
         "side": report.get("selected_side") if isinstance(report, dict) else None,
         "confidence": report.get("final_confidence") if isinstance(report, dict) else None,
+        "candidate_pool_count": report.get("candidate_pool_count") if isinstance(report, dict) else 0,
+        "rejected_candidates": report.get("rejected_candidates") if isinstance(report, dict) else [],
     }
     return None, meta
 
@@ -5492,6 +5529,7 @@ def _record_telegram_run_report(
     dropped_by_run_cap,
     quality_drop_counts,
     alert_budget,
+    reject_diagnostics,
     raw_candidates=None,
 ):
     return _alerts_reporting_record_telegram_run_report(
@@ -5509,6 +5547,7 @@ def _record_telegram_run_report(
         dropped_by_symbol_cap=dropped_by_symbol_cap,
         dropped_by_run_cap=dropped_by_run_cap,
         quality_drop_counts=quality_drop_counts,
+        reject_diagnostics=reject_diagnostics,
         alert_budget=alert_budget,
         config=config,
         helpers=_reporting_module_helpers(),

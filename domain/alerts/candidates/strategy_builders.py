@@ -1,6 +1,7 @@
 from domain.alerts.candidates.common import (
     add_quality_drop,
     append_candidate,
+    record_candidate_reject,
     score_with_edge_adjustments,
 )
 
@@ -67,6 +68,25 @@ def _build_all_weather_candidates(item, symbol, context):
             return
     elif isinstance(aw_meta, dict):
         add_quality_drop(context, aw_meta.get("status") or "filtered", prefix="all_weather_")
+        rejected_rows = aw_meta.get("rejected_candidates") if isinstance(aw_meta.get("rejected_candidates"), list) else []
+        for row in rejected_rows[:8]:
+            if not isinstance(row, dict):
+                continue
+            record_candidate_reject(
+                context,
+                symbol=symbol,
+                strategy=f"AW15/{str(row.get('label') or 'UNKNOWN').strip().upper()}",
+                reason=row.get("aw_gate_reason") or aw_meta.get("status") or "filtered",
+                signal=row.get("signal"),
+                confidence=row.get("confidence"),
+                plan=row.get("plan"),
+                edge_metrics=row,
+                extra={
+                    "stage": "all_weather_entry_gate",
+                    "aw_gate_relaxed": bool(row.get("aw_gate_relaxed")),
+                    "aw_score_penalty": row.get("aw_score_penalty"),
+                },
+            )
 
 
 def _build_cdc_candidates(item, symbol, context):
@@ -153,6 +173,17 @@ def _build_actionzone_candidates(item, symbol, context):
     gate_ok, gate_reason, edge = evaluate_entry_quality_gate(az_plan, az_signal)
     if not gate_ok:
         add_quality_drop(context, gate_reason)
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="AZ15",
+            reason=gate_reason,
+            signal=az_signal,
+            confidence=az_conf,
+            plan=az_plan,
+            edge_metrics=edge,
+            extra={"stage": "entry_quality_gate"},
+        )
         return
     az_message = build_actionzone_message(item, az_plan)
     if not az_message:
@@ -225,6 +256,17 @@ def _build_price_action_candidates(item, symbol, context):
     gate_ok, gate_reason, edge = evaluate_entry_quality_gate(pa_plan, pa_signal)
     if not gate_ok:
         add_quality_drop(context, gate_reason, prefix="price_action_")
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="PA15",
+            reason=f"price_action_{gate_reason}",
+            signal=pa_signal,
+            confidence=pa_conf,
+            plan=pa_plan,
+            edge_metrics=edge,
+            extra={"stage": "entry_quality_gate"},
+        )
         return
     pa_message = build_price_action_message(item, pa_plan)
     if not pa_message:
@@ -280,6 +322,17 @@ def _build_trend_breakout_candidates(item, symbol, context):
     gate_ok, gate_reason, edge = evaluate_entry_quality_gate(tcb_plan, tcb_signal)
     if not gate_ok:
         add_quality_drop(context, gate_reason, prefix="trend_breakout_")
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="TCB15",
+            reason=f"trend_breakout_{gate_reason}",
+            signal=tcb_signal,
+            confidence=tcb_conf,
+            plan=tcb_plan,
+            edge_metrics=edge,
+            extra={"stage": "entry_quality_gate"},
+        )
         return
     tcb_message = build_trend_breakout_message(item, tcb_plan)
     if not tcb_message:
@@ -351,10 +404,30 @@ def _build_primary_candidates(item, symbol, context):
     )
     if not isinstance(primary_plan, dict):
         add_quality_drop(context, "no_primary_plan_after_strict_gate")
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="PRIMARY",
+            reason="no_primary_plan_after_strict_gate",
+            signal=signal,
+            confidence=best_conf,
+            extra={"stage": "primary_plan_selection"},
+        )
         return
     gate_ok, gate_reason, edge = evaluate_entry_quality_gate(primary_plan, signal)
     if not gate_ok:
         add_quality_drop(context, gate_reason)
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="PRIMARY",
+            reason=gate_reason,
+            signal=signal,
+            confidence=best_conf,
+            plan=primary_plan,
+            edge_metrics=edge,
+            extra={"stage": "entry_quality_gate", "source_count": len(sources)},
+        )
         return
     min_sources = getattr(context["config"], "TELEGRAM_ALERT_PRIMARY_MIN_SOURCES", 2)
     single_source_min_conf = getattr(context["config"], "TELEGRAM_ALERT_PRIMARY_SINGLE_SOURCE_MIN_CONF", 90.0)
@@ -368,6 +441,22 @@ def _build_primary_candidates(item, symbol, context):
         single_source_min_conf = 90.0
     source_count = len(sources)
     if source_count < max(1, min_sources) and float(best_conf) < float(single_source_min_conf):
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="PRIMARY",
+            reason="primary_min_sources_not_met",
+            signal=signal,
+            confidence=best_conf,
+            plan=primary_plan,
+            edge_metrics=edge,
+            extra={
+                "stage": "source_confluence_gate",
+                "source_count": source_count,
+                "required_sources": max(1, min_sources),
+                "single_source_min_conf": float(single_source_min_conf),
+            },
+        )
         return
     message = build_telegram_message(item, signal, best_conf, sources, primary_plan=primary_plan)
     if not message:

@@ -346,6 +346,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         quality_drop_counts = build_stats.get("quality_drop_counts") or {}
         if not isinstance(alert_budget, dict) or not alert_budget:
             alert_budget = build_stats.get("alert_budget") or {}
+    reject_diagnostics = build_stats.get("reject_diagnostics") if isinstance(build_stats, dict) else {}
 
     if not candidates:
         logger.info(
@@ -370,6 +371,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
                 dropped_by_symbol_cap=0,
                 dropped_by_run_cap=0,
                 quality_drop_counts=quality_drop_counts,
+                reject_diagnostics=reject_diagnostics,
                 alert_budget=alert_budget,
             )
             return 0
@@ -551,6 +553,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         dropped_by_symbol_cap=dropped_by_symbol_cap,
         dropped_by_run_cap=dropped_by_run_cap,
         quality_drop_counts=quality_drop_counts,
+        reject_diagnostics=reject_diagnostics,
         alert_budget=alert_budget,
     )
 

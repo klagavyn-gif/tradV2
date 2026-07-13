@@ -1451,6 +1451,7 @@ def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, ru
         "helpers": helpers,
         "runtime_context": runtime_context if isinstance(runtime_context, dict) else {},
         "quality_drop_counts": Counter(),
+        "reject_diagnostics": {},
         "candidates": [],
         "precision60": precision60,
         "strict_60": strict_60,
@@ -1514,6 +1515,67 @@ def add_quality_drop(context, reason, *, prefix=None):
     context["quality_drop_counts"][key] += 1
 
 
+def record_candidate_reject(
+    context,
+    *,
+    symbol,
+    strategy,
+    reason,
+    signal=None,
+    confidence=None,
+    plan=None,
+    edge_metrics=None,
+    extra=None,
+):
+    if not isinstance(context, dict):
+        return
+    normalize_symbol = (context.get("helpers") or {}).get("normalize_symbol")
+    symbol_text = str(symbol or "").strip().upper()
+    if callable(normalize_symbol):
+        symbol_text = normalize_symbol(symbol_text)
+    if not symbol_text:
+        symbol_text = "UNKNOWN"
+    strategy_text = str(strategy or "UNKNOWN").strip().upper() or "UNKNOWN"
+    reason_text = str(reason or "").strip() or "filtered"
+    buckets = context.setdefault("reject_diagnostics", {})
+    if not isinstance(buckets, dict):
+        return
+    rows = buckets.setdefault(symbol_text, [])
+    if len(rows) >= 12:
+        return
+
+    plan_dict = plan if isinstance(plan, dict) else {}
+    edge = edge_metrics if isinstance(edge_metrics, dict) else {}
+    payload = {
+        "symbol": symbol_text,
+        "strategy": strategy_text,
+        "reason": reason_text,
+        "signal": str(signal or plan_dict.get("signal") or "").strip().upper() or None,
+        "confidence": _safe_float(confidence if confidence is not None else plan_dict.get("confidence"), None),
+        "win_rate_pct": _safe_float(edge.get("win_rate_pct"), None),
+        "expectancy_rr": _safe_float(edge.get("expectancy_rr"), None),
+        "trades": _safe_float(edge.get("trades"), None),
+        "bars_since_signal": _safe_float(
+            plan_dict.get("bars_since_signal")
+            or plan_dict.get("bars_since_entry")
+            or plan_dict.get("bars_since_cross"),
+            None,
+        ),
+        "entry_price": _safe_float(
+            plan_dict.get("entry_price")
+            or plan_dict.get("current_price")
+            or plan_dict.get("price"),
+            None,
+        ),
+        "last_signal_time": str(plan_dict.get("last_signal_time") or "").strip() or None,
+    }
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value is None or isinstance(value, (str, int, float, bool)):
+                payload[str(key)] = value
+    rows.append(payload)
+
+
 def score_with_edge_adjustments(base_score, edge, *, confidence, alert_profile_score_adjustment):
     score = float(base_score)
     if not isinstance(edge, dict):
@@ -1549,11 +1611,33 @@ def finalize_candidates(context):
         gate_ok, gate_reason, edge_metrics = evaluate_candidate_backtest_gate(candidate)
         if not gate_ok:
             context["quality_drop_counts"][gate_reason] += 1
+            record_candidate_reject(
+                context,
+                symbol=candidate.get("symbol"),
+                strategy=candidate.get("strategy"),
+                reason=gate_reason,
+                signal=candidate.get("signal"),
+                confidence=candidate.get("confidence"),
+                plan=candidate.get("plan"),
+                edge_metrics=edge_metrics,
+                extra={"stage": "backtest_gate"},
+            )
             continue
         candidate["edge_metrics"] = edge_metrics
         profile_ok, profile_reason, profile_metrics = evaluate_candidate_symbol_strategy_gate(candidate)
         if not profile_ok:
             context["quality_drop_counts"][profile_reason] += 1
+            record_candidate_reject(
+                context,
+                symbol=candidate.get("symbol"),
+                strategy=candidate.get("strategy"),
+                reason=profile_reason,
+                signal=candidate.get("signal"),
+                confidence=candidate.get("confidence"),
+                plan=candidate.get("plan"),
+                edge_metrics=profile_metrics if isinstance(profile_metrics, dict) else edge_metrics,
+                extra={"stage": "symbol_strategy_gate"},
+            )
             continue
         if isinstance(profile_metrics, dict) and profile_metrics:
             candidate["edge_metrics"] = profile_metrics
@@ -1575,10 +1659,34 @@ def finalize_candidates(context):
             config=context["config"],
         )
         if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
-            context["quality_drop_counts"][str(candidate.get("short_trade_reason") or "short_trade_avoid")] += 1
+            reject_reason = str(candidate.get("short_trade_reason") or "short_trade_avoid")
+            context["quality_drop_counts"][reject_reason] += 1
+            record_candidate_reject(
+                context,
+                symbol=candidate.get("symbol"),
+                strategy=candidate.get("strategy"),
+                reason=reject_reason,
+                signal=candidate.get("signal"),
+                confidence=candidate.get("confidence"),
+                plan=candidate.get("plan"),
+                edge_metrics=candidate.get("edge_metrics"),
+                extra={"stage": "short_trade_policy"},
+            )
             continue
         if str(candidate.get("sltp_live_bucket") or "").strip().lower() == "avoid":
-            context["quality_drop_counts"][str(candidate.get("sltp_live_reason") or "sltp_live_avoid")] += 1
+            reject_reason = str(candidate.get("sltp_live_reason") or "sltp_live_avoid")
+            context["quality_drop_counts"][reject_reason] += 1
+            record_candidate_reject(
+                context,
+                symbol=candidate.get("symbol"),
+                strategy=candidate.get("strategy"),
+                reason=reject_reason,
+                signal=candidate.get("signal"),
+                confidence=candidate.get("confidence"),
+                plan=candidate.get("plan"),
+                edge_metrics=candidate.get("edge_metrics"),
+                extra={"stage": "sltp_live_policy"},
+            )
             continue
         filtered_candidates.append(candidate)
 
@@ -1597,6 +1705,7 @@ def finalize_candidates(context):
         alert_budget = build_regime_alert_budget(regime_summary=regime_summary)
     stats = {
         "quality_drop_counts": dict(context["quality_drop_counts"]),
+        "reject_diagnostics": context.get("reject_diagnostics") or {},
         "regime_summary": regime_summary,
         "alert_budget": alert_budget if isinstance(alert_budget, dict) else {},
     }

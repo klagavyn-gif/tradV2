@@ -92,7 +92,7 @@ def _build_all_weather_candidates(item, symbol, context):
 def _build_cdc_candidates(item, symbol, context):
     normalize_confidence = context["helpers"]["normalize_confidence"]
     build_cdc_vixfix_message = context["helpers"]["build_cdc_vixfix_message"]
-    extract_plan_edge_metrics = context["helpers"]["extract_plan_edge_metrics"]
+    extract_signal_edge_metrics = context["helpers"]["extract_signal_edge_metrics"]
     format_price_value = context["helpers"]["format_price_value"]
     alert_profile_score_adjustment = context["helpers"]["alert_profile_score_adjustment"]
 
@@ -112,7 +112,7 @@ def _build_cdc_candidates(item, symbol, context):
     cdc_message = build_cdc_vixfix_message(item, cdc_plan)
     if not cdc_message:
         return
-    edge = extract_plan_edge_metrics(cdc_plan)
+    edge = extract_signal_edge_metrics(cdc_plan, cdc_signal)
     freshness = 6.0
     last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
     if not last_signal_time:

@@ -216,6 +216,7 @@ _TELEGRAM_ALERT_CACHE = _TTLCache(
 _HISTORY_STORE_LOCK = threading.Lock()
 _ALERT_HISTORY_LOCK = threading.Lock()
 _ALERT_AUTO_TUNE_CACHE = {"path": None, "mtime": None, "payload": {}}
+_ALERT_REALIZED_SUMMARY_CACHE = {"path": None, "mtime": None, "payload": {}}
 _TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "TCB15", "PRIMARY", "DAILY_BEST")
 
 _MAX_SYMBOLS_PER_REQUEST = _service_support.max_symbols_per_request(config)
@@ -821,13 +822,80 @@ def _extract_optimizer_trade_metrics(optimizer):
     }
 
 
+def _load_alert_realized_summary_payload():
+    path = _alert_realized_summary_file_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = None
+    cached_path = _ALERT_REALIZED_SUMMARY_CACHE.get("path")
+    cached_mtime = _ALERT_REALIZED_SUMMARY_CACHE.get("mtime")
+    if cached_path == path and cached_mtime == mtime and isinstance(_ALERT_REALIZED_SUMMARY_CACHE.get("payload"), dict):
+        return _ALERT_REALIZED_SUMMARY_CACHE.get("payload") or {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        payload = payload if isinstance(payload, dict) else {}
+        _ALERT_REALIZED_SUMMARY_CACHE.update({"path": path, "mtime": mtime, "payload": payload})
+        return payload
+    except Exception:
+        return {}
+
+
+def _infer_plan_strategy_code(plan):
+    if not isinstance(plan, dict):
+        return None
+    strategy = str(plan.get("strategy") or "").strip().upper()
+    if strategy:
+        return strategy
+    setup = str(plan.get("setup") or "").strip().upper()
+    if "VIX FIX" in setup or "CDC" in setup:
+        return "CDCVIX15"
+    if "is_vixfix_spike" in plan or "wvf" in plan or "red_to_green_quality_score" in plan:
+        return "CDCVIX15"
+    return None
+
+
+def _strategy_realized_proxy_metrics(strategy):
+    strategy_code = str(strategy or "").strip().upper()
+    if not strategy_code:
+        return {}
+    payload = _load_alert_realized_summary_payload()
+    by_strategy = payload.get("by_strategy") if isinstance(payload, dict) else None
+    bucket = by_strategy.get(strategy_code) if isinstance(by_strategy, dict) else None
+    if not isinstance(bucket, dict):
+        return {}
+    settled = _safe_float(bucket.get("settled_alerts"), None)
+    win_rate = _safe_float(bucket.get("win_rate_pct"), None)
+    expectancy = _safe_float(bucket.get("avg_rr_realized"), None)
+    if not any(isinstance(v, float) and math.isfinite(v) for v in (settled, win_rate, expectancy)):
+        return {}
+    return {
+        "win_rate_pct": win_rate,
+        "expectancy_rr": expectancy,
+        "trades": settled,
+        "metric_source": "strategy_realized_proxy",
+        "strategy_code": strategy_code,
+    }
+
+
 def _extract_signal_edge_metrics(plan, signal):
     sig = str(signal or "").upper()
     if sig == "SELL" and isinstance(plan, dict):
         sell_metrics = _extract_optimizer_trade_metrics(plan.get("sell_optimizer"))
         if any(isinstance(v, (int, float)) for v in sell_metrics.values()):
             return sell_metrics
-    return _extract_plan_edge_metrics(plan)
+    plan_metrics = _extract_plan_edge_metrics(plan)
+    if any(isinstance(v, (int, float)) for v in plan_metrics.values()):
+        return plan_metrics
+    strategy_code = _infer_plan_strategy_code(plan)
+    if strategy_code == "CDCVIX15":
+        proxy_metrics = _strategy_realized_proxy_metrics(strategy_code)
+        if any(isinstance(proxy_metrics.get(key), (int, float)) for key in ("win_rate_pct", "expectancy_rr", "trades")):
+            return proxy_metrics
+    return plan_metrics
 
 
 def _normalize_edge_metrics_payload(metrics):
@@ -1707,7 +1775,7 @@ def _evaluate_super_signal(item, signal):
         if _strict_60_mode_enabled() and not _passes_entry_quality_gate(plan, signal):
             continue
             
-        metrics = _extract_plan_edge_metrics(plan)
+        metrics = _extract_signal_edge_metrics(plan, signal)
         wr = metrics.get("win_rate_pct")
         exp = metrics.get("expectancy_rr")
         trades = metrics.get("trades")
@@ -4427,7 +4495,7 @@ def _build_alert_backtest_summary(results, min_conf=None):
         plan = candidate.get("plan")
         edge = candidate.get("edge_metrics")
         if not isinstance(edge, dict):
-            edge = _extract_plan_edge_metrics(plan)
+            edge = _extract_signal_edge_metrics(plan, candidate.get("signal"))
         wr = edge.get("win_rate_pct")
         exp = edge.get("expectancy_rr")
         trades = edge.get("trades")
@@ -5009,6 +5077,7 @@ def _pipeline_module_helpers():
         "normalize_confidence": _normalize_confidence,
         "build_cdc_vixfix_message": _build_cdc_vixfix_message,
         "extract_plan_edge_metrics": _extract_plan_edge_metrics,
+        "extract_signal_edge_metrics": _extract_signal_edge_metrics,
         "price_action_proxy_metrics": _price_action_proxy_metrics,
         "alert_profile_score_adjustment": _alert_profile_score_adjustment,
         "format_price_value": _format_price_value,

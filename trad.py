@@ -1394,6 +1394,71 @@ def _merge_telegram_candidate_quality_profile(symbol, strategy):
     return merged
 
 
+def _cdc_sell_profile_relaxation(candidate, profile, metrics):
+    if not isinstance(candidate, dict) or not isinstance(profile, dict):
+        return None
+    if str(candidate.get("strategy") or "").upper().strip() != "CDCVIX15":
+        return None
+    if str(candidate.get("signal") or "").upper().strip() != "SELL":
+        return None
+    if not bool(getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_ENABLE", True)):
+        return None
+
+    min_confidence = _profile_side_value(profile, "SELL", "min_confidence", None)
+    confidence = _normalize_confidence(candidate.get("confidence"))
+    if not isinstance(min_confidence, (int, float)) or not isinstance(confidence, (int, float)):
+        return None
+    if float(confidence) >= float(min_confidence):
+        return None
+
+    max_gap = getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_MAX_CONFIDENCE_GAP", 3.0)
+    min_wr = getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_MIN_WIN_RATE", 64.0)
+    min_exp = getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_MIN_EXPECTANCY_RR", 1.2)
+    min_trades = getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_MIN_TRADES", 200)
+    penalty = getattr(config, "TELEGRAM_ALERT_CDC_SELL_PROFILE_RELAX_SCORE_PENALTY", 6.0)
+    try:
+        max_gap = float(max_gap)
+    except Exception:
+        max_gap = 3.0
+    try:
+        min_wr = float(min_wr)
+    except Exception:
+        min_wr = 64.0
+    try:
+        min_exp = float(min_exp)
+    except Exception:
+        min_exp = 1.2
+    try:
+        min_trades = int(min_trades)
+    except Exception:
+        min_trades = 200
+    try:
+        penalty = float(penalty)
+    except Exception:
+        penalty = 6.0
+
+    confidence_gap = float(min_confidence) - float(confidence)
+    if confidence_gap > float(max_gap):
+        return None
+
+    edge = metrics if isinstance(metrics, dict) else {}
+    win_rate = edge.get("win_rate_pct")
+    expectancy = edge.get("expectancy_rr")
+    trades = edge.get("trades")
+    if not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_wr):
+        return None
+    if not isinstance(expectancy, (int, float)) or float(expectancy) < float(min_exp):
+        return None
+    if not isinstance(trades, (int, float)) or float(trades) < float(min_trades):
+        return None
+
+    return {
+        "confidence_gap": float(confidence_gap),
+        "score_penalty": float(max(0.0, penalty)),
+        "min_confidence": float(min_confidence),
+    }
+
+
 def _evaluate_candidate_symbol_strategy_gate(candidate):
     if not isinstance(candidate, dict):
         return False, "candidate_profile_missing", {}
@@ -1455,7 +1520,17 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
     except Exception:
         min_robustness = None
 
-    if isinstance(min_confidence, (int, float)) and (
+    relax_meta = _cdc_sell_profile_relaxation(candidate, profile, metrics)
+    if isinstance(relax_meta, dict):
+        if not bool(candidate.get("cdc_sell_profile_relaxed")):
+            penalty = relax_meta.get("score_penalty")
+            if isinstance(score, (int, float)) and isinstance(penalty, (int, float)) and float(penalty) > 0.0:
+                score = float(score) - float(penalty)
+                candidate["score"] = float(score)
+            candidate["cdc_sell_profile_relaxed"] = True
+            candidate["cdc_sell_profile_relax_penalty"] = float(relax_meta.get("score_penalty") or 0.0)
+            candidate["cdc_sell_profile_confidence_gap"] = float(relax_meta.get("confidence_gap") or 0.0)
+    if isinstance(min_confidence, (int, float)) and not isinstance(relax_meta, dict) and (
         not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence)
     ):
         return False, "candidate_profile_confidence_below_min", metrics
@@ -1634,6 +1709,9 @@ def _evaluate_sell_whitelist_gate(plan):
     enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_WHITELIST_ENABLE", True))
     if not enabled:
         return True, "sell_whitelist_disabled", {}
+    continuation_profile = _sell_continuation_gate_profile(plan, "SELL")
+    if not isinstance(continuation_profile, dict):
+        return True, "sell_whitelist_not_applicable", {}
     metrics = _extract_walkforward_metrics(plan, optimizer_key="sell_optimizer")
     if not metrics:
         return False, "sell_walkforward_not_available", {}
@@ -1657,7 +1735,6 @@ def _evaluate_sell_whitelist_gate(plan):
         min_robustness = float(min_robustness)
     except Exception:
         min_robustness = 45.0
-    continuation_profile = _sell_continuation_gate_profile(plan, "SELL")
     if isinstance(continuation_profile, dict):
         min_wr = float(continuation_profile.get("walkforward_min_wr", min_wr))
         min_exp = float(continuation_profile.get("walkforward_min_exp", min_exp))

@@ -75,6 +75,9 @@ def main():
         min_alerts_per_strategy=args.min_alerts_per_strategy,
         target_alerts_per_day=args.target_alerts_per_day,
         target_daily_pick_alerts_per_day=args.target_daily_picks_per_day,
+        symbol_blend_full_alerts=int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_BLEND_FULL_ALERTS", 36)),
+        symbol_min_blend_weight=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_MIN_BLEND_WEIGHT", 0.15)),
+        symbol_confidence_cap_over_strategy=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_CONFIDENCE_CAP_OVER_STRATEGY", 2.0)),
     )
 
     if not args.print_only:

@@ -5595,6 +5595,9 @@ def _refresh_auto_tuned_thresholds(history_days=None):
     min_alerts_per_strategy = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_MIN_ALERTS_PER_STRATEGY", 20)
     target_alerts_per_day = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_TARGET_ALERTS_PER_DAY", 2.0)
     target_daily_picks_per_day = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_TARGET_DAILY_PICKS_PER_DAY", 1.0)
+    symbol_blend_full_alerts = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_BLEND_FULL_ALERTS", 36)
+    symbol_min_blend_weight = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_MIN_BLEND_WEIGHT", 0.15)
+    symbol_confidence_cap_over_strategy = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_CONFIDENCE_CAP_OVER_STRATEGY", 2.0)
     try:
         history_days = max(1, int(history_days))
     except Exception:
@@ -5615,6 +5618,18 @@ def _refresh_auto_tuned_thresholds(history_days=None):
         target_daily_picks_per_day = max(0.10, float(target_daily_picks_per_day))
     except Exception:
         target_daily_picks_per_day = 1.0
+    try:
+        symbol_blend_full_alerts = max(int(min_alerts_per_symbol), int(symbol_blend_full_alerts))
+    except Exception:
+        symbol_blend_full_alerts = 36
+    try:
+        symbol_min_blend_weight = max(0.0, min(1.0, float(symbol_min_blend_weight)))
+    except Exception:
+        symbol_min_blend_weight = 0.15
+    try:
+        symbol_confidence_cap_over_strategy = max(0.0, float(symbol_confidence_cap_over_strategy))
+    except Exception:
+        symbol_confidence_cap_over_strategy = 2.0
     entries = _alerts_auto_tuning_read_alert_history_entries(_alert_history_file_path(), days=history_days)
     payload = _alerts_auto_tuning_build_auto_tuned_thresholds(
         entries=entries,
@@ -5626,6 +5641,9 @@ def _refresh_auto_tuned_thresholds(history_days=None):
         min_alerts_per_strategy=min_alerts_per_strategy,
         target_alerts_per_day=target_alerts_per_day,
         target_daily_pick_alerts_per_day=target_daily_picks_per_day,
+        symbol_blend_full_alerts=symbol_blend_full_alerts,
+        symbol_min_blend_weight=symbol_min_blend_weight,
+        symbol_confidence_cap_over_strategy=symbol_confidence_cap_over_strategy,
     )
     saved = _alerts_auto_tuning_write_auto_tuned_thresholds(path, payload)
     if saved:

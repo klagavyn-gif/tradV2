@@ -118,6 +118,118 @@ def _bounded_value(base_value, tuned_value, *, lower_delta, upper_delta, absolut
     return float(tuned_value)
 
 
+def _blend_value(base_value, tuned_value, weight):
+    if tuned_value is None:
+        return None
+    if not isinstance(base_value, (int, float)) or not math.isfinite(float(base_value)):
+        return tuned_value
+    if not isinstance(weight, (int, float)) or not math.isfinite(float(weight)):
+        weight = 1.0
+    weight = _clamp(float(weight), 0.0, 1.0)
+    return float(base_value) + (float(tuned_value) - float(base_value)) * weight
+
+
+def _sample_blend_weight(alert_count, *, min_alerts, full_weight_alerts, min_weight):
+    try:
+        alert_count = int(alert_count)
+    except Exception:
+        return _clamp(float(min_weight), 0.0, 1.0)
+    try:
+        min_alerts = int(min_alerts)
+    except Exception:
+        min_alerts = 12
+    try:
+        full_weight_alerts = int(full_weight_alerts)
+    except Exception:
+        full_weight_alerts = max(min_alerts, 36)
+    try:
+        min_weight = float(min_weight)
+    except Exception:
+        min_weight = 0.15
+    if full_weight_alerts <= min_alerts:
+        return 1.0
+    raw_weight = (float(alert_count) - float(min_alerts)) / float(full_weight_alerts - min_alerts)
+    return _clamp(raw_weight, _clamp(min_weight, 0.0, 1.0), 1.0)
+
+
+def _min_strategy_side_value(tuned_strategy_profiles, key):
+    values = []
+    for profile in (tuned_strategy_profiles or {}).values():
+        if not isinstance(profile, dict):
+            continue
+        value = _to_float(profile.get(key))
+        if value is not None:
+            values.append(float(value))
+    if not values:
+        return None
+    return min(values)
+
+
+def _shrink_symbol_tuned_profiles(
+    tuned_symbol_profiles,
+    *,
+    symbol_stats,
+    base_symbol_profiles,
+    tuned_strategy_profiles,
+    min_alerts_per_symbol,
+    full_weight_alerts,
+    min_blend_weight,
+    confidence_cap_over_strategy,
+):
+    adjusted_profiles = {}
+    adjusted_stats = {}
+    metric_suffixes = (
+        "min_confidence",
+        "min_score",
+        "min_win_rate_pct",
+        "min_expectancy_rr",
+        "min_trades",
+        "single_source_min_confidence",
+        "min_robustness_score",
+    )
+    for symbol, profile in (tuned_symbol_profiles or {}).items():
+        if not isinstance(profile, dict):
+            continue
+        base_profile = dict((base_symbol_profiles or {}).get(symbol) or {})
+        stats = dict((symbol_stats or {}).get(symbol) or {})
+        adjusted = dict(profile)
+        for side in ("buy", "sell"):
+            side_stats = dict(stats.get(side) or {})
+            side_alerts = _to_int(side_stats.get("alerts"), _to_int(stats.get("alerts"), min_alerts_per_symbol))
+            blend_weight = _sample_blend_weight(
+                side_alerts,
+                min_alerts=min_alerts_per_symbol,
+                full_weight_alerts=full_weight_alerts,
+                min_weight=min_blend_weight,
+            )
+            side_stats["blend_weight"] = round(float(blend_weight), 4)
+            for suffix in metric_suffixes:
+                key = f"{side}_{suffix}"
+                if key not in adjusted:
+                    continue
+                tuned_value = adjusted.get(key)
+                base_value = base_profile.get(key)
+                blended = _blend_value(base_value, tuned_value, blend_weight)
+                if suffix in ("min_trades",):
+                    adjusted[key] = int(max(1, round(_to_float(blended, _to_float(tuned_value, 1.0)))))
+                else:
+                    adjusted[key] = float(blended) if isinstance(blended, (int, float)) else tuned_value
+            conf_key = f"{side}_min_confidence"
+            if conf_key in adjusted:
+                strategy_anchor = _min_strategy_side_value(tuned_strategy_profiles, conf_key)
+                if isinstance(strategy_anchor, (int, float)):
+                    capped_conf = min(float(adjusted.get(conf_key)), float(strategy_anchor) + float(confidence_cap_over_strategy))
+                    if capped_conf != float(adjusted.get(conf_key)):
+                        side_stats["confidence_cap_anchor"] = float(strategy_anchor)
+                        side_stats["confidence_cap_applied"] = float(capped_conf)
+                    adjusted[conf_key] = float(capped_conf)
+            if side_stats:
+                stats[side] = side_stats
+        adjusted_profiles[symbol] = adjusted
+        adjusted_stats[symbol] = stats
+    return adjusted_profiles, adjusted_stats
+
+
 def _top_subset(rows, *, target_count, score_field="score", minimum_keep=4, minimum_ratio=0.25):
     if not rows:
         return []
@@ -419,6 +531,9 @@ def build_auto_tuned_thresholds(
     min_alerts_per_strategy,
     target_alerts_per_day,
     target_daily_pick_alerts_per_day,
+    symbol_blend_full_alerts=36,
+    symbol_min_blend_weight=0.15,
+    symbol_confidence_cap_over_strategy=2.0,
 ):
     directional = [row for row in (entries or []) if isinstance(row, dict) and str(row.get("signal") or "").upper() in ("BUY", "SELL")]
     timestamps = [row.get("_timestamp_obj") for row in directional if isinstance(row.get("_timestamp_obj"), datetime)]
@@ -441,6 +556,16 @@ def build_auto_tuned_thresholds(
         min_alerts_per_symbol=min_alerts_per_symbol,
         target_alerts_per_day=target_alerts_per_day,
     )
+    tuned_symbol_profiles, symbol_stats = _shrink_symbol_tuned_profiles(
+        tuned_symbol_profiles,
+        symbol_stats=symbol_stats,
+        base_symbol_profiles=base_symbol_profiles,
+        tuned_strategy_profiles=tuned_strategy_profiles,
+        min_alerts_per_symbol=min_alerts_per_symbol,
+        full_weight_alerts=symbol_blend_full_alerts,
+        min_blend_weight=symbol_min_blend_weight,
+        confidence_cap_over_strategy=symbol_confidence_cap_over_strategy,
+    )
     tuned_cdc_profiles, cdc_stats = _build_cdc_daily_best_tuned_profiles(
         directional,
         base_cdc_profiles=base_cdc_profiles,
@@ -455,6 +580,9 @@ def build_auto_tuned_thresholds(
         "history_rows": len(entries or []),
         "directional_rows": len(directional),
         "observed_days": int(observed_days),
+        "symbol_blend_full_alerts": int(symbol_blend_full_alerts),
+        "symbol_min_blend_weight": float(symbol_min_blend_weight),
+        "symbol_confidence_cap_over_strategy": float(symbol_confidence_cap_over_strategy),
         "telegram_alert_strategy_quality_profiles": tuned_strategy_profiles,
         "telegram_alert_symbol_quality_profiles": tuned_symbol_profiles,
         "cdc_vixfix_symbol_profiles": tuned_cdc_profiles,

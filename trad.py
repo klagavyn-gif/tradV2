@@ -5598,6 +5598,7 @@ def _refresh_auto_tuned_thresholds(history_days=None):
     symbol_blend_full_alerts = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_BLEND_FULL_ALERTS", 36)
     symbol_min_blend_weight = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_MIN_BLEND_WEIGHT", 0.15)
     symbol_confidence_cap_over_strategy = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_CONFIDENCE_CAP_OVER_STRATEGY", 2.0)
+    symbol_sell_win_rate_cap_over_base = getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_SELL_WIN_RATE_CAP_OVER_BASE", 0.5)
     try:
         history_days = max(1, int(history_days))
     except Exception:
@@ -5630,6 +5631,10 @@ def _refresh_auto_tuned_thresholds(history_days=None):
         symbol_confidence_cap_over_strategy = max(0.0, float(symbol_confidence_cap_over_strategy))
     except Exception:
         symbol_confidence_cap_over_strategy = 2.0
+    try:
+        symbol_sell_win_rate_cap_over_base = max(0.0, float(symbol_sell_win_rate_cap_over_base))
+    except Exception:
+        symbol_sell_win_rate_cap_over_base = 0.5
     entries = _alerts_auto_tuning_read_alert_history_entries(_alert_history_file_path(), days=history_days)
     payload = _alerts_auto_tuning_build_auto_tuned_thresholds(
         entries=entries,
@@ -5644,6 +5649,7 @@ def _refresh_auto_tuned_thresholds(history_days=None):
         symbol_blend_full_alerts=symbol_blend_full_alerts,
         symbol_min_blend_weight=symbol_min_blend_weight,
         symbol_confidence_cap_over_strategy=symbol_confidence_cap_over_strategy,
+        symbol_sell_win_rate_cap_over_base=symbol_sell_win_rate_cap_over_base,
     )
     saved = _alerts_auto_tuning_write_auto_tuned_thresholds(path, payload)
     if saved:

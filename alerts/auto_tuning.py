@@ -175,6 +175,7 @@ def _shrink_symbol_tuned_profiles(
     full_weight_alerts,
     min_blend_weight,
     confidence_cap_over_strategy,
+    sell_win_rate_cap_over_base,
 ):
     adjusted_profiles = {}
     adjusted_stats = {}
@@ -223,6 +224,15 @@ def _shrink_symbol_tuned_profiles(
                         side_stats["confidence_cap_anchor"] = float(strategy_anchor)
                         side_stats["confidence_cap_applied"] = float(capped_conf)
                     adjusted[conf_key] = float(capped_conf)
+            wr_key = f"{side}_min_win_rate_pct"
+            if side == "sell" and wr_key in adjusted:
+                base_wr = _to_float(base_profile.get(wr_key))
+                if isinstance(base_wr, (int, float)):
+                    capped_wr = min(float(adjusted.get(wr_key)), float(base_wr) + float(sell_win_rate_cap_over_base))
+                    if capped_wr != float(adjusted.get(wr_key)):
+                        side_stats["sell_win_rate_cap_base"] = float(base_wr)
+                        side_stats["sell_win_rate_cap_applied"] = float(capped_wr)
+                    adjusted[wr_key] = float(capped_wr)
             if side_stats:
                 stats[side] = side_stats
         adjusted_profiles[symbol] = adjusted
@@ -534,6 +544,7 @@ def build_auto_tuned_thresholds(
     symbol_blend_full_alerts=36,
     symbol_min_blend_weight=0.15,
     symbol_confidence_cap_over_strategy=2.0,
+    symbol_sell_win_rate_cap_over_base=0.5,
 ):
     directional = [row for row in (entries or []) if isinstance(row, dict) and str(row.get("signal") or "").upper() in ("BUY", "SELL")]
     timestamps = [row.get("_timestamp_obj") for row in directional if isinstance(row.get("_timestamp_obj"), datetime)]
@@ -565,6 +576,7 @@ def build_auto_tuned_thresholds(
         full_weight_alerts=symbol_blend_full_alerts,
         min_blend_weight=symbol_min_blend_weight,
         confidence_cap_over_strategy=symbol_confidence_cap_over_strategy,
+        sell_win_rate_cap_over_base=symbol_sell_win_rate_cap_over_base,
     )
     tuned_cdc_profiles, cdc_stats = _build_cdc_daily_best_tuned_profiles(
         directional,
@@ -583,6 +595,7 @@ def build_auto_tuned_thresholds(
         "symbol_blend_full_alerts": int(symbol_blend_full_alerts),
         "symbol_min_blend_weight": float(symbol_min_blend_weight),
         "symbol_confidence_cap_over_strategy": float(symbol_confidence_cap_over_strategy),
+        "symbol_sell_win_rate_cap_over_base": float(symbol_sell_win_rate_cap_over_base),
         "telegram_alert_strategy_quality_profiles": tuned_strategy_profiles,
         "telegram_alert_symbol_quality_profiles": tuned_symbol_profiles,
         "cdc_vixfix_symbol_profiles": tuned_cdc_profiles,

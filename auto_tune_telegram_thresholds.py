@@ -78,6 +78,7 @@ def main():
         symbol_blend_full_alerts=int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_BLEND_FULL_ALERTS", 36)),
         symbol_min_blend_weight=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_MIN_BLEND_WEIGHT", 0.15)),
         symbol_confidence_cap_over_strategy=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_CONFIDENCE_CAP_OVER_STRATEGY", 2.0)),
+        symbol_sell_win_rate_cap_over_base=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_SELL_WIN_RATE_CAP_OVER_BASE", 0.5)),
     )
 
     if not args.print_only:

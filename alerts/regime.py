@@ -401,6 +401,13 @@ def apply_regime_to_candidate(candidate, *, regime_payload, config):
 
     updated["raw_score"] = base_score
     updated["score"] = float(base_score) * float(multiplier)
+    updated["market_regime"] = market_regime
+    updated["market_side_bias"] = str(payload.get("market_side_bias") or "NEUTRAL").upper()
+    updated["symbol_regime"] = symbol_regime
+    updated["side_bias"] = side_bias
+    updated["regime_confidence"] = regime_confidence
+    updated["regime_volatility_pct"] = _safe_float(payload.get("volatility_pct"), None)
+    updated["regime_reason_tags"] = list(payload.get("reason_tags") or [])
     updated["regime"] = payload
     updated["regime_adjustment"] = {
         "applied": True,

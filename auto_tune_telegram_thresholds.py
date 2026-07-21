@@ -58,6 +58,30 @@ def main():
         help="Target daily best picks per day",
     )
     parser.add_argument(
+        "--recent-half-life-days",
+        type=float,
+        default=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_RECENT_HALF_LIFE_DAYS", 9.0)),
+        help="Half-life in days for recency weighting",
+    )
+    parser.add_argument(
+        "--fresh-signal-max-bars",
+        type=int,
+        default=int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_FRESH_SIGNAL_MAX_BARS", 48)),
+        help="Signals within this bar window keep full freshness weight",
+    )
+    parser.add_argument(
+        "--stale-signal-start-bars",
+        type=int,
+        default=int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_STALE_SIGNAL_START_BARS", 160)),
+        help="Signals older than this bar window receive reduced freshness weight",
+    )
+    parser.add_argument(
+        "--stale-signal-min-weight",
+        type=float,
+        default=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_STALE_SIGNAL_MIN_WEIGHT", 0.45)),
+        help="Minimum freshness weight applied to stale signals",
+    )
+    parser.add_argument(
         "--print-only",
         action="store_true",
         help="Print the payload without writing the output file",
@@ -75,6 +99,10 @@ def main():
         min_alerts_per_strategy=args.min_alerts_per_strategy,
         target_alerts_per_day=args.target_alerts_per_day,
         target_daily_pick_alerts_per_day=args.target_daily_picks_per_day,
+        recent_half_life_days=args.recent_half_life_days,
+        fresh_signal_max_bars=args.fresh_signal_max_bars,
+        stale_signal_start_bars=args.stale_signal_start_bars,
+        stale_signal_min_weight=args.stale_signal_min_weight,
         symbol_blend_full_alerts=int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_BLEND_FULL_ALERTS", 36)),
         symbol_min_blend_weight=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_MIN_BLEND_WEIGHT", 0.15)),
         symbol_confidence_cap_over_strategy=float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_SYMBOL_CONFIDENCE_CAP_OVER_STRATEGY", 2.0)),

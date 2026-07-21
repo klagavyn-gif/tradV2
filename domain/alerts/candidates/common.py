@@ -1762,7 +1762,21 @@ def finalize_candidates(context):
                 confidence=candidate.get("confidence"),
                 plan=candidate.get("plan"),
                 edge_metrics=profile_metrics if isinstance(profile_metrics, dict) else edge_metrics,
-                extra={"stage": "symbol_strategy_gate"},
+                extra={
+                    "stage": "symbol_strategy_gate",
+                    "required_confidence": _safe_float(candidate.get("profile_runtime_min_confidence"), None),
+                    "required_score": _safe_float(candidate.get("profile_runtime_min_score"), None),
+                    "required_win_rate_pct": _safe_float(candidate.get("profile_runtime_min_win_rate_pct"), None),
+                    "required_expectancy_rr": _safe_float(candidate.get("profile_runtime_min_expectancy_rr"), None),
+                    "required_trades": _safe_float(candidate.get("profile_runtime_min_trades"), None),
+                    "required_source_count": _safe_float(candidate.get("profile_runtime_min_source_count"), None),
+                    "required_robustness_score": _safe_float(candidate.get("profile_runtime_min_robustness_score"), None),
+                    "profile_runtime_reason": str(candidate.get("profile_runtime_threshold_reason") or "").strip() or None,
+                    "profile_runtime_freshness_bucket": str(candidate.get("profile_runtime_freshness_bucket") or "").strip().lower() or None,
+                    "profile_runtime_regime_alignment": str(candidate.get("profile_runtime_regime_alignment") or "").strip().lower() or None,
+                    "market_regime": str(candidate.get("profile_runtime_market_regime") or "").strip().upper() or None,
+                    "symbol_regime": str(candidate.get("profile_runtime_symbol_regime") or "").strip().upper() or None,
+                },
             )
             continue
         if isinstance(profile_metrics, dict) and profile_metrics:

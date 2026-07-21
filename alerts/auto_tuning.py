@@ -50,6 +50,32 @@ def _quantile(values, q, default=None):
     return float(numeric[low] * (1.0 - weight) + numeric[high] * weight)
 
 
+def _weighted_quantile(values, weights, q, default=None):
+    pairs = []
+    for value, weight in zip(values or [], weights or []):
+        numeric = _to_float(value, None)
+        if numeric is None:
+            continue
+        numeric_weight = _to_float(weight, 1.0)
+        if numeric_weight is None:
+            numeric_weight = 1.0
+        pairs.append((float(numeric), max(0.0, float(numeric_weight))))
+    if not pairs:
+        return default
+    total_weight = sum(weight for _, weight in pairs)
+    if total_weight <= 0.0:
+        return _quantile([value for value, _ in pairs], q, default=default)
+    pairs.sort(key=lambda row: row[0])
+    q = _clamp(float(q), 0.0, 1.0)
+    threshold = float(total_weight) * q
+    cumulative = 0.0
+    for value, weight in pairs:
+        cumulative += weight
+        if cumulative >= threshold:
+            return float(value)
+    return float(pairs[-1][0])
+
+
 def _timestamp_value(row):
     text = str((row or {}).get("timestamp") or "").strip()
     if not text:
@@ -91,6 +117,61 @@ def read_alert_history_entries(path, *, days=None):
         return []
     rows.sort(key=lambda row: row.get("_timestamp_obj") or datetime.min)
     return rows
+
+
+def _bars_since_signal_value(row):
+    if not isinstance(row, dict):
+        return None
+    for key in ("bars_since_signal", "bars_since_entry", "bars_since_cross"):
+        value = _to_float(row.get(key), None)
+        if value is not None:
+            return float(value)
+    return None
+
+
+def _row_recency_weight(row, *, half_life_days):
+    half_life = _to_float(half_life_days, None)
+    ts_value = (row or {}).get("_timestamp_obj")
+    if half_life is None or half_life <= 0 or not isinstance(ts_value, datetime):
+        return 1.0
+    age_days = max(0.0, (datetime.now() - ts_value).total_seconds() / 86400.0)
+    return max(0.1, math.pow(0.5, age_days / float(half_life)))
+
+
+def _row_freshness_weight(row, *, fresh_signal_max_bars, stale_signal_start_bars, stale_signal_min_weight):
+    bars_since = _bars_since_signal_value(row)
+    fresh_bars = _to_float(fresh_signal_max_bars, None)
+    stale_bars = _to_float(stale_signal_start_bars, None)
+    min_weight = _clamp(_to_float(stale_signal_min_weight, 0.45), 0.05, 1.0)
+    if bars_since is None or fresh_bars is None or stale_bars is None:
+        return 1.0
+    if stale_bars <= fresh_bars:
+        return min_weight if bars_since > fresh_bars else 1.0
+    if bars_since <= fresh_bars:
+        return 1.0
+    if bars_since >= stale_bars:
+        return min_weight
+    progress = (float(bars_since) - float(fresh_bars)) / float(stale_bars - fresh_bars)
+    return float(1.0 - progress * (1.0 - float(min_weight)))
+
+
+def _row_selection_weight(
+    row,
+    *,
+    recent_half_life_days,
+    fresh_signal_max_bars,
+    stale_signal_start_bars,
+    stale_signal_min_weight,
+):
+    return float(
+        _row_recency_weight(row, half_life_days=recent_half_life_days)
+        * _row_freshness_weight(
+            row,
+            fresh_signal_max_bars=fresh_signal_max_bars,
+            stale_signal_start_bars=stale_signal_start_bars,
+            stale_signal_min_weight=stale_signal_min_weight,
+        )
+    )
 
 
 def load_auto_tuned_profiles(path):
@@ -263,7 +344,17 @@ def _top_subset(rows, *, target_count, score_field="score", minimum_keep=4, mini
     return ranked[:keep_count]
 
 
-def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
+def _build_side_tuned_profile(
+    rows,
+    *,
+    base_profile,
+    side_prefix,
+    target_count,
+    recent_half_life_days,
+    fresh_signal_max_bars,
+    stale_signal_start_bars,
+    stale_signal_min_weight,
+):
     selected = _top_subset(rows, target_count=target_count)
     if not selected:
         return {}, {}
@@ -282,11 +373,32 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
         base_profile.get(f"{side_prefix}min_robustness_score"),
         _to_float(base_profile.get("min_robustness_score")),
     )
+    selected_weights = [
+        _row_selection_weight(
+            row,
+            recent_half_life_days=recent_half_life_days,
+            fresh_signal_max_bars=fresh_signal_max_bars,
+            stale_signal_start_bars=stale_signal_start_bars,
+            stale_signal_min_weight=stale_signal_min_weight,
+        )
+        for row in selected
+    ]
+    fresh_selected = sum(
+        1
+        for row in selected
+        if isinstance(_bars_since_signal_value(row), (int, float))
+        and float(_bars_since_signal_value(row)) <= float(_to_float(fresh_signal_max_bars, 48.0))
+    )
 
     tuned = {}
     tuned[f"{side_prefix}min_confidence"] = _bounded_value(
         base_conf,
-        _quantile([_to_float(row.get("confidence")) for row in selected], 0.10, default=base_conf),
+        _weighted_quantile(
+            [_to_float(row.get("confidence")) for row in selected],
+            selected_weights,
+            0.10,
+            default=base_conf,
+        ),
         lower_delta=-4.0,
         upper_delta=10.0,
         absolute_lower=55.0,
@@ -294,7 +406,12 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
     )
     tuned[f"{side_prefix}min_score"] = _bounded_value(
         base_score,
-        _quantile([_to_float(row.get("score")) for row in selected], 0.08, default=base_score),
+        _weighted_quantile(
+            [_to_float(row.get("score")) for row in selected],
+            selected_weights,
+            0.08,
+            default=base_score,
+        ),
         lower_delta=-6.0,
         upper_delta=12.0,
         absolute_lower=58.0,
@@ -302,7 +419,12 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
     )
     tuned[f"{side_prefix}min_win_rate_pct"] = _bounded_value(
         base_wr,
-        _quantile([_to_float(row.get("backtest_win_rate_pct")) for row in selected], 0.12, default=base_wr),
+        _weighted_quantile(
+            [_to_float(row.get("backtest_win_rate_pct")) for row in selected],
+            selected_weights,
+            0.12,
+            default=base_wr,
+        ),
         lower_delta=-2.0,
         upper_delta=6.0,
         absolute_lower=50.0,
@@ -310,7 +432,12 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
     )
     tuned[f"{side_prefix}min_expectancy_rr"] = _bounded_value(
         base_exp,
-        _quantile([_to_float(row.get("backtest_expectancy_rr")) for row in selected], 0.15, default=base_exp),
+        _weighted_quantile(
+            [_to_float(row.get("backtest_expectancy_rr")) for row in selected],
+            selected_weights,
+            0.15,
+            default=base_exp,
+        ),
         lower_delta=-0.03,
         upper_delta=0.08,
         absolute_lower=-0.02,
@@ -321,7 +448,12 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
             _clamp(
                 _bounded_value(
                     base_trades,
-                    _quantile([_to_float(row.get("backtest_trades")) for row in selected], 0.10, default=base_trades),
+                    _weighted_quantile(
+                        [_to_float(row.get("backtest_trades")) for row in selected],
+                        selected_weights,
+                        0.10,
+                        default=base_trades,
+                    ),
                     lower_delta=-2.0,
                     upper_delta=6.0,
                     absolute_lower=4.0,
@@ -334,19 +466,34 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
         )
     )
     if isinstance(base_sources, int):
-        source_median = _quantile([_to_float(row.get("source_count")) for row in selected], 0.50, default=float(base_sources))
+        source_median = _weighted_quantile(
+            [_to_float(row.get("source_count")) for row in selected],
+            selected_weights,
+            0.50,
+            default=float(base_sources),
+        )
         tuned[f"{side_prefix}min_source_count"] = int(max(1, round(source_median)))
     if isinstance(base_single_source, (int, float)):
         tuned[f"{side_prefix}single_source_min_confidence"] = _bounded_value(
             base_single_source,
-            _quantile([_to_float(row.get("confidence")) for row in selected], 0.75, default=base_single_source),
+            _weighted_quantile(
+                [_to_float(row.get("confidence")) for row in selected],
+                selected_weights,
+                0.75,
+                default=base_single_source,
+            ),
             lower_delta=-2.0,
             upper_delta=6.0,
             absolute_lower=70.0,
             absolute_upper=95.0,
         )
     if isinstance(base_robustness, (int, float)):
-        robustness = _quantile([_to_float(row.get("robustness_score")) for row in selected], 0.15, default=base_robustness)
+        robustness = _weighted_quantile(
+            [_to_float(row.get("robustness_score")) for row in selected],
+            selected_weights,
+            0.15,
+            default=base_robustness,
+        )
         tuned[f"{side_prefix}min_robustness_score"] = _bounded_value(
             base_robustness,
             robustness,
@@ -363,11 +510,39 @@ def _build_side_tuned_profile(rows, *, base_profile, side_prefix, target_count):
         "selected_confidence_floor": _quantile([_to_float(row.get("confidence")) for row in selected], 0.0),
         "selected_win_rate_floor": _quantile([_to_float(row.get("backtest_win_rate_pct")) for row in selected], 0.0),
         "selected_expectancy_floor": _quantile([_to_float(row.get("backtest_expectancy_rr")) for row in selected], 0.0),
+        "selected_weight_total": round(sum(selected_weights), 4),
+        "fresh_signal_ratio": round(float(fresh_selected) / float(len(selected)), 4) if selected else None,
+        "recent_weighted_confidence_floor": _weighted_quantile(
+            [_to_float(row.get("confidence")) for row in selected],
+            selected_weights,
+            0.10,
+        ),
+        "recent_weighted_win_rate_floor": _weighted_quantile(
+            [_to_float(row.get("backtest_win_rate_pct")) for row in selected],
+            selected_weights,
+            0.12,
+        ),
+        "recent_weighted_expectancy_floor": _weighted_quantile(
+            [_to_float(row.get("backtest_expectancy_rr")) for row in selected],
+            selected_weights,
+            0.15,
+        ),
     }
     return {k: v for k, v in tuned.items() if v is not None}, stats
 
 
-def _build_symbol_tuned_profiles(entries, *, base_symbol_profiles, observed_days, min_alerts_per_symbol, target_alerts_per_day):
+def _build_symbol_tuned_profiles(
+    entries,
+    *,
+    base_symbol_profiles,
+    observed_days,
+    min_alerts_per_symbol,
+    target_alerts_per_day,
+    recent_half_life_days,
+    fresh_signal_max_bars,
+    stale_signal_start_bars,
+    stale_signal_min_weight,
+):
     directional = [
         row for row in entries
         if row.get("strategy") not in ("DAILY_BEST", "DAILY_SUMMARY")
@@ -400,6 +575,10 @@ def _build_symbol_tuned_profiles(entries, *, base_symbol_profiles, observed_days
                 base_profile=base_profile,
                 side_prefix="buy_",
                 target_count=buy_target,
+                recent_half_life_days=recent_half_life_days,
+                fresh_signal_max_bars=fresh_signal_max_bars,
+                stale_signal_start_bars=stale_signal_start_bars,
+                stale_signal_min_weight=stale_signal_min_weight,
             )
             tuned.update(buy_tuned)
             symbol_stats["buy"] = buy_stats
@@ -410,6 +589,10 @@ def _build_symbol_tuned_profiles(entries, *, base_symbol_profiles, observed_days
                 base_profile=base_profile,
                 side_prefix="sell_",
                 target_count=sell_target,
+                recent_half_life_days=recent_half_life_days,
+                fresh_signal_max_bars=fresh_signal_max_bars,
+                stale_signal_start_bars=stale_signal_start_bars,
+                stale_signal_min_weight=stale_signal_min_weight,
             )
             tuned.update(sell_tuned)
             symbol_stats["sell"] = sell_stats
@@ -419,7 +602,18 @@ def _build_symbol_tuned_profiles(entries, *, base_symbol_profiles, observed_days
     return tuned_profiles, stats
 
 
-def _build_strategy_tuned_profiles(entries, *, base_strategy_profiles, observed_days, min_alerts_per_strategy, target_total_alerts_per_day):
+def _build_strategy_tuned_profiles(
+    entries,
+    *,
+    base_strategy_profiles,
+    observed_days,
+    min_alerts_per_strategy,
+    target_total_alerts_per_day,
+    recent_half_life_days,
+    fresh_signal_max_bars,
+    stale_signal_start_bars,
+    stale_signal_min_weight,
+):
     directional = [row for row in entries if row.get("signal") in ("BUY", "SELL") and row.get("strategy") not in ("DAILY_SUMMARY",)]
     grouped = defaultdict(list)
     for row in directional:
@@ -448,6 +642,10 @@ def _build_strategy_tuned_profiles(entries, *, base_strategy_profiles, observed_
                 base_profile=base_profile,
                 side_prefix="buy_",
                 target_count=buy_target,
+                recent_half_life_days=recent_half_life_days,
+                fresh_signal_max_bars=fresh_signal_max_bars,
+                stale_signal_start_bars=stale_signal_start_bars,
+                stale_signal_min_weight=stale_signal_min_weight,
             )
             tuned.update(buy_tuned)
             strategy_stats["buy"] = buy_stats
@@ -458,6 +656,10 @@ def _build_strategy_tuned_profiles(entries, *, base_strategy_profiles, observed_
                 base_profile=base_profile,
                 side_prefix="sell_",
                 target_count=sell_target,
+                recent_half_life_days=recent_half_life_days,
+                fresh_signal_max_bars=fresh_signal_max_bars,
+                stale_signal_start_bars=stale_signal_start_bars,
+                stale_signal_min_weight=stale_signal_min_weight,
             )
             tuned.update(sell_tuned)
             strategy_stats["sell"] = sell_stats
@@ -467,7 +669,18 @@ def _build_strategy_tuned_profiles(entries, *, base_strategy_profiles, observed_
     return tuned_profiles, stats
 
 
-def _build_cdc_daily_best_tuned_profiles(entries, *, base_cdc_profiles, observed_days, min_rows, target_daily_pick_alerts_per_day):
+def _build_cdc_daily_best_tuned_profiles(
+    entries,
+    *,
+    base_cdc_profiles,
+    observed_days,
+    min_rows,
+    target_daily_pick_alerts_per_day,
+    recent_half_life_days,
+    fresh_signal_max_bars,
+    stale_signal_start_bars,
+    stale_signal_min_weight,
+):
     cdc_rows = []
     for row in entries:
         if str(row.get("signal") or "").strip().upper() != "BUY":
@@ -496,13 +709,23 @@ def _build_cdc_daily_best_tuned_profiles(entries, *, base_cdc_profiles, observed
         base_score = _to_float(base_profile.get("daily_best_min_red_to_green_score"), 80.0)
         target_count = float(target_daily_pick_alerts_per_day) * float(observed_days)
         selected = _top_subset(rows, target_count=max(2.0, target_count), score_field="red_to_green_quality_score", minimum_keep=2, minimum_ratio=0.30)
+        selected_weights = [
+            _row_selection_weight(
+                row,
+                recent_half_life_days=recent_half_life_days,
+                fresh_signal_max_bars=fresh_signal_max_bars,
+                stale_signal_start_bars=stale_signal_start_bars,
+                stale_signal_min_weight=stale_signal_min_weight,
+            )
+            for row in selected
+        ]
         red_scores = [_to_float(row.get("red_to_green_quality_score")) for row in selected]
         bars_since = [_to_float(row.get("bars_since_signal")) for row in selected]
         reclaim_rate = sum(1 for row in selected if bool(row.get("green_flip_reclaim"))) / float(len(selected)) if selected else 0.0
         tuned = {
             "daily_best_min_red_to_green_score": _bounded_value(
                 base_score,
-                _quantile(red_scores, 0.10, default=base_score),
+                _weighted_quantile(red_scores, selected_weights, 0.10, default=base_score),
                 lower_delta=-4.0,
                 upper_delta=12.0,
                 absolute_lower=68.0,
@@ -512,7 +735,12 @@ def _build_cdc_daily_best_tuned_profiles(entries, *, base_cdc_profiles, observed
             "daily_best_max_bars_since_flip": int(
                 round(
                     _clamp(
-                        _quantile(bars_since, 0.75, default=float(base_profile.get("daily_best_max_bars_since_flip", 3))),
+                        _weighted_quantile(
+                            bars_since,
+                            selected_weights,
+                            0.75,
+                            default=float(base_profile.get("daily_best_max_bars_since_flip", 3)),
+                        ),
                         0.0,
                         3.0,
                     )
@@ -541,6 +769,10 @@ def build_auto_tuned_thresholds(
     min_alerts_per_strategy,
     target_alerts_per_day,
     target_daily_pick_alerts_per_day,
+    recent_half_life_days=9.0,
+    fresh_signal_max_bars=48,
+    stale_signal_start_bars=160,
+    stale_signal_min_weight=0.45,
     symbol_blend_full_alerts=36,
     symbol_min_blend_weight=0.15,
     symbol_confidence_cap_over_strategy=2.0,
@@ -559,6 +791,10 @@ def build_auto_tuned_thresholds(
         observed_days=observed_days,
         min_alerts_per_strategy=min_alerts_per_strategy,
         target_total_alerts_per_day=target_alerts_per_day,
+        recent_half_life_days=recent_half_life_days,
+        fresh_signal_max_bars=fresh_signal_max_bars,
+        stale_signal_start_bars=stale_signal_start_bars,
+        stale_signal_min_weight=stale_signal_min_weight,
     )
     tuned_symbol_profiles, symbol_stats = _build_symbol_tuned_profiles(
         directional,
@@ -566,6 +802,10 @@ def build_auto_tuned_thresholds(
         observed_days=observed_days,
         min_alerts_per_symbol=min_alerts_per_symbol,
         target_alerts_per_day=target_alerts_per_day,
+        recent_half_life_days=recent_half_life_days,
+        fresh_signal_max_bars=fresh_signal_max_bars,
+        stale_signal_start_bars=stale_signal_start_bars,
+        stale_signal_min_weight=stale_signal_min_weight,
     )
     tuned_symbol_profiles, symbol_stats = _shrink_symbol_tuned_profiles(
         tuned_symbol_profiles,
@@ -584,6 +824,10 @@ def build_auto_tuned_thresholds(
         observed_days=observed_days,
         min_rows=max(2, int(math.ceil(float(min_alerts_per_symbol) / 4.0))),
         target_daily_pick_alerts_per_day=target_daily_pick_alerts_per_day,
+        recent_half_life_days=recent_half_life_days,
+        fresh_signal_max_bars=fresh_signal_max_bars,
+        stale_signal_start_bars=stale_signal_start_bars,
+        stale_signal_min_weight=stale_signal_min_weight,
     )
 
     return {
@@ -592,6 +836,10 @@ def build_auto_tuned_thresholds(
         "history_rows": len(entries or []),
         "directional_rows": len(directional),
         "observed_days": int(observed_days),
+        "recent_half_life_days": float(recent_half_life_days),
+        "fresh_signal_max_bars": int(fresh_signal_max_bars),
+        "stale_signal_start_bars": int(stale_signal_start_bars),
+        "stale_signal_min_weight": float(stale_signal_min_weight),
         "symbol_blend_full_alerts": int(symbol_blend_full_alerts),
         "symbol_min_blend_weight": float(symbol_min_blend_weight),
         "symbol_confidence_cap_over_strategy": float(symbol_confidence_cap_over_strategy),

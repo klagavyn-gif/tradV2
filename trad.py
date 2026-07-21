@@ -1372,6 +1372,187 @@ def _profile_side_value(profile, signal, key, default=None):
     return profile.get(key, default)
 
 
+def _candidate_bars_since_signal(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    for key in ("bars_since_signal", "bars_since_entry", "bars_since_cross"):
+        value = _safe_float(candidate.get(key), None)
+        if isinstance(value, float):
+            return float(value)
+        value = _safe_float(plan.get(key), None)
+        if isinstance(value, float):
+            return float(value)
+    return None
+
+
+def _adjust_runtime_profile_value(value, delta, *, lower=None, upper=None, integer=False):
+    numeric = _safe_float(value, None)
+    if not isinstance(numeric, float):
+        return None
+    adjusted = float(numeric) + float(delta)
+    if isinstance(lower, (int, float)):
+        adjusted = max(float(lower), adjusted)
+    if isinstance(upper, (int, float)):
+        adjusted = min(float(upper), adjusted)
+    if integer:
+        return int(max(1, round(adjusted)))
+    return float(adjusted)
+
+
+def _resolve_candidate_runtime_profile(candidate, profile):
+    signal = str(candidate.get("signal") or "").upper().strip()
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+    market_regime = str(candidate.get("market_regime") or regime.get("market_regime") or "").strip().upper() or None
+    symbol_regime = str(candidate.get("symbol_regime") or regime.get("symbol_regime") or "").strip().upper() or None
+    side_bias = str(candidate.get("side_bias") or regime.get("side_bias") or "").strip().upper() or None
+    regime_confidence = _safe_float(candidate.get("regime_confidence"), _safe_float(regime.get("regime_confidence"), None))
+    bars_since = _candidate_bars_since_signal(candidate)
+
+    runtime_profile = {
+        "applied": False,
+        "reason": "profile_runtime_adjust_disabled",
+        "market_regime": market_regime,
+        "symbol_regime": symbol_regime,
+        "side_bias": side_bias,
+        "regime_alignment": "neutral",
+        "freshness_bucket": "unknown",
+        "bars_since_signal": bars_since,
+        "min_confidence": _profile_side_value(profile, signal, "min_confidence", None),
+        "min_score": _profile_side_value(profile, signal, "min_score", None),
+        "min_win_rate_pct": _profile_side_value(profile, signal, "min_win_rate_pct", None),
+        "min_expectancy_rr": _profile_side_value(profile, signal, "min_expectancy_rr", None),
+        "min_trades": _profile_side_value(profile, signal, "min_trades", None),
+        "min_source_count": _profile_side_value(profile, signal, "min_source_count", None),
+        "single_source_min_confidence": _profile_side_value(profile, signal, "single_source_min_confidence", None),
+        "min_robustness_score": _profile_side_value(profile, signal, "min_robustness_score", None),
+    }
+    if not bool(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_ADJUST_ENABLE", True)):
+        return runtime_profile
+
+    align_min_conf = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_ALIGN_MIN_REGIME_CONFIDENCE", 60.0), 60.0)
+    fresh_signal_bars = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_FRESH_SIGNAL_BARS", 24), 24.0)
+    stale_signal_bars = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_STALE_SIGNAL_BARS", 96), 96.0)
+    aligned_wr_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_ALIGNED_WIN_RATE_RELAX", 3.5), 3.5)
+    aligned_exp_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_ALIGNED_EXPECTANCY_RELAX", 0.03), 0.03)
+    aligned_trades_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_ALIGNED_TRADES_RELAX", 2), 2.0)
+    fresh_wr_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_FRESH_WIN_RATE_RELAX", 1.5), 1.5)
+    fresh_exp_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_FRESH_EXPECTANCY_RELAX", 0.015), 0.015)
+    stale_wr_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_STALE_WIN_RATE_UPLIFT", 2.0), 2.0)
+    stale_exp_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_STALE_EXPECTANCY_UPLIFT", 0.02), 0.02)
+    opposing_wr_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_OPPOSING_WIN_RATE_UPLIFT", 2.0), 2.0)
+    opposing_exp_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_OPPOSING_EXPECTANCY_UPLIFT", 0.02), 0.02)
+    risk_off_buy_wr_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_RISK_OFF_BUY_WIN_RATE_UPLIFT", 4.0), 4.0)
+    risk_off_buy_exp_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_RISK_OFF_BUY_EXPECTANCY_UPLIFT", 0.04), 0.04)
+
+    reasons = []
+    aligned_regime = (
+        signal in ("BUY", "SELL")
+        and side_bias in ("BUY", "SELL")
+        and signal == side_bias
+        and isinstance(regime_confidence, float)
+        and float(regime_confidence) >= float(align_min_conf)
+    )
+    opposing_regime = (
+        signal in ("BUY", "SELL")
+        and side_bias in ("BUY", "SELL")
+        and signal != side_bias
+        and isinstance(regime_confidence, float)
+        and float(regime_confidence) >= float(align_min_conf)
+    )
+    if aligned_regime:
+        runtime_profile["regime_alignment"] = "aligned"
+        if market_regime in ("TREND_UP", "TREND_DOWN", "BREAKOUT_EXPANSION"):
+            runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_win_rate_pct"),
+                -aligned_wr_relax,
+                lower=45.0,
+                upper=80.0,
+            )
+            runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_expectancy_rr"),
+                -aligned_exp_relax,
+                lower=-0.02,
+                upper=0.35,
+            )
+            runtime_profile["min_trades"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_trades"),
+                -aligned_trades_relax,
+                lower=4.0,
+                upper=80.0,
+                integer=True,
+            )
+            reasons.append("aligned_regime_relax")
+    elif opposing_regime:
+        runtime_profile["regime_alignment"] = "opposing"
+        runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_win_rate_pct"),
+            opposing_wr_uplift,
+            lower=45.0,
+            upper=80.0,
+        )
+        runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_expectancy_rr"),
+            opposing_exp_uplift,
+            lower=-0.02,
+            upper=0.35,
+        )
+        reasons.append("opposing_regime_uplift")
+
+    if market_regime == "RISK_OFF_EVENT" and signal == "BUY":
+        runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_win_rate_pct"),
+            risk_off_buy_wr_uplift,
+            lower=45.0,
+            upper=80.0,
+        )
+        runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_expectancy_rr"),
+            risk_off_buy_exp_uplift,
+            lower=-0.02,
+            upper=0.35,
+        )
+        reasons.append("risk_off_buy_uplift")
+
+    if isinstance(bars_since, float):
+        if float(bars_since) <= float(fresh_signal_bars):
+            runtime_profile["freshness_bucket"] = "fresh"
+            runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_win_rate_pct"),
+                -fresh_wr_relax,
+                lower=45.0,
+                upper=80.0,
+            )
+            runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_expectancy_rr"),
+                -fresh_exp_relax,
+                lower=-0.02,
+                upper=0.35,
+            )
+            reasons.append("fresh_signal_relax")
+        elif float(bars_since) >= float(stale_signal_bars):
+            runtime_profile["freshness_bucket"] = "stale"
+            runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_win_rate_pct"),
+                stale_wr_uplift,
+                lower=45.0,
+                upper=80.0,
+            )
+            runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+                runtime_profile.get("min_expectancy_rr"),
+                stale_exp_uplift,
+                lower=-0.02,
+                upper=0.35,
+            )
+            reasons.append("stale_signal_uplift")
+        else:
+            runtime_profile["freshness_bucket"] = "aging"
+
+    runtime_profile["applied"] = bool(reasons)
+    runtime_profile["reason"] = "+".join(reasons) if reasons else "profile_runtime_no_adjustment"
+    return runtime_profile
+
+
 def _merge_telegram_candidate_quality_profile(symbol, strategy):
     merged = {}
     strategy_profiles = getattr(config, "TELEGRAM_ALERT_STRATEGY_QUALITY_PROFILES", {}) or {}
@@ -1478,14 +1659,24 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
     expectancy = metrics.get("expectancy_rr")
     trades = metrics.get("trades")
 
-    min_confidence = _profile_side_value(profile, signal, "min_confidence", None)
-    min_score = _profile_side_value(profile, signal, "min_score", None)
-    min_win_rate = _profile_side_value(profile, signal, "min_win_rate_pct", None)
-    min_expectancy = _profile_side_value(profile, signal, "min_expectancy_rr", None)
-    min_trades = _profile_side_value(profile, signal, "min_trades", None)
-    min_sources = _profile_side_value(profile, signal, "min_source_count", None)
-    single_source_min_confidence = _profile_side_value(profile, signal, "single_source_min_confidence", None)
-    min_robustness = _profile_side_value(profile, signal, "min_robustness_score", None)
+    runtime_profile = _resolve_candidate_runtime_profile(candidate, profile)
+    candidate["profile_runtime_threshold_applied"] = bool(runtime_profile.get("applied"))
+    candidate["profile_runtime_threshold_reason"] = str(runtime_profile.get("reason") or "").strip() or None
+    candidate["profile_runtime_market_regime"] = str(runtime_profile.get("market_regime") or "").strip().upper() or None
+    candidate["profile_runtime_symbol_regime"] = str(runtime_profile.get("symbol_regime") or "").strip().upper() or None
+    candidate["profile_runtime_side_bias"] = str(runtime_profile.get("side_bias") or "").strip().upper() or None
+    candidate["profile_runtime_regime_alignment"] = str(runtime_profile.get("regime_alignment") or "").strip().lower() or None
+    candidate["profile_runtime_freshness_bucket"] = str(runtime_profile.get("freshness_bucket") or "").strip().lower() or None
+    candidate["profile_runtime_bars_since_signal"] = _safe_float(runtime_profile.get("bars_since_signal"), None)
+
+    min_confidence = runtime_profile.get("min_confidence")
+    min_score = runtime_profile.get("min_score")
+    min_win_rate = runtime_profile.get("min_win_rate_pct")
+    min_expectancy = runtime_profile.get("min_expectancy_rr")
+    min_trades = runtime_profile.get("min_trades")
+    min_sources = runtime_profile.get("min_source_count")
+    single_source_min_confidence = runtime_profile.get("single_source_min_confidence")
+    min_robustness = runtime_profile.get("min_robustness_score")
 
     try:
         min_confidence = float(min_confidence) if min_confidence is not None else None
@@ -1519,6 +1710,14 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
         min_robustness = float(min_robustness) if min_robustness is not None else None
     except Exception:
         min_robustness = None
+
+    candidate["profile_runtime_min_confidence"] = min_confidence
+    candidate["profile_runtime_min_score"] = min_score
+    candidate["profile_runtime_min_win_rate_pct"] = min_win_rate
+    candidate["profile_runtime_min_expectancy_rr"] = min_expectancy
+    candidate["profile_runtime_min_trades"] = min_trades
+    candidate["profile_runtime_min_source_count"] = min_sources
+    candidate["profile_runtime_min_robustness_score"] = min_robustness
 
     relax_meta = _cdc_sell_profile_relaxation(candidate, profile, metrics)
     if isinstance(relax_meta, dict):
@@ -4214,7 +4413,10 @@ def _candidate_ai_features(candidate):
             candidate.get("market_trend_bias") or candidate.get("market_side_bias") or regime.get("market_side_bias"),
             "",
         ),
+        "symbol_regime": _safe_upper_text(candidate.get("symbol_regime") or regime.get("symbol_regime"), ""),
         "side_bias": _safe_upper_text(candidate.get("side_bias") or regime.get("side_bias"), ""),
+        "regime_confidence": _safe_float(candidate.get("regime_confidence") or regime.get("regime_confidence"), None),
+        "regime_volatility_pct": _safe_float(candidate.get("regime_volatility_pct") or regime.get("volatility_pct"), None),
         "alert_tier": _safe_upper_text(profile.get("tier") if isinstance(profile, dict) else "", ""),
         "alert_intent": str(candidate.get("alert_intent") or "").strip().lower(),
         "confidence": _safe_float(candidate.get("confidence"), None),
@@ -4237,6 +4439,18 @@ def _candidate_ai_features(candidate):
         "symbol_cap": _safe_float(candidate.get("symbol_cap"), None),
         "quality_drop_confidence": _safe_float(candidate.get("quality_drop_confidence"), None),
         "quality_drop_entry_window": _safe_float(candidate.get("quality_drop_entry_window"), None),
+        "profile_runtime_threshold_applied": bool(candidate.get("profile_runtime_threshold_applied")),
+        "profile_runtime_threshold_reason": str(candidate.get("profile_runtime_threshold_reason") or "").strip() or None,
+        "profile_runtime_regime_alignment": str(candidate.get("profile_runtime_regime_alignment") or "").strip().lower() or None,
+        "profile_runtime_freshness_bucket": str(candidate.get("profile_runtime_freshness_bucket") or "").strip().lower() or None,
+        "profile_runtime_bars_since_signal": _safe_float(candidate.get("profile_runtime_bars_since_signal"), None),
+        "profile_runtime_min_confidence": _safe_float(candidate.get("profile_runtime_min_confidence"), None),
+        "profile_runtime_min_score": _safe_float(candidate.get("profile_runtime_min_score"), None),
+        "profile_runtime_min_win_rate_pct": _safe_float(candidate.get("profile_runtime_min_win_rate_pct"), None),
+        "profile_runtime_min_expectancy_rr": _safe_float(candidate.get("profile_runtime_min_expectancy_rr"), None),
+        "profile_runtime_min_trades": _safe_float(candidate.get("profile_runtime_min_trades"), None),
+        "profile_runtime_min_source_count": _safe_float(candidate.get("profile_runtime_min_source_count"), None),
+        "profile_runtime_min_robustness_score": _safe_float(candidate.get("profile_runtime_min_robustness_score"), None),
         "price_at_checkpoint": price_at_checkpoint,
         "entry_price": entry_price,
         "stop_loss": stop_loss,

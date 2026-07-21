@@ -409,6 +409,132 @@ def resolve_entry_ai_profile(candidate, *, config):
     }
 
 
+def resolve_entry_ai_runtime_threshold(candidate, *, base_min_conf, config):
+    base_threshold = _safe_float(base_min_conf, 0.0)
+    if base_threshold is None:
+        base_threshold = 0.0
+    fallback = {
+        "enabled": bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_THRESHOLD_ENABLE", True)),
+        "applied": False,
+        "base_min_confidence": float(base_threshold),
+        "adjustment": 0.0,
+        "min_confidence": float(max(55.0, min(95.0, base_threshold))),
+        "policy_tier": None,
+        "reason": None,
+    }
+    if not isinstance(candidate, dict):
+        return fallback
+
+    if not bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_THRESHOLD_ENABLE", True)):
+        fallback["reason"] = "entry_ai_runtime_threshold_disabled"
+        return fallback
+
+    policy_tier = str(candidate.get("entry_ai_policy_tier") or candidate.get("entry_ai_bucket") or "").strip().lower()
+    prob_entry = _safe_float(candidate.get("entry_ai_prob_entry"), None)
+    prob_avoid = _safe_float(candidate.get("entry_ai_prob_avoid"), None)
+    if not policy_tier and prob_entry is None and prob_avoid is None:
+        fallback["reason"] = "entry_ai_not_scored"
+        return fallback
+
+    premium_relax = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_PREMIUM_RELAXATION", 2.0), 2.0)
+    )
+    standard_relax = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_STANDARD_RELAXATION", 0.5), 0.5)
+    )
+    watch_uplift = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_WATCH_UPLIFT", 4.0), 4.0)
+    )
+    avoid_uplift = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_AVOID_UPLIFT", 8.0), 8.0)
+    )
+    entry_prob_relax_scale = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_ENTRY_PROB_RELAX_SCALE", 8.0), 8.0)
+    )
+    avoid_prob_uplift_scale = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_AVOID_PROB_UPLIFT_SCALE", 10.0), 10.0)
+    )
+    max_relaxation = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_MAX_RELAXATION", 3.0), 3.0)
+    )
+    max_uplift = abs(
+        _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_RUNTIME_MAX_UPLIFT", 10.0), 10.0)
+    )
+
+    if policy_tier == "premium":
+        entry_threshold = _safe_float(candidate.get("entry_ai_premium_entry_threshold"), None)
+        avoid_threshold = _safe_float(candidate.get("entry_ai_premium_avoid_threshold"), None)
+    elif policy_tier == "standard":
+        entry_threshold = _safe_float(candidate.get("entry_ai_standard_entry_threshold"), None)
+        avoid_threshold = _safe_float(candidate.get("entry_ai_standard_avoid_threshold"), None)
+    elif policy_tier == "watch":
+        entry_threshold = _safe_float(candidate.get("entry_ai_watch_entry_threshold"), None)
+        avoid_threshold = _safe_float(candidate.get("entry_ai_watch_avoid_threshold"), None)
+    else:
+        entry_threshold = None
+        avoid_threshold = None
+    if entry_threshold is None:
+        entry_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_ENTRY_THRESHOLD", 0.45), 0.45)
+    if avoid_threshold is None:
+        avoid_threshold = _safe_float(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_AVOID_THRESHOLD", 0.55), 0.55)
+
+    adjustment = 0.0
+    reasons = []
+    if policy_tier == "premium":
+        adjustment -= premium_relax
+        reasons.append("premium_relaxation")
+    elif policy_tier == "standard":
+        adjustment -= standard_relax
+        reasons.append("standard_relaxation")
+    elif policy_tier == "watch":
+        adjustment += watch_uplift
+        reasons.append("watch_uplift")
+    elif policy_tier == "avoid":
+        adjustment += avoid_uplift
+        reasons.append("avoid_uplift")
+
+    if isinstance(prob_entry, float) and isinstance(entry_threshold, float) and prob_entry > entry_threshold:
+        entry_edge = max(0.0, float(prob_entry) - float(entry_threshold))
+        entry_relax = min(max_relaxation, entry_edge * entry_prob_relax_scale)
+        if entry_relax > 0:
+            adjustment -= entry_relax
+            reasons.append("entry_prob_relaxation")
+
+    if isinstance(prob_avoid, float) and isinstance(avoid_threshold, float) and prob_avoid > avoid_threshold:
+        avoid_edge = max(0.0, float(prob_avoid) - float(avoid_threshold))
+        avoid_extra = min(max_uplift, avoid_edge * avoid_prob_uplift_scale)
+        if avoid_extra > 0:
+            adjustment += avoid_extra
+            reasons.append("avoid_prob_uplift")
+
+    adjustment = max(-max_relaxation, min(max_uplift, float(adjustment)))
+    min_confidence = max(55.0, min(95.0, float(base_threshold) + float(adjustment)))
+    return {
+        "enabled": True,
+        "applied": bool(reasons),
+        "base_min_confidence": float(base_threshold),
+        "adjustment": float(adjustment),
+        "min_confidence": float(min_confidence),
+        "policy_tier": policy_tier or None,
+        "reason": "+".join(reasons) if reasons else "entry_ai_runtime_threshold_no_adjustment",
+    }
+
+
+def attach_entry_ai_runtime_threshold(candidate, *, base_min_conf, config):
+    if not isinstance(candidate, dict):
+        return candidate
+    profile = resolve_entry_ai_runtime_threshold(candidate, base_min_conf=base_min_conf, config=config)
+    if not isinstance(profile, dict):
+        return candidate
+    candidate["entry_ai_runtime_threshold_enabled"] = bool(profile.get("enabled"))
+    candidate["entry_ai_runtime_threshold_applied"] = bool(profile.get("applied"))
+    candidate["entry_ai_runtime_threshold_adjustment"] = _safe_float(profile.get("adjustment"), 0.0)
+    candidate["entry_ai_runtime_base_min_confidence"] = _safe_float(profile.get("base_min_confidence"), None)
+    candidate["entry_ai_runtime_min_confidence"] = _safe_float(profile.get("min_confidence"), None)
+    candidate["entry_ai_runtime_threshold_reason"] = str(profile.get("reason") or "").strip() or None
+    return candidate
+
+
 def _append_entry_ai_message_line(message, profile, *, config):
     if not bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_MESSAGE_ENABLE", True)):
         return message
@@ -1653,6 +1779,40 @@ def finalize_candidates(context):
         if callable(score_candidate_with_live_entry_ai):
             candidate = score_candidate_with_live_entry_ai(candidate)
         candidate = attach_entry_ai_context(candidate, config=context["config"])
+        candidate = attach_entry_ai_runtime_threshold(
+            candidate,
+            base_min_conf=context["min_conf"],
+            config=context["config"],
+        )
+        runtime_min_conf = _safe_float(candidate.get("entry_ai_runtime_min_confidence"), None)
+        candidate_confidence = _safe_float(candidate.get("confidence"), None)
+        if isinstance(runtime_min_conf, float) and isinstance(candidate_confidence, float):
+            if candidate_confidence < runtime_min_conf:
+                reject_reason = str(
+                    candidate.get("entry_ai_runtime_threshold_reason") or "entry_ai_runtime_min_confidence_not_met"
+                )
+                context["quality_drop_counts"][reject_reason] += 1
+                record_candidate_reject(
+                    context,
+                    symbol=candidate.get("symbol"),
+                    strategy=candidate.get("strategy"),
+                    reason=reject_reason,
+                    signal=candidate.get("signal"),
+                    confidence=candidate_confidence,
+                    plan=candidate.get("plan"),
+                    edge_metrics=candidate.get("edge_metrics"),
+                    extra={
+                        "stage": "entry_ai_runtime_threshold",
+                        "required_confidence": runtime_min_conf,
+                        "threshold_adjustment": _safe_float(
+                            candidate.get("entry_ai_runtime_threshold_adjustment"),
+                            0.0,
+                        ),
+                        "entry_ai_bucket": str(candidate.get("entry_ai_bucket") or "").strip().lower() or None,
+                        "entry_ai_policy_tier": str(candidate.get("entry_ai_policy_tier") or "").strip().lower() or None,
+                    },
+                )
+                continue
         candidate["message"] = _append_dispatch_readiness_lines(
             candidate.get("message"),
             candidate,

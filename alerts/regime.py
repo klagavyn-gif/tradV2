@@ -20,13 +20,13 @@ _BLOCKED_BY_SYMBOL_REGIME = {
 
 _MARKET_ALERT_BUDGETS = {
     "TREND_UP": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
-    "TREND_DOWN": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
-    "BREAKOUT_EXPANSION": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
-    "PANIC_REVERSAL": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
+    "TREND_DOWN": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 2.0},
+    "BREAKOUT_EXPANSION": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
+    "PANIC_REVERSAL": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 3.0},
     "RANGE_BALANCED": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
-    "RANGE_HIGH_VOL": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 2.0},
-    "LOW_LIQUIDITY_CHOP": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 3.0},
-    "RISK_OFF_EVENT": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 4.0},
+    "RANGE_HIGH_VOL": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 5.0},
+    "LOW_LIQUIDITY_CHOP": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 6.0},
+    "RISK_OFF_EVENT": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 8.0},
 }
 
 
@@ -365,18 +365,26 @@ def apply_regime_to_candidate(candidate, *, regime_payload, config):
 
     reasons = []
     if signal in ("BUY", "SELL") and side_bias in ("BUY", "SELL") and signal != side_bias and regime_confidence >= 68.0:
-        multiplier *= 0.90
+        multiplier *= 0.88
         reasons.append("opposing_side_penalty")
     if market_regime == "RISK_OFF_EVENT" and signal == "BUY":
-        multiplier *= 0.88
+        multiplier *= 0.85
         reasons.append("risk_off_buy_penalty")
+    if market_regime in ("RISK_OFF_EVENT", "RANGE_HIGH_VOL", "LOW_LIQUIDITY_CHOP") and signal == "SELL":
+        multiplier *= 0.85
+        reasons.append("high_risk_sell_penalty")
     multiplier = _clip(multiplier, 0.60, 1.35)
 
     min_conf_uplift = 0.0
     if symbol_regime in ("LOW_LIQUIDITY_CHOP", "RANGE_HIGH_VOL"):
-        min_conf_uplift += _safe_float(getattr(config, "TELEGRAM_ALERT_REGIME_MIN_CONFIDENCE_UPLIFT", 4.0), 4.0)
+        min_conf_uplift += _safe_float(getattr(config, "TELEGRAM_ALERT_REGIME_MIN_CONFIDENCE_UPLIFT", 6.0), 6.0)
+        # Extra uplift for SELL signals in high-risk regimes
+        if signal == "SELL":
+            min_conf_uplift += 4.0
     if market_regime == "RISK_OFF_EVENT":
-        min_conf_uplift += _safe_float(getattr(config, "TELEGRAM_ALERT_REGIME_RISK_OFF_CONFIDENCE_UPLIFT", 6.0), 6.0)
+        min_conf_uplift += _safe_float(getattr(config, "TELEGRAM_ALERT_REGIME_RISK_OFF_CONFIDENCE_UPLIFT", 8.0), 8.0)
+        if signal == "SELL":
+            min_conf_uplift += 5.0
 
     block_enabled = bool(getattr(config, "TELEGRAM_ALERT_REGIME_BLOCK_ENABLED", True))
     blocked_strategies = set(payload.get("blocked_strategies") or [])

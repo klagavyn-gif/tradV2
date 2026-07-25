@@ -854,6 +854,14 @@ def _candidate_dispatch_status(candidate, *, config):
 
     short_trade_bucket = str(candidate.get("short_trade_bucket") or "").strip().lower()
     short_trade_reason = str(candidate.get("short_trade_reason") or "").strip()
+    short_play_watch_reason = str(candidate.get("short_play_watch_reason") or "").strip()
+    if bool(candidate.get("short_play_watch_candidate")) and intent == "watch":
+        return {
+            "label": "รอ",
+            "icon": "🟡",
+            "reason_group": "short-play watchlist",
+            "reason_detail": short_play_watch_reason or "ใกล้ผ่านเกณฑ์ short-play แล้ว รอจังหวะยืนยันเพิ่ม",
+        }
     if short_trade_bucket == "watch" or intent == "watch":
         return {
             "label": "รอ",
@@ -1024,10 +1032,100 @@ def _sell_continuation_entry_window_override(candidate, *, config):
     }
 
 
-def _cdc_sell_continuation_override(candidate, *, config, is_entry_window=None, distance_pct=None, distance_r=None):
+def _cdc_sell_continuation_take_profit_allowlist(candidate, *, helpers, config):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TAKE_PROFIT_ENABLE", True)):
+        return False, {}
+    if not isinstance(candidate, dict):
+        return False, {}
+    if str(candidate.get("strategy") or "").strip().upper() != "CDCVIX15":
+        return False, {}
+    if _signal_side(candidate) != "SELL":
+        return False, {}
+    if not bool(candidate.get("short_play_gate_applied")):
+        return False, {}
+    if str(candidate.get("short_play_gate_tier") or "").strip().lower() != "standard":
+        return False, {}
+    if str(candidate.get("short_play_gate_regime_alignment") or "").strip().lower() != "aligned":
+        return False, {}
+
+    helper_map = helpers if isinstance(helpers, dict) else {}
+    realized_metrics_fn = helper_map.get("short_play_watch_realized_metrics")
+    support_metrics_fn = helper_map.get("short_play_watch_strategy_support_metrics")
+    realized = realized_metrics_fn(candidate) if callable(realized_metrics_fn) else {}
+    support = support_metrics_fn(candidate) if callable(support_metrics_fn) else {}
+
+    symbol_signal = realized.get("symbol_signal") if isinstance(realized, dict) else {}
+    settled = _safe_float((symbol_signal or {}).get("settled_alerts"), None)
+    win_rate = _safe_float((symbol_signal or {}).get("win_rate_pct"), None)
+    avg_rr = _safe_float((symbol_signal or {}).get("avg_rr_realized"), None)
+    selected_alerts = _safe_float((support or {}).get("selected_alerts"), None)
+    weight_total = _safe_float((support or {}).get("selected_weight_total"), None)
+    support_win_rate = _safe_float((support or {}).get("recent_weighted_win_rate_floor"), None)
+    support_expectancy = _safe_float((support or {}).get("recent_weighted_expectancy_floor"), None)
+
+    min_settled = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_SETTLED", 6),
+        6.0,
+    )
+    min_wr = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_WIN_RATE", 75.0),
+        75.0,
+    )
+    min_rr = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_EXPECTANCY_RR", 1.0),
+        1.0,
+    )
+    min_selected_alerts = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_SELECTED_ALERTS", 24),
+        24.0,
+    )
+    min_support_wr = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_WIN_RATE", 60.0),
+        60.0,
+    )
+    min_support_rr = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_EXPECTANCY_RR", 1.0),
+        1.0,
+    )
+    min_support_weight = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_WEIGHT_TOTAL", 4.0),
+        4.0,
+    )
+
+    allow = (
+        isinstance(settled, float)
+        and settled >= float(min_settled)
+        and isinstance(win_rate, float)
+        and win_rate >= float(min_wr)
+        and isinstance(avg_rr, float)
+        and avg_rr >= float(min_rr)
+        and isinstance(selected_alerts, float)
+        and selected_alerts >= float(min_selected_alerts)
+        and isinstance(weight_total, float)
+        and weight_total >= float(min_support_weight)
+        and isinstance(support_win_rate, float)
+        and support_win_rate >= float(min_support_wr)
+        and isinstance(support_expectancy, float)
+        and support_expectancy >= float(min_support_rr)
+    )
+    return allow, {
+        "realized_settled_alerts": settled,
+        "realized_win_rate_pct": win_rate,
+        "realized_avg_rr": avg_rr,
+        "strategy_support_selected_alerts": selected_alerts,
+        "strategy_support_weight_total": weight_total,
+        "strategy_support_win_rate_pct": support_win_rate,
+        "strategy_support_expectancy_rr": support_expectancy,
+        "support_source": "strategy_recent_support",
+    }
+
+
+def _cdc_sell_continuation_override(candidate, *, config, helpers=None, is_entry_window=None, distance_pct=None, distance_r=None):
     if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENABLE", True)):
         return None
-    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TIME_STOP_ENABLE", True)):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TIME_STOP_ENABLE", True)) and not bool(
+        getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_TAKE_PROFIT_ENABLE", True)
+    ):
         return None
     if not isinstance(candidate, dict):
         return None
@@ -1042,8 +1140,18 @@ def _cdc_sell_continuation_override(candidate, *, config, is_entry_window=None, 
     plan_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
     plan_reason = str(plan.get("sell_continuation_override_reason") or "").strip()
     trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
-    if plan_mode not in {"entry", "watch"} and trigger != "TIME_STOP":
-        return None
+    allow_take_profit_continuation, allowlist_meta = _cdc_sell_continuation_take_profit_allowlist(
+        candidate,
+        helpers=helpers,
+        config=config,
+    )
+    if plan_mode not in {"entry", "watch"}:
+        if trigger == "TIME_STOP":
+            pass
+        elif trigger in {"TAKE_PROFIT", "PRECISION60_TAKE_PROFIT"} and allow_take_profit_continuation:
+            pass
+        else:
+            return None
 
     regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
     market_regime = str(regime.get("market_regime") or "").strip().upper()
@@ -1073,11 +1181,20 @@ def _cdc_sell_continuation_override(candidate, *, config, is_entry_window=None, 
     if plan_mode not in {"entry", "watch"}:
         plan_mode = "entry" if is_entry_window else "watch"
 
-    reason = plan_reason or (
-        f"cdc_time_stop_sell_continuation:d_pct={distance_pct},d_r={distance_r}"
-        if plan_mode == "entry"
-        else f"cdc_time_stop_sell_watch:d_pct={distance_pct},d_r={distance_r}"
-    )
+    if trigger in {"TAKE_PROFIT", "PRECISION60_TAKE_PROFIT"} and allow_take_profit_continuation:
+        reason = plan_reason or (
+            f"cdc_take_profit_sell_continuation:src={allowlist_meta.get('support_source')},d_pct={distance_pct},d_r={distance_r}"
+            if plan_mode == "entry"
+            else f"cdc_take_profit_sell_watch:src={allowlist_meta.get('support_source')},d_pct={distance_pct},d_r={distance_r}"
+        )
+    else:
+        reason = plan_reason or (
+            f"cdc_time_stop_sell_continuation:d_pct={distance_pct},d_r={distance_r}"
+            if plan_mode == "entry"
+            else f"cdc_time_stop_sell_watch:d_pct={distance_pct},d_r={distance_r}"
+        )
+    plan["sell_continuation_override_mode"] = plan_mode
+    plan["sell_continuation_override_reason"] = reason
     return plan_mode, reason
 
 
@@ -1336,7 +1453,7 @@ def attach_sltp_live_context(candidate, *, config):
     return candidate
 
 
-def classify_candidate_intent(candidate, *, config):
+def classify_candidate_intent(candidate, *, config, helpers=None):
     if not isinstance(candidate, dict):
         return "watch", "invalid_candidate"
     strategy = str(candidate.get("strategy") or "").strip().upper()
@@ -1351,6 +1468,7 @@ def classify_candidate_intent(candidate, *, config):
         continuation_override = _cdc_sell_continuation_override(
             candidate,
             config=config,
+            helpers=helpers,
             is_entry_window=is_entry_window,
             distance_pct=distance_pct,
             distance_r=distance_r,
@@ -1554,6 +1672,453 @@ def attach_short_trade_context(candidate, *, config):
     return candidate
 
 
+def _apply_short_play_watch_floor_metadata(candidate, meta):
+    if not isinstance(candidate, dict) or not isinstance(meta, dict):
+        return candidate
+    candidate["short_play_watch_floor_reason"] = str(meta.get("reason") or "").strip() or None
+    candidate["short_play_watch_realized_source"] = str(meta.get("realized_source") or "").strip().lower() or None
+    candidate["short_play_watch_realized_settled_alerts"] = _safe_float(meta.get("realized_settled_alerts"), None)
+    candidate["short_play_watch_realized_win_rate_pct"] = _safe_float(meta.get("realized_win_rate_pct"), None)
+    candidate["short_play_watch_realized_avg_rr"] = _safe_float(meta.get("realized_avg_rr"), None)
+    candidate["short_play_watch_walkforward_valid_trades"] = _safe_float(meta.get("walkforward_valid_trades"), None)
+    candidate["short_play_watch_walkforward_valid_win_rate_pct"] = _safe_float(meta.get("walkforward_valid_win_rate_pct"), None)
+    candidate["short_play_watch_walkforward_robustness_score"] = _safe_float(meta.get("walkforward_robustness_score"), None)
+    candidate["short_play_watch_required_robustness_score"] = _safe_float(meta.get("required_robustness_score"), None)
+    candidate["short_play_watch_strategy_support_selected_alerts"] = _safe_float(meta.get("strategy_support_selected_alerts"), None)
+    candidate["short_play_watch_strategy_support_weight_total"] = _safe_float(meta.get("strategy_support_weight_total"), None)
+    candidate["short_play_watch_strategy_support_win_rate_pct"] = _safe_float(meta.get("strategy_support_win_rate_pct"), None)
+    candidate["short_play_watch_strategy_support_expectancy_rr"] = _safe_float(meta.get("strategy_support_expectancy_rr"), None)
+    candidate["short_play_watch_support_source"] = str(meta.get("support_source") or "").strip().lower() or None
+    return candidate
+
+
+def _evaluate_short_play_watch_quality_floor(candidate, *, helpers, config, short_play_tier):
+    meta = {}
+    if not isinstance(candidate, dict):
+        return False, {"reason": "missing_candidate"}
+    if str(short_play_tier or "").strip().lower() != "standard":
+        return True, meta
+
+    helper_map = helpers if isinstance(helpers, dict) else {}
+    extract_walkforward_metrics = helper_map.get("extract_walkforward_metrics")
+    infer_1h_trend_snapshot = helper_map.get("infer_1h_trend_snapshot")
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+    signal = str(candidate.get("signal") or "").strip().upper()
+    optimizer_key = "sell_optimizer" if signal == "SELL" else "optimizer"
+    walkforward = (
+        extract_walkforward_metrics(plan, optimizer_key=optimizer_key)
+        if callable(extract_walkforward_metrics)
+        else {}
+    )
+    regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
+    wf_valid_trades = _safe_float((walkforward or {}).get("valid_trades"), None)
+    wf_valid_win_rate = _safe_float((walkforward or {}).get("valid_win_rate_pct"), None)
+    wf_robustness = _safe_float((walkforward or {}).get("robustness_score"), None)
+    meta["walkforward_valid_trades"] = wf_valid_trades
+    meta["walkforward_valid_win_rate_pct"] = wf_valid_win_rate
+    meta["walkforward_robustness_score"] = wf_robustness
+
+    if signal == "SELL":
+        trigger = str(plan.get("sell_trigger") or plan.get("exit_trigger") or "").strip().upper()
+        forecast_dir = str(plan.get("forecast_direction") or "").strip().upper()
+        continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+        market_regime = str(regime.get("market_regime") or "").strip().upper()
+        side_bias = str(regime.get("side_bias") or "").strip().upper()
+        trend_snapshot = infer_1h_trend_snapshot(item) if callable(infer_1h_trend_snapshot) else {}
+        trend_1h = str((trend_snapshot or {}).get("trend") or "").strip().upper()
+        meta["sell_trigger"] = trigger or None
+        meta["forecast_direction"] = forecast_dir or None
+        meta["sell_continuation_override_mode"] = continuation_mode or None
+        meta["market_regime"] = market_regime or None
+        meta["side_bias"] = side_bias or None
+        meta["trend_1h"] = trend_1h or None
+        if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_SELL_FORECAST", True)):
+            if forecast_dir and forecast_dir != "SELL":
+                meta["reason"] = "short_play_watch_sell_forecast_mismatch"
+                return False, meta
+        if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_TREND_DOWN_REGIME", True)):
+            if market_regime != "TREND_DOWN" or side_bias != "SELL":
+                meta["reason"] = "short_play_watch_sell_regime_mismatch"
+                return False, meta
+        if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_1H_TREND_DOWN", True)):
+            if trend_1h and trend_1h != "DOWN":
+                meta["reason"] = "short_play_watch_sell_1h_trend_mismatch"
+                return False, meta
+        if bool(
+            getattr(
+                config,
+                "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_CONTINUATION_OVERRIDE_FOR_EXIT_TRIGGER",
+                True,
+            )
+        ):
+            if trigger in _EXIT_TRIGGERS and continuation_mode not in {"entry", "watch"}:
+                meta["reason"] = "short_play_watch_sell_exit_without_override"
+                return False, meta
+
+    strategy_support_fn = helper_map.get("short_play_watch_strategy_support_metrics")
+    strategy_support = strategy_support_fn(candidate) if callable(strategy_support_fn) else {}
+    support_selected_alerts = _safe_float((strategy_support or {}).get("selected_alerts"), None)
+    support_weight_total = _safe_float((strategy_support or {}).get("selected_weight_total"), None)
+    support_win_rate = _safe_float((strategy_support or {}).get("recent_weighted_win_rate_floor"), None)
+    support_expectancy = _safe_float((strategy_support or {}).get("recent_weighted_expectancy_floor"), None)
+    meta["strategy_support_selected_alerts"] = support_selected_alerts
+    meta["strategy_support_weight_total"] = support_weight_total
+    meta["strategy_support_win_rate_pct"] = support_win_rate
+    meta["strategy_support_expectancy_rr"] = support_expectancy
+
+    support_min_selected_alerts = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_SELECTED_ALERTS", 24),
+        24.0,
+    )
+    support_min_win_rate = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_WIN_RATE", 60.0),
+        60.0,
+    )
+    support_min_expectancy = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_EXPECTANCY_RR", 1.0),
+        1.0,
+    )
+    support_min_weight_total = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_MIN_WEIGHT_TOTAL", 4.0),
+        4.0,
+    )
+    support_enabled = bool(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_STRATEGY_SUPPORT_ENABLE", True)
+    )
+    support_ok = (
+        support_enabled
+        and str(candidate.get("strategy") or "").strip().upper() == "CDCVIX15"
+        and str(candidate.get("signal") or "").strip().upper() == "SELL"
+        and isinstance(support_selected_alerts, float)
+        and support_selected_alerts >= float(support_min_selected_alerts)
+        and isinstance(support_win_rate, float)
+        and support_win_rate >= float(support_min_win_rate)
+        and isinstance(support_expectancy, float)
+        and support_expectancy >= float(support_min_expectancy)
+        and isinstance(support_weight_total, float)
+        and support_weight_total >= float(support_min_weight_total)
+    )
+
+    if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REQUIRE_WALKFORWARD_ROBUSTNESS", True)):
+        required_robustness = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_WALKFORWARD_MIN_ROBUSTNESS", 50.0),
+            50.0,
+        )
+        profile_required_robustness = _safe_float(candidate.get("profile_runtime_min_robustness_score"), None)
+        if isinstance(profile_required_robustness, float):
+            required_robustness = max(float(required_robustness), float(profile_required_robustness))
+        required_valid_trades = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_WALKFORWARD_MIN_VALID_TRADES", 6),
+            6.0,
+        )
+        required_valid_win_rate = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_WALKFORWARD_MIN_VALID_WIN_RATE", 55.0),
+            55.0,
+        )
+        meta["required_robustness_score"] = required_robustness
+        walkforward_ok = (
+            isinstance(wf_valid_trades, float)
+            and wf_valid_trades >= float(required_valid_trades)
+            and isinstance(wf_valid_win_rate, float)
+            and wf_valid_win_rate >= float(required_valid_win_rate)
+            and isinstance(wf_robustness, float)
+            and wf_robustness >= float(required_robustness)
+        )
+        if not walkforward_ok and not support_ok:
+            if not isinstance(wf_valid_trades, float) or wf_valid_trades < float(required_valid_trades):
+                meta["reason"] = "walkforward_valid_trades_below_short_play_allowlist"
+            elif not isinstance(wf_valid_win_rate, float) or wf_valid_win_rate < float(required_valid_win_rate):
+                meta["reason"] = "walkforward_valid_win_rate_below_short_play_allowlist"
+            else:
+                meta["reason"] = "walkforward_robustness_below_short_play_allowlist"
+            return False, meta
+        meta["support_source"] = "walkforward" if walkforward_ok else "strategy_recent_support"
+
+    if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REQUIRE_REALIZED_FILTER", True)):
+        return True, meta
+
+    realized_metrics_fn = helper_map.get("short_play_watch_realized_metrics")
+    realized = realized_metrics_fn(candidate) if callable(realized_metrics_fn) else {}
+    if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_ONLY", True)):
+        bucket = realized.get("symbol_signal") if isinstance(realized, dict) else {}
+        settled = _safe_float((bucket or {}).get("settled_alerts"), None)
+        win_rate = _safe_float((bucket or {}).get("win_rate_pct"), None)
+        avg_rr = _safe_float((bucket or {}).get("avg_rr_realized"), None)
+        meta["realized_source"] = "symbol_signal_allowlist"
+        meta["realized_settled_alerts"] = settled
+        meta["realized_win_rate_pct"] = win_rate
+        meta["realized_avg_rr"] = avg_rr
+        min_settled = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_SETTLED", 6),
+            6.0,
+        )
+        min_wr = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_WIN_RATE", 75.0),
+            75.0,
+        )
+        min_rr = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_ALLOWLIST_REALIZED_MIN_EXPECTANCY_RR", 1.0),
+            1.0,
+        )
+        if not isinstance(settled, float) or settled < float(min_settled):
+            meta["reason"] = "realized_symbol_signal_not_in_short_play_allowlist"
+            return False, meta
+        if not isinstance(win_rate, float) or win_rate < float(min_wr):
+            meta["reason"] = "realized_symbol_signal_win_rate_below_short_play_allowlist"
+            return False, meta
+        if not isinstance(avg_rr, float) or avg_rr < float(min_rr):
+            meta["reason"] = "realized_symbol_signal_expectancy_below_short_play_allowlist"
+            return False, meta
+        return True, meta
+
+    candidates = (
+        (
+            "symbol_signal",
+            realized.get("symbol_signal") if isinstance(realized, dict) else None,
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_SYMBOL_MIN_SETTLED", 6), 6.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_SYMBOL_MIN_WIN_RATE", 50.0), 50.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_SYMBOL_MIN_EXPECTANCY_RR", 0.5), 0.5),
+        ),
+        (
+            "strategy_signal",
+            realized.get("strategy_signal") if isinstance(realized, dict) else None,
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_SIGNAL_MIN_SETTLED", 20), 20.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_SIGNAL_MIN_WIN_RATE", 55.0), 55.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_SIGNAL_MIN_EXPECTANCY_RR", 0.25), 0.25),
+        ),
+        (
+            "strategy",
+            realized.get("strategy") if isinstance(realized, dict) else None,
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_MIN_SETTLED", 40), 40.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_MIN_WIN_RATE", 50.0), 50.0),
+            _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_REALIZED_STRATEGY_MIN_EXPECTANCY_RR", 0.25), 0.25),
+        ),
+    )
+
+    chosen_source = None
+    for source_name, bucket, min_settled, min_wr, min_rr in candidates:
+        bucket = bucket if isinstance(bucket, dict) else {}
+        settled = _safe_float(bucket.get("settled_alerts"), None)
+        if not isinstance(settled, float) or settled < float(min_settled):
+            continue
+        chosen_source = source_name
+        win_rate = _safe_float(bucket.get("win_rate_pct"), None)
+        avg_rr = _safe_float(bucket.get("avg_rr_realized"), None)
+        meta["realized_source"] = source_name
+        meta["realized_settled_alerts"] = settled
+        meta["realized_win_rate_pct"] = win_rate
+        meta["realized_avg_rr"] = avg_rr
+        if not isinstance(win_rate, float) or win_rate < float(min_wr):
+            meta["reason"] = f"realized_{source_name}_win_rate_below_floor"
+            return False, meta
+        if not isinstance(avg_rr, float) or avg_rr < float(min_rr):
+            meta["reason"] = f"realized_{source_name}_expectancy_below_floor"
+            return False, meta
+        return True, meta
+
+    meta["reason"] = "realized_support_missing_for_short_play_watch"
+    meta["realized_source"] = chosen_source
+    return False, meta
+
+
+def _resolve_short_play_watch_promotion(candidate, *, gate_stage, gate_reason, edge_metrics, config, helpers=None):
+    if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_ENABLE", True)):
+        return None
+    if not isinstance(candidate, dict):
+        return None
+    if not bool(candidate.get("short_play_gate_applied")):
+        return None
+    allowed_tiers = getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_TIERS", {"standard"}) or {"standard"}
+    if isinstance(allowed_tiers, str):
+        allowed_tiers = {allowed_tiers}
+    allowed_tiers = {
+        str(value or "").strip().lower()
+        for value in allowed_tiers
+        if str(value or "").strip()
+    }
+    short_play_tier = str(candidate.get("short_play_gate_tier") or "").strip().lower()
+    if allowed_tiers and short_play_tier not in allowed_tiers:
+        return None
+    regime_alignment = str(candidate.get("short_play_gate_regime_alignment") or "").strip().lower()
+    if regime_alignment == "opposing":
+        return None
+    if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_REQUIRE_ALIGNED_REGIME", True)) and regime_alignment != "aligned":
+        return None
+
+    confidence = _safe_float(candidate.get("confidence"), None)
+    min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MIN_CONFIDENCE", 76.0), 76.0)
+    if not isinstance(confidence, float) or confidence < float(min_confidence):
+        return None
+
+    bars_since_signal = _safe_float(candidate.get("short_play_gate_bars_since_signal"), _bars_since_signal(candidate))
+    max_bars_since_signal = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_BARS_SINCE_SIGNAL", 36),
+        36.0,
+    )
+    if isinstance(bars_since_signal, float) and bars_since_signal > float(max_bars_since_signal):
+        return None
+
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    risk_reward = _safe_float(plan.get("risk_reward"), None)
+    rr_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_RR_FLOOR", 0.9), 0.9)
+    if isinstance(risk_reward, float) and risk_reward < float(rr_floor):
+        return None
+
+    metrics = edge_metrics if isinstance(edge_metrics, dict) else {}
+    max_wr_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_WIN_RATE_GAP", 6.0), 6.0)
+    max_exp_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_EXPECTANCY_GAP", 0.04), 0.04)
+    max_trades_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_TRADES_GAP", 3), 3.0)
+    max_conf_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_CONFIDENCE_GAP", 8.0), 8.0)
+    max_score_gap = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_MAX_SCORE_GAP", 8.0), 8.0)
+
+    comparisons = {
+        "candidate_win_rate_below_min": (
+            _safe_float(metrics.get("win_rate_pct"), None),
+            _safe_float(candidate.get("short_play_gate_effective_min_win_rate_pct"), None),
+            max_wr_gap,
+            "win rate ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+        "candidate_expectancy_below_min": (
+            _safe_float(metrics.get("expectancy_rr"), None),
+            _safe_float(candidate.get("short_play_gate_effective_min_expectancy_rr"), None),
+            max_exp_gap,
+            "expectancy ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+        "candidate_trades_below_min": (
+            _safe_float(metrics.get("trades"), None),
+            _safe_float(candidate.get("short_play_gate_effective_min_trades"), None),
+            max_trades_gap,
+            "จำนวน sample ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+        "candidate_profile_confidence_below_min": (
+            _safe_float(candidate.get("confidence"), None),
+            _safe_float(candidate.get("profile_runtime_min_confidence"), None),
+            max_conf_gap,
+            "confidence ยังต่ำกว่า profile ไม่มาก",
+        ),
+        "candidate_profile_score_below_min": (
+            _safe_float(candidate.get("score"), None),
+            _safe_float(candidate.get("profile_runtime_min_score"), None),
+            max_score_gap,
+            "score ยังต่ำกว่า profile ไม่มาก",
+        ),
+        "candidate_profile_win_rate_below_min": (
+            _safe_float(metrics.get("win_rate_pct"), None),
+            _safe_float(candidate.get("profile_runtime_min_win_rate_pct"), None),
+            max_wr_gap,
+            "win rate profile ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+        "candidate_profile_expectancy_below_min": (
+            _safe_float(metrics.get("expectancy_rr"), None),
+            _safe_float(candidate.get("profile_runtime_min_expectancy_rr"), None),
+            max_exp_gap,
+            "expectancy profile ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+        "candidate_profile_trades_below_min": (
+            _safe_float(metrics.get("trades"), None),
+            _safe_float(candidate.get("profile_runtime_min_trades"), None),
+            max_trades_gap,
+            "จำนวน sample profile ยังต่ำกว่าเกณฑ์ไม่มาก",
+        ),
+    }
+    comparison = comparisons.get(str(gate_reason or "").strip())
+    if not comparison:
+        return None
+    actual_value, required_value, max_gap, detail = comparison
+    if not isinstance(actual_value, float) or not isinstance(required_value, float):
+        return None
+    gap = float(required_value) - float(actual_value)
+    if gap < 0 or gap > float(max_gap):
+        return None
+
+    floor_ok, floor_meta = _evaluate_short_play_watch_quality_floor(
+        candidate,
+        helpers=helpers if isinstance(helpers, dict) else {},
+        config=config,
+        short_play_tier=short_play_tier,
+    )
+    candidate = _apply_short_play_watch_floor_metadata(candidate, floor_meta)
+    if not floor_ok:
+        return None
+
+    return {
+        "stage": str(gate_stage or "").strip().lower() or None,
+        "gate_reason": str(gate_reason or "").strip() or None,
+        "tier": short_play_tier or None,
+        "reason": str(detail),
+        "gap": float(gap),
+        "actual_value": float(actual_value),
+        "required_value": float(required_value),
+        "floor_reason": str((floor_meta or {}).get("reason") or "").strip() or None,
+        "realized_source": str((floor_meta or {}).get("realized_source") or "").strip().lower() or None,
+        "realized_settled_alerts": _safe_float((floor_meta or {}).get("realized_settled_alerts"), None),
+        "realized_win_rate_pct": _safe_float((floor_meta or {}).get("realized_win_rate_pct"), None),
+        "realized_avg_rr": _safe_float((floor_meta or {}).get("realized_avg_rr"), None),
+        "walkforward_valid_trades": _safe_float((floor_meta or {}).get("walkforward_valid_trades"), None),
+        "walkforward_valid_win_rate_pct": _safe_float((floor_meta or {}).get("walkforward_valid_win_rate_pct"), None),
+        "walkforward_robustness_score": _safe_float((floor_meta or {}).get("walkforward_robustness_score"), None),
+        "required_robustness_score": _safe_float((floor_meta or {}).get("required_robustness_score"), None),
+        "strategy_support_selected_alerts": _safe_float((floor_meta or {}).get("strategy_support_selected_alerts"), None),
+        "strategy_support_weight_total": _safe_float((floor_meta or {}).get("strategy_support_weight_total"), None),
+        "strategy_support_win_rate_pct": _safe_float((floor_meta or {}).get("strategy_support_win_rate_pct"), None),
+        "strategy_support_expectancy_rr": _safe_float((floor_meta or {}).get("strategy_support_expectancy_rr"), None),
+        "support_source": str((floor_meta or {}).get("support_source") or "").strip().lower() or None,
+    }
+
+
+def _mark_short_play_watch_candidate(candidate, promotion):
+    if not isinstance(candidate, dict) or not isinstance(promotion, dict):
+        return candidate
+    candidate["short_play_watch_candidate"] = True
+    candidate["short_play_watch_stage"] = str(promotion.get("stage") or "").strip().lower() or None
+    candidate["short_play_watch_gate_reason"] = str(promotion.get("gate_reason") or "").strip() or None
+    candidate["short_play_watch_tier"] = str(promotion.get("tier") or "").strip().lower() or None
+    candidate["short_play_watch_reason"] = str(promotion.get("reason") or "").strip() or None
+    candidate["short_play_watch_gap"] = _safe_float(promotion.get("gap"), None)
+    candidate["short_play_watch_floor_reason"] = str(promotion.get("floor_reason") or "").strip() or None
+    candidate["short_play_watch_realized_source"] = str(promotion.get("realized_source") or "").strip().lower() or None
+    candidate["short_play_watch_realized_settled_alerts"] = _safe_float(promotion.get("realized_settled_alerts"), None)
+    candidate["short_play_watch_realized_win_rate_pct"] = _safe_float(promotion.get("realized_win_rate_pct"), None)
+    candidate["short_play_watch_realized_avg_rr"] = _safe_float(promotion.get("realized_avg_rr"), None)
+    candidate["short_play_watch_walkforward_valid_trades"] = _safe_float(promotion.get("walkforward_valid_trades"), None)
+    candidate["short_play_watch_walkforward_valid_win_rate_pct"] = _safe_float(promotion.get("walkforward_valid_win_rate_pct"), None)
+    candidate["short_play_watch_walkforward_robustness_score"] = _safe_float(promotion.get("walkforward_robustness_score"), None)
+    candidate["short_play_watch_required_robustness_score"] = _safe_float(promotion.get("required_robustness_score"), None)
+    candidate["short_play_watch_strategy_support_selected_alerts"] = _safe_float(promotion.get("strategy_support_selected_alerts"), None)
+    candidate["short_play_watch_strategy_support_weight_total"] = _safe_float(promotion.get("strategy_support_weight_total"), None)
+    candidate["short_play_watch_strategy_support_win_rate_pct"] = _safe_float(promotion.get("strategy_support_win_rate_pct"), None)
+    candidate["short_play_watch_strategy_support_expectancy_rr"] = _safe_float(promotion.get("strategy_support_expectancy_rr"), None)
+    candidate["short_play_watch_support_source"] = str(promotion.get("support_source") or "").strip().lower() or None
+    return candidate
+
+
+def _append_short_play_watch_lines(message, candidate):
+    if not isinstance(message, str) or not message.strip() or not isinstance(candidate, dict):
+        return message
+    if not bool(candidate.get("short_play_watch_candidate")):
+        return message
+    if "<b>⚡ Short Play:</b>" in message:
+        return message
+    reason = str(candidate.get("short_play_watch_reason") or "").strip()
+    gate_reason = str(candidate.get("short_play_watch_gate_reason") or "").strip()
+    stage = str(candidate.get("short_play_watch_stage") or "").strip().lower()
+    tier = str(candidate.get("short_play_watch_tier") or "").strip().lower()
+    gap = _safe_float(candidate.get("short_play_watch_gap"), None)
+    parts = ["watchlist เฝ้าจังหวะสั้น"]
+    if tier:
+        parts.append(f"tier {tier}")
+    if reason:
+        parts.append(reason)
+    if isinstance(gap, float):
+        parts.append(f"gap {gap:.2f}")
+    if gate_reason:
+        parts.append(gate_reason)
+    if stage:
+        parts.append(stage)
+    return _insert_message_line_before_footer(message, "<b>⚡ Short Play:</b> " + " | ".join(parts))
+
+
 def prepare_candidate_context(results, min_conf, *, config, helpers, get_now, runtime_context=None):
     actionzone_precision60_profile = helpers["actionzone_precision60_profile"]
     strict_60_mode_enabled = helpers["strict_60_mode_enabled"]
@@ -1736,55 +2301,135 @@ def finalize_candidates(context):
     for candidate in context["candidates"]:
         gate_ok, gate_reason, edge_metrics = evaluate_candidate_backtest_gate(candidate)
         if not gate_ok:
-            context["quality_drop_counts"][gate_reason] += 1
-            record_candidate_reject(
-                context,
-                symbol=candidate.get("symbol"),
-                strategy=candidate.get("strategy"),
-                reason=gate_reason,
-                signal=candidate.get("signal"),
-                confidence=candidate.get("confidence"),
-                plan=candidate.get("plan"),
+            watch_promotion = _resolve_short_play_watch_promotion(
+                candidate,
+                gate_stage="backtest_gate",
+                gate_reason=gate_reason,
                 edge_metrics=edge_metrics,
-                extra={"stage": "backtest_gate"},
+                config=context["config"],
+                helpers=context.get("helpers"),
             )
-            continue
-        candidate["edge_metrics"] = edge_metrics
+            if isinstance(watch_promotion, dict):
+                context["quality_drop_counts"]["short_play_watch_promoted"] += 1
+                context["quality_drop_counts"]["short_play_watch_promoted_backtest_gate"] += 1
+                candidate["edge_metrics"] = edge_metrics if isinstance(edge_metrics, dict) else {}
+                candidate = _mark_short_play_watch_candidate(candidate, watch_promotion)
+            else:
+                context["quality_drop_counts"][gate_reason] += 1
+                record_candidate_reject(
+                    context,
+                    symbol=candidate.get("symbol"),
+                    strategy=candidate.get("strategy"),
+                    reason=gate_reason,
+                    signal=candidate.get("signal"),
+                    confidence=candidate.get("confidence"),
+                    plan=candidate.get("plan"),
+                    edge_metrics=edge_metrics,
+                    extra={
+                        "stage": "backtest_gate",
+                        "short_play_gate_applied": bool(candidate.get("short_play_gate_applied")) if "short_play_gate_applied" in candidate else None,
+                        "short_play_gate_reason": str(candidate.get("short_play_gate_reason") or "").strip() or None,
+                        "short_play_gate_tier": str(candidate.get("short_play_gate_tier") or "").strip().lower() or None,
+                        "short_play_gate_regime_alignment": str(candidate.get("short_play_gate_regime_alignment") or "").strip().lower() or None,
+                        "short_play_watch_floor_reason": str(candidate.get("short_play_watch_floor_reason") or "").strip() or None,
+                        "short_play_watch_realized_source": str(candidate.get("short_play_watch_realized_source") or "").strip().lower() or None,
+                        "short_play_watch_realized_settled_alerts": _safe_float(candidate.get("short_play_watch_realized_settled_alerts"), None),
+                        "short_play_watch_realized_win_rate_pct": _safe_float(candidate.get("short_play_watch_realized_win_rate_pct"), None),
+                        "short_play_watch_realized_avg_rr": _safe_float(candidate.get("short_play_watch_realized_avg_rr"), None),
+                        "short_play_watch_walkforward_valid_trades": _safe_float(candidate.get("short_play_watch_walkforward_valid_trades"), None),
+                        "short_play_watch_walkforward_valid_win_rate_pct": _safe_float(candidate.get("short_play_watch_walkforward_valid_win_rate_pct"), None),
+                        "short_play_watch_walkforward_robustness_score": _safe_float(candidate.get("short_play_watch_walkforward_robustness_score"), None),
+                        "short_play_watch_required_robustness_score": _safe_float(candidate.get("short_play_watch_required_robustness_score"), None),
+                        "short_play_watch_strategy_support_selected_alerts": _safe_float(candidate.get("short_play_watch_strategy_support_selected_alerts"), None),
+                        "short_play_watch_strategy_support_weight_total": _safe_float(candidate.get("short_play_watch_strategy_support_weight_total"), None),
+                        "short_play_watch_strategy_support_win_rate_pct": _safe_float(candidate.get("short_play_watch_strategy_support_win_rate_pct"), None),
+                        "short_play_watch_strategy_support_expectancy_rr": _safe_float(candidate.get("short_play_watch_strategy_support_expectancy_rr"), None),
+                        "short_play_watch_support_source": str(candidate.get("short_play_watch_support_source") or "").strip().lower() or None,
+                        "short_play_gate_bars_since_signal": _safe_float(candidate.get("short_play_gate_bars_since_signal"), None),
+                        "required_win_rate_pct": _safe_float(candidate.get("short_play_gate_effective_min_win_rate_pct"), None),
+                        "required_expectancy_rr": _safe_float(candidate.get("short_play_gate_effective_min_expectancy_rr"), None),
+                        "required_trades": _safe_float(candidate.get("short_play_gate_effective_min_trades"), None),
+                    },
+                )
+                continue
+        else:
+            candidate["edge_metrics"] = edge_metrics
         profile_ok, profile_reason, profile_metrics = evaluate_candidate_symbol_strategy_gate(candidate)
         if not profile_ok:
-            context["quality_drop_counts"][profile_reason] += 1
-            record_candidate_reject(
-                context,
-                symbol=candidate.get("symbol"),
-                strategy=candidate.get("strategy"),
-                reason=profile_reason,
-                signal=candidate.get("signal"),
-                confidence=candidate.get("confidence"),
-                plan=candidate.get("plan"),
+            watch_promotion = _resolve_short_play_watch_promotion(
+                candidate,
+                gate_stage="symbol_strategy_gate",
+                gate_reason=profile_reason,
                 edge_metrics=profile_metrics if isinstance(profile_metrics, dict) else edge_metrics,
-                extra={
-                    "stage": "symbol_strategy_gate",
-                    "required_confidence": _safe_float(candidate.get("profile_runtime_min_confidence"), None),
-                    "required_score": _safe_float(candidate.get("profile_runtime_min_score"), None),
-                    "required_win_rate_pct": _safe_float(candidate.get("profile_runtime_min_win_rate_pct"), None),
-                    "required_expectancy_rr": _safe_float(candidate.get("profile_runtime_min_expectancy_rr"), None),
-                    "required_trades": _safe_float(candidate.get("profile_runtime_min_trades"), None),
-                    "required_source_count": _safe_float(candidate.get("profile_runtime_min_source_count"), None),
-                    "required_robustness_score": _safe_float(candidate.get("profile_runtime_min_robustness_score"), None),
-                    "profile_runtime_reason": str(candidate.get("profile_runtime_threshold_reason") or "").strip() or None,
-                    "profile_runtime_freshness_bucket": str(candidate.get("profile_runtime_freshness_bucket") or "").strip().lower() or None,
-                    "profile_runtime_regime_alignment": str(candidate.get("profile_runtime_regime_alignment") or "").strip().lower() or None,
-                    "market_regime": str(candidate.get("profile_runtime_market_regime") or "").strip().upper() or None,
-                    "symbol_regime": str(candidate.get("profile_runtime_symbol_regime") or "").strip().upper() or None,
-                },
+                config=context["config"],
+                helpers=context.get("helpers"),
             )
-            continue
+            if isinstance(watch_promotion, dict):
+                context["quality_drop_counts"]["short_play_watch_promoted"] += 1
+                context["quality_drop_counts"]["short_play_watch_promoted_symbol_strategy_gate"] += 1
+                candidate["edge_metrics"] = profile_metrics if isinstance(profile_metrics, dict) and profile_metrics else candidate.get("edge_metrics")
+                candidate = _mark_short_play_watch_candidate(candidate, watch_promotion)
+            else:
+                context["quality_drop_counts"][profile_reason] += 1
+                record_candidate_reject(
+                    context,
+                    symbol=candidate.get("symbol"),
+                    strategy=candidate.get("strategy"),
+                    reason=profile_reason,
+                    signal=candidate.get("signal"),
+                    confidence=candidate.get("confidence"),
+                    plan=candidate.get("plan"),
+                    edge_metrics=profile_metrics if isinstance(profile_metrics, dict) else edge_metrics,
+                    extra={
+                        "stage": "symbol_strategy_gate",
+                        "required_confidence": _safe_float(candidate.get("profile_runtime_min_confidence"), None),
+                        "required_score": _safe_float(candidate.get("profile_runtime_min_score"), None),
+                        "required_win_rate_pct": _safe_float(candidate.get("profile_runtime_min_win_rate_pct"), None),
+                        "required_expectancy_rr": _safe_float(candidate.get("profile_runtime_min_expectancy_rr"), None),
+                        "required_trades": _safe_float(candidate.get("profile_runtime_min_trades"), None),
+                        "required_source_count": _safe_float(candidate.get("profile_runtime_min_source_count"), None),
+                        "required_robustness_score": _safe_float(candidate.get("profile_runtime_min_robustness_score"), None),
+                        "profile_runtime_reason": str(candidate.get("profile_runtime_threshold_reason") or "").strip() or None,
+                        "profile_runtime_freshness_bucket": str(candidate.get("profile_runtime_freshness_bucket") or "").strip().lower() or None,
+                        "profile_runtime_regime_alignment": str(candidate.get("profile_runtime_regime_alignment") or "").strip().lower() or None,
+                        "market_regime": str(candidate.get("profile_runtime_market_regime") or "").strip().upper() or None,
+                        "symbol_regime": str(candidate.get("profile_runtime_symbol_regime") or "").strip().upper() or None,
+                        "short_play_gate_applied": bool(candidate.get("short_play_gate_applied")) if "short_play_gate_applied" in candidate else None,
+                        "short_play_gate_reason": str(candidate.get("short_play_gate_reason") or "").strip() or None,
+                        "short_play_gate_tier": str(candidate.get("short_play_gate_tier") or "").strip().lower() or None,
+                        "short_play_gate_regime_alignment": str(candidate.get("short_play_gate_regime_alignment") or "").strip().lower() or None,
+                        "short_play_watch_floor_reason": str(candidate.get("short_play_watch_floor_reason") or "").strip() or None,
+                        "short_play_watch_realized_source": str(candidate.get("short_play_watch_realized_source") or "").strip().lower() or None,
+                        "short_play_watch_realized_settled_alerts": _safe_float(candidate.get("short_play_watch_realized_settled_alerts"), None),
+                        "short_play_watch_realized_win_rate_pct": _safe_float(candidate.get("short_play_watch_realized_win_rate_pct"), None),
+                        "short_play_watch_realized_avg_rr": _safe_float(candidate.get("short_play_watch_realized_avg_rr"), None),
+                        "short_play_watch_walkforward_valid_trades": _safe_float(candidate.get("short_play_watch_walkforward_valid_trades"), None),
+                        "short_play_watch_walkforward_valid_win_rate_pct": _safe_float(candidate.get("short_play_watch_walkforward_valid_win_rate_pct"), None),
+                        "short_play_watch_walkforward_robustness_score": _safe_float(candidate.get("short_play_watch_walkforward_robustness_score"), None),
+                        "short_play_watch_required_robustness_score": _safe_float(candidate.get("short_play_watch_required_robustness_score"), None),
+                        "short_play_watch_strategy_support_selected_alerts": _safe_float(candidate.get("short_play_watch_strategy_support_selected_alerts"), None),
+                        "short_play_watch_strategy_support_weight_total": _safe_float(candidate.get("short_play_watch_strategy_support_weight_total"), None),
+                        "short_play_watch_strategy_support_win_rate_pct": _safe_float(candidate.get("short_play_watch_strategy_support_win_rate_pct"), None),
+                        "short_play_watch_strategy_support_expectancy_rr": _safe_float(candidate.get("short_play_watch_strategy_support_expectancy_rr"), None),
+                        "short_play_watch_support_source": str(candidate.get("short_play_watch_support_source") or "").strip().lower() or None,
+                    },
+                )
+                continue
         if isinstance(profile_metrics, dict) and profile_metrics:
             candidate["edge_metrics"] = profile_metrics
         candidate["alert_profile"] = candidate_alert_profile(candidate)
-        alert_intent, alert_intent_reason = classify_candidate_intent(candidate, config=context["config"])
+        alert_intent, alert_intent_reason = classify_candidate_intent(
+            candidate,
+            config=context["config"],
+            helpers=context.get("helpers"),
+        )
         candidate["alert_intent"] = alert_intent
         candidate["alert_intent_reason"] = alert_intent_reason
+        if bool(candidate.get("short_play_watch_candidate")):
+            candidate["alert_intent"] = "watch"
+            candidate["alert_intent_reason"] = (
+                f"short_play_watch:{candidate.get('short_play_watch_stage')}:{candidate.get('short_play_watch_gate_reason')}"
+            )
         if callable(score_candidate_with_live_ai):
             candidate = score_candidate_with_live_ai(candidate)
         candidate = attach_ai_dispatch_context(candidate, config=context["config"])
@@ -1831,6 +2476,10 @@ def finalize_candidates(context):
             candidate.get("message"),
             candidate,
             config=context["config"],
+        )
+        candidate["message"] = _append_short_play_watch_lines(
+            candidate.get("message"),
+            candidate,
         )
         if str(candidate.get("short_trade_bucket") or "").strip().lower() == "avoid":
             reject_reason = str(candidate.get("short_trade_reason") or "short_trade_avoid")

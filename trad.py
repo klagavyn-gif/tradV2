@@ -217,6 +217,7 @@ _HISTORY_STORE_LOCK = threading.Lock()
 _ALERT_HISTORY_LOCK = threading.Lock()
 _ALERT_AUTO_TUNE_CACHE = {"path": None, "mtime": None, "payload": {}}
 _ALERT_REALIZED_SUMMARY_CACHE = {"path": None, "mtime": None, "payload": {}}
+_ALERT_REALIZED_OUTCOMES_CACHE = {"path": None, "mtime": None, "payload": {}, "aggregates": {}}
 _TELEGRAM_REPORT_STRATEGY_ORDER = ("SS15", "AW15", "CDCVIX15", "AZ15", "PA15", "TCB15", "PRIMARY", "DAILY_BEST")
 
 _MAX_SYMBOLS_PER_REQUEST = _service_support.max_symbols_per_request(config)
@@ -844,6 +845,139 @@ def _load_alert_realized_summary_payload():
         return {}
 
 
+def _load_alert_realized_outcomes_payload():
+    path = _alert_outcomes_file_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        mtime = os.path.getmtime(path)
+    except Exception:
+        mtime = None
+    cached_path = _ALERT_REALIZED_OUTCOMES_CACHE.get("path")
+    cached_mtime = _ALERT_REALIZED_OUTCOMES_CACHE.get("mtime")
+    if cached_path == path and cached_mtime == mtime and isinstance(_ALERT_REALIZED_OUTCOMES_CACHE.get("payload"), dict):
+        return _ALERT_REALIZED_OUTCOMES_CACHE.get("payload") or {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        payload = payload if isinstance(payload, dict) else {}
+        _ALERT_REALIZED_OUTCOMES_CACHE.update(
+            {"path": path, "mtime": mtime, "payload": payload, "aggregates": {}}
+        )
+        return payload
+    except Exception:
+        return {}
+
+
+def _finalize_realized_bucket(bucket):
+    if not isinstance(bucket, dict):
+        return {}
+    settled = int(bucket.get("settled_alerts") or 0)
+    wins = int(bucket.get("wins") or 0)
+    losses = int(bucket.get("losses") or 0)
+    rr_count = int(bucket.get("_rr_count") or 0)
+    rr_sum = _safe_float(bucket.get("_rr_sum"), 0.0)
+    return {
+        "settled_alerts": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate_pct": (float(wins) / float(settled) * 100.0) if settled > 0 else None,
+        "avg_rr_realized": (float(rr_sum) / float(rr_count)) if rr_count > 0 else None,
+    }
+
+
+def _alert_realized_outcome_aggregates():
+    payload = _load_alert_realized_outcomes_payload()
+    cached = _ALERT_REALIZED_OUTCOMES_CACHE.get("aggregates")
+    if isinstance(cached, dict) and cached:
+        return cached
+
+    outcomes = payload.get("outcomes") if isinstance(payload, dict) else None
+    rows = outcomes if isinstance(outcomes, list) else []
+    by_symbol_signal = {}
+    by_strategy_signal = {}
+    by_strategy = {}
+
+    def get_bucket(store, key):
+        if key not in store:
+            store[key] = {"settled_alerts": 0, "wins": 0, "losses": 0, "_rr_sum": 0.0, "_rr_count": 0}
+        return store[key]
+
+    for row in rows:
+        if not isinstance(row, dict) or str(row.get("outcome_status") or "").strip().lower() != "settled":
+            continue
+        strategy = str(row.get("strategy") or "").strip().upper()
+        symbol = normalize_symbol(row.get("symbol") or "")
+        signal = str(row.get("signal") or "").strip().upper()
+        if not strategy or not symbol or signal not in ("BUY", "SELL"):
+            continue
+        rr_value = _safe_float(row.get("rr_realized"), None)
+        keys = (
+            (by_symbol_signal, f"{strategy}|{symbol}|{signal}"),
+            (by_strategy_signal, f"{strategy}|{signal}"),
+            (by_strategy, strategy),
+        )
+        for store, key in keys:
+            bucket = get_bucket(store, key)
+            bucket["settled_alerts"] += 1
+            result = str(row.get("outcome_result") or "").strip().lower()
+            if result == "win":
+                bucket["wins"] += 1
+            elif result == "loss":
+                bucket["losses"] += 1
+            if isinstance(rr_value, float) and math.isfinite(rr_value):
+                bucket["_rr_sum"] += float(rr_value)
+                bucket["_rr_count"] += 1
+
+    aggregates = {
+        "by_symbol_signal": {key: _finalize_realized_bucket(value) for key, value in by_symbol_signal.items()},
+        "by_strategy_signal": {key: _finalize_realized_bucket(value) for key, value in by_strategy_signal.items()},
+        "by_strategy": {key: _finalize_realized_bucket(value) for key, value in by_strategy.items()},
+    }
+    _ALERT_REALIZED_OUTCOMES_CACHE["aggregates"] = aggregates
+    return aggregates
+
+
+def _short_play_watch_realized_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    signal = str(candidate.get("signal") or "").strip().upper()
+    if not strategy or not symbol or signal not in ("BUY", "SELL"):
+        return {}
+    aggregates = _alert_realized_outcome_aggregates()
+    return {
+        "symbol_signal": (aggregates.get("by_symbol_signal") or {}).get(f"{strategy}|{symbol}|{signal}") or {},
+        "strategy_signal": (aggregates.get("by_strategy_signal") or {}).get(f"{strategy}|{signal}") or {},
+        "strategy": (aggregates.get("by_strategy") or {}).get(strategy) or {},
+    }
+
+
+def _short_play_watch_strategy_support_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    signal = str(candidate.get("signal") or "").strip().lower()
+    if not strategy or signal not in {"buy", "sell"}:
+        return {}
+    payload = _load_auto_tuned_thresholds()
+    stats = payload.get("stats") if isinstance(payload, dict) else None
+    strategy_stats = (stats.get("strategies") or {}).get(strategy) if isinstance(stats, dict) else None
+    side_stats = (strategy_stats or {}).get(signal) if isinstance(strategy_stats, dict) else None
+    if not isinstance(side_stats, dict):
+        return {}
+    return {
+        "selected_alerts": _safe_float(side_stats.get("selected_alerts"), None),
+        "selected_weight_total": _safe_float(side_stats.get("selected_weight_total"), None),
+        "recent_weighted_win_rate_floor": _safe_float(side_stats.get("recent_weighted_win_rate_floor"), None),
+        "recent_weighted_expectancy_floor": _safe_float(side_stats.get("recent_weighted_expectancy_floor"), None),
+        "selected_score_floor": _safe_float(side_stats.get("selected_score_floor"), None),
+        "selected_confidence_floor": _safe_float(side_stats.get("selected_confidence_floor"), None),
+        "fresh_signal_ratio": _safe_float(side_stats.get("fresh_signal_ratio"), None),
+    }
+
+
 def _infer_plan_strategy_code(plan):
     if not isinstance(plan, dict):
         return None
@@ -1331,9 +1465,25 @@ def _evaluate_candidate_backtest_gate(candidate):
     except Exception:
         min_exp = 0.05
     metrics = _candidate_edge_metrics(candidate)
+    short_play_gate = _resolve_short_play_gate(candidate, metrics)
     wr = metrics.get("win_rate_pct")
     exp = metrics.get("expectancy_rr")
     trades = metrics.get("trades")
+    effective_min_wr = float(min_wr)
+    effective_min_exp = float(min_exp)
+    effective_min_trades = int(min_trades)
+    if bool(short_play_gate.get("applied")):
+        effective_min_wr = max(45.0, float(min_wr) - _safe_float(short_play_gate.get("backtest_win_rate_relax"), 0.0))
+        effective_min_exp = max(-0.02, float(min_exp) - _safe_float(short_play_gate.get("backtest_expectancy_relax"), 0.0))
+        effective_min_trades = max(1, int(round(float(min_trades) - _safe_float(short_play_gate.get("backtest_trades_relax"), 0.0))))
+    candidate["short_play_gate_applied"] = bool(short_play_gate.get("applied"))
+    candidate["short_play_gate_reason"] = str(short_play_gate.get("reason") or "").strip() or None
+    candidate["short_play_gate_tier"] = str(short_play_gate.get("tier") or "").strip().lower() or None
+    candidate["short_play_gate_regime_alignment"] = str(short_play_gate.get("regime_alignment") or "").strip().lower() or None
+    candidate["short_play_gate_bars_since_signal"] = _safe_float(short_play_gate.get("bars_since_signal"), None)
+    candidate["short_play_gate_effective_min_win_rate_pct"] = float(effective_min_wr)
+    candidate["short_play_gate_effective_min_expectancy_rr"] = float(effective_min_exp)
+    candidate["short_play_gate_effective_min_trades"] = int(effective_min_trades)
     has_edge = any(isinstance(v, (int, float)) for v in (wr, exp, trades))
     if require_edge and not has_edge:
         return False, "candidate_missing_edge_metrics", metrics
@@ -1346,10 +1496,10 @@ def _evaluate_candidate_backtest_gate(candidate):
         and any(isinstance(v, (int, float)) for v in (wr, exp))
     )
     if (not cdc_allow_missing_trades) and (
-        not isinstance(trades, (int, float)) or float(trades) < float(min_trades)
+        not isinstance(trades, (int, float)) or float(trades) < float(effective_min_trades)
     ):
         return False, "candidate_trades_below_min", metrics
-    if not isinstance(wr, (int, float)) or float(wr) < float(min_wr):
+    if not isinstance(wr, (int, float)) or float(wr) < float(effective_min_wr):
         return False, "candidate_win_rate_below_min", metrics
     cdc_allow_missing_expectancy = (
         strategy == "CDCVIX15"
@@ -1357,7 +1507,7 @@ def _evaluate_candidate_backtest_gate(candidate):
         and isinstance(wr, (int, float))
     )
     if (not cdc_allow_missing_expectancy) and (
-        not isinstance(exp, (int, float)) or float(exp) < float(min_exp)
+        not isinstance(exp, (int, float)) or float(exp) < float(effective_min_exp)
     ):
         return False, "candidate_expectancy_below_min", metrics
     return True, "pass", metrics
@@ -1398,6 +1548,165 @@ def _adjust_runtime_profile_value(value, delta, *, lower=None, upper=None, integ
     if integer:
         return int(max(1, round(adjusted)))
     return float(adjusted)
+
+
+def _candidate_plan_risk_reward(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    return _safe_float(plan.get("risk_reward"), None)
+
+
+def _resolve_short_play_gate(candidate, metrics=None):
+    signal = str((candidate or {}).get("signal") or "").strip().upper()
+    strategy = str((candidate or {}).get("strategy") or "").strip().upper()
+    regime = candidate.get("regime") if isinstance((candidate or {}).get("regime"), dict) else {}
+    market_regime = str((candidate or {}).get("market_regime") or regime.get("market_regime") or "").strip().upper() or None
+    symbol_regime = str((candidate or {}).get("symbol_regime") or regime.get("symbol_regime") or "").strip().upper() or None
+    side_bias = str((candidate or {}).get("side_bias") or regime.get("side_bias") or "").strip().upper() or None
+    regime_confidence = _safe_float((candidate or {}).get("regime_confidence"), _safe_float(regime.get("regime_confidence"), None))
+    bars_since = _candidate_bars_since_signal(candidate)
+    confidence = _normalize_confidence((candidate or {}).get("confidence"))
+    risk_reward = _candidate_plan_risk_reward(candidate)
+    edge = metrics if isinstance(metrics, dict) else _candidate_edge_metrics(candidate)
+    win_rate = _safe_float(edge.get("win_rate_pct"), None)
+    expectancy = _safe_float(edge.get("expectancy_rr"), None)
+    trades = _safe_float(edge.get("trades"), None)
+
+    profile = {
+        "applied": False,
+        "reason": "short_play_gate_disabled",
+        "tier": None,
+        "market_regime": market_regime,
+        "symbol_regime": symbol_regime,
+        "side_bias": side_bias,
+        "regime_alignment": "neutral",
+        "bars_since_signal": bars_since,
+        "confidence": confidence,
+        "risk_reward": risk_reward,
+        "backtest_win_rate_relax": 0.0,
+        "backtest_expectancy_relax": 0.0,
+        "backtest_trades_relax": 0,
+        "profile_confidence_relax": 0.0,
+        "profile_score_relax": 0.0,
+        "profile_win_rate_relax": 0.0,
+        "profile_expectancy_relax": 0.0,
+        "profile_trades_relax": 0,
+    }
+    if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_ENABLE", True)):
+        return profile
+    if signal not in ("BUY", "SELL"):
+        profile["reason"] = "short_play_gate_non_directional"
+        return profile
+
+    allowed_strategies = getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STRATEGIES", {"CDCVIX15"}) or {"CDCVIX15"}
+    if isinstance(allowed_strategies, str):
+        allowed_strategies = {allowed_strategies}
+    allowed_strategies = {str(value or "").strip().upper() for value in allowed_strategies if str(value or "").strip()}
+    if allowed_strategies and strategy not in allowed_strategies:
+        profile["reason"] = "short_play_gate_strategy_not_allowed"
+        return profile
+
+    require_alignment = bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_REQUIRE_REGIME_ALIGNMENT", True))
+    align_min_conf = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_ALIGN_MIN_REGIME_CONFIDENCE", 55.0), 55.0)
+    min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_MIN_CONFIDENCE", 80.0), 80.0)
+    premium_min_confidence = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_MIN_CONFIDENCE", 87.0), 87.0)
+    max_bars_since = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_MAX_BARS_SINCE_SIGNAL", 72), 72.0)
+    premium_max_bars_since = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_MAX_BARS_SINCE_SIGNAL", 24),
+        24.0,
+    )
+    min_wr_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_MIN_WIN_RATE", 50.0), 50.0)
+    min_exp_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_MIN_EXPECTANCY_RR", 0.0), 0.0)
+    min_trades_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_MIN_TRADES", 4), 4.0)
+    standard_wr_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STANDARD_WIN_RATE_RELAX", 4.0), 4.0)
+    standard_confidence_relax = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STANDARD_CONFIDENCE_RELAX", 8.0),
+        8.0,
+    )
+    standard_score_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STANDARD_SCORE_RELAX", 6.0), 6.0)
+    standard_exp_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STANDARD_EXPECTANCY_RELAX", 0.02), 0.02)
+    standard_trades_relax = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_STANDARD_TRADES_RELAX", 2), 2.0))
+    premium_wr_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_WIN_RATE_RELAX", 6.0), 6.0)
+    premium_confidence_relax = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_CONFIDENCE_RELAX", 10.0),
+        10.0,
+    )
+    premium_score_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_SCORE_RELAX", 8.0), 8.0)
+    premium_exp_relax = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_EXPECTANCY_RELAX", 0.04), 0.04)
+    premium_trades_relax = int(_safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_GATE_PREMIUM_TRADES_RELAX", 3), 3.0))
+    rr_floor = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_RR_FLOOR", 0.9), 0.9)
+
+    strong_side_bias = (
+        side_bias in ("BUY", "SELL")
+        and isinstance(regime_confidence, float)
+        and float(regime_confidence) >= float(align_min_conf)
+    )
+    if strong_side_bias:
+        profile["regime_alignment"] = "aligned" if signal == side_bias else "opposing"
+    elif market_regime == "TREND_DOWN" and signal == "SELL":
+        profile["regime_alignment"] = "aligned"
+    elif market_regime == "TREND_UP" and signal == "BUY":
+        profile["regime_alignment"] = "aligned"
+
+    if require_alignment and profile["regime_alignment"] == "opposing":
+        profile["reason"] = "short_play_gate_regime_opposing"
+        return profile
+    if market_regime == "RISK_OFF_EVENT" and signal == "BUY":
+        profile["reason"] = "short_play_gate_risk_off_buy_blocked"
+        return profile
+    if not isinstance(confidence, float) or float(confidence) < float(min_confidence):
+        profile["reason"] = "short_play_gate_confidence_below_min"
+        return profile
+    if isinstance(bars_since, float) and float(bars_since) > float(max_bars_since):
+        profile["reason"] = "short_play_gate_signal_too_old"
+        return profile
+    if isinstance(risk_reward, float) and float(risk_reward) < float(rr_floor):
+        profile["reason"] = "short_play_gate_rr_below_floor"
+        return profile
+    if isinstance(win_rate, float) and float(win_rate) < float(min_wr_floor):
+        profile["reason"] = "short_play_gate_hist_win_rate_too_low"
+        return profile
+    if isinstance(expectancy, float) and float(expectancy) < float(min_exp_floor):
+        profile["reason"] = "short_play_gate_hist_expectancy_too_low"
+        return profile
+    if isinstance(trades, float) and float(trades) < float(min_trades_floor):
+        profile["reason"] = "short_play_gate_hist_trades_too_low"
+        return profile
+
+    is_premium = (
+        isinstance(confidence, float)
+        and float(confidence) >= float(premium_min_confidence)
+        and (
+            not isinstance(bars_since, float)
+            or float(bars_since) <= float(premium_max_bars_since)
+        )
+        and profile["regime_alignment"] == "aligned"
+    )
+    if is_premium:
+        profile["tier"] = "premium"
+        profile["reason"] = "short_play_gate_premium"
+        profile["backtest_win_rate_relax"] = float(premium_wr_relax)
+        profile["backtest_expectancy_relax"] = float(premium_exp_relax)
+        profile["backtest_trades_relax"] = int(max(0, premium_trades_relax))
+        profile["profile_confidence_relax"] = float(max(0.0, premium_confidence_relax))
+        profile["profile_score_relax"] = float(max(0.0, premium_score_relax))
+        profile["profile_win_rate_relax"] = float(premium_wr_relax)
+        profile["profile_expectancy_relax"] = float(premium_exp_relax)
+        profile["profile_trades_relax"] = int(max(0, premium_trades_relax))
+    else:
+        profile["tier"] = "standard"
+        profile["reason"] = "short_play_gate_standard"
+        profile["backtest_win_rate_relax"] = float(standard_wr_relax)
+        profile["backtest_expectancy_relax"] = float(standard_exp_relax)
+        profile["backtest_trades_relax"] = int(max(0, standard_trades_relax))
+        profile["profile_confidence_relax"] = float(max(0.0, standard_confidence_relax))
+        profile["profile_score_relax"] = float(max(0.0, standard_score_relax))
+        profile["profile_win_rate_relax"] = float(standard_wr_relax)
+        profile["profile_expectancy_relax"] = float(standard_exp_relax)
+        profile["profile_trades_relax"] = int(max(0, standard_trades_relax))
+    profile["applied"] = True
+    return profile
 
 
 def _resolve_candidate_runtime_profile(candidate, profile):
@@ -1444,6 +1753,7 @@ def _resolve_candidate_runtime_profile(candidate, profile):
     opposing_exp_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_OPPOSING_EXPECTANCY_UPLIFT", 0.02), 0.02)
     risk_off_buy_wr_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_RISK_OFF_BUY_WIN_RATE_UPLIFT", 4.0), 4.0)
     risk_off_buy_exp_uplift = _safe_float(getattr(config, "TELEGRAM_ALERT_PROFILE_RUNTIME_RISK_OFF_BUY_EXPECTANCY_UPLIFT", 0.04), 0.04)
+    short_play_gate = _resolve_short_play_gate(candidate, _candidate_edge_metrics(candidate))
 
     reasons = []
     aligned_regime = (
@@ -1547,6 +1857,40 @@ def _resolve_candidate_runtime_profile(candidate, profile):
             reasons.append("stale_signal_uplift")
         else:
             runtime_profile["freshness_bucket"] = "aging"
+
+    if bool(short_play_gate.get("applied")):
+        runtime_profile["min_confidence"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_confidence"),
+            -_safe_float(short_play_gate.get("profile_confidence_relax"), 0.0),
+            lower=72.0,
+            upper=96.0,
+        )
+        runtime_profile["min_score"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_score"),
+            -_safe_float(short_play_gate.get("profile_score_relax"), 0.0),
+            lower=72.0,
+            upper=100.0,
+        )
+        runtime_profile["min_win_rate_pct"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_win_rate_pct"),
+            -_safe_float(short_play_gate.get("profile_win_rate_relax"), 0.0),
+            lower=45.0,
+            upper=80.0,
+        )
+        runtime_profile["min_expectancy_rr"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_expectancy_rr"),
+            -_safe_float(short_play_gate.get("profile_expectancy_relax"), 0.0),
+            lower=-0.02,
+            upper=0.35,
+        )
+        runtime_profile["min_trades"] = _adjust_runtime_profile_value(
+            runtime_profile.get("min_trades"),
+            -_safe_float(short_play_gate.get("profile_trades_relax"), 0.0),
+            lower=3.0,
+            upper=80.0,
+            integer=True,
+        )
+        reasons.append(str(short_play_gate.get("reason") or "short_play_gate"))
 
     runtime_profile["applied"] = bool(reasons)
     runtime_profile["reason"] = "+".join(reasons) if reasons else "profile_runtime_no_adjustment"
@@ -5385,6 +5729,10 @@ def _pipeline_module_helpers():
         "evaluate_candidate_backtest_gate": _evaluate_candidate_backtest_gate,
         "evaluate_candidate_symbol_strategy_gate": _evaluate_candidate_symbol_strategy_gate,
         "candidate_alert_profile": _candidate_alert_profile,
+        "infer_1h_trend_snapshot": infer_1h_trend_snapshot,
+        "extract_walkforward_metrics": _extract_walkforward_metrics,
+        "short_play_watch_realized_metrics": _short_play_watch_realized_metrics,
+        "short_play_watch_strategy_support_metrics": _short_play_watch_strategy_support_metrics,
         "score_candidate_with_live_ai": _score_candidate_with_live_ai,
         "score_candidate_with_live_entry_ai": _score_candidate_with_live_entry_ai,
         "build_market_regime_snapshot": _build_market_regime_snapshot,

@@ -1462,10 +1462,29 @@ def classify_candidate_intent(candidate, *, config, helpers=None):
     plan = candidate.get("plan")
     trigger = str((plan or {}).get("sell_trigger") or (plan or {}).get("exit_trigger") or "").strip().upper()
     plan_reason = str((plan or {}).get("reason") or "").strip().lower()
+    sell_signal_role = str((plan or {}).get("sell_signal_role") or "").strip().lower()
+    alert_intent_hint = str((plan or {}).get("alert_intent_hint") or "").strip().lower()
+    alert_intent_hint_reason = str((plan or {}).get("alert_intent_hint_reason") or "").strip()
     if strategy in {"TRADAR15", "TRENDRADAR15", "TREND_RADAR", "TRENDSTATE15"}:
         return "watch", "strategy_watch_only"
     is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
     if strategy == "CDCVIX15":
+        if signal == "SELL" and sell_signal_role == "exit":
+            return "exit", f"cdc_source_exit:{trigger.lower() or 'sell_exit'}"
+        if signal == "SELL" and sell_signal_role == "short_continuation":
+            mode = alert_intent_hint if alert_intent_hint in {"entry", "watch"} else ("entry" if is_entry_window else "watch")
+            reason = alert_intent_hint_reason or (
+                f"cdc_source_continuation:d_pct={distance_pct},d_r={distance_r}"
+                if mode == "entry"
+                else f"cdc_source_continuation_watch:d_pct={distance_pct},d_r={distance_r}"
+            )
+            return mode, reason
+        if signal == "SELL" and sell_signal_role == "short_entry":
+            if is_entry_window is None:
+                return "watch", f"cdc_source_entry_unknown:{trigger.lower() or 'sell'}"
+            if is_entry_window:
+                return "entry", f"cdc_source_entry:{trigger.lower() or 'sell'}"
+            return "watch", f"cdc_source_watch:{trigger.lower() or 'sell'}"
         continuation_override = _cdc_sell_continuation_override(
             candidate,
             config=config,
@@ -1522,6 +1541,8 @@ def resolve_short_trade_profile(candidate, *, config):
     plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
     rr_value = _safe_float(plan.get("risk_reward"), None)
     bars_since = _bars_since_signal(candidate)
+    sell_signal_role = str(plan.get("sell_signal_role") or "").strip().lower()
+    alert_intent_hint = str(plan.get("alert_intent_hint") or "").strip().lower()
     source_count = _candidate_source_count(candidate)
     confidence = _safe_float(candidate.get("confidence"), None)
     is_entry_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
@@ -1546,6 +1567,11 @@ def resolve_short_trade_profile(candidate, *, config):
     standard_bonus = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_STANDARD_SCORE_BONUS", 1.5), 1.5)
     watch_penalty = _safe_float(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_WATCH_SCORE_PENALTY", 3.0), 3.0)
     ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
+    continuation_fresh = (
+        sell_signal_role == "short_continuation"
+        and alert_intent_hint in {"entry", "watch"}
+        and is_entry_window is True
+    )
 
     if intent == "entry":
         if isinstance(rr_value, float) and rr_value < float(rr_floor):
@@ -1559,7 +1585,7 @@ def resolve_short_trade_profile(candidate, *, config):
                     "block_reason": "short_trade_rr_floor",
                 }
             )
-        elif isinstance(bars_since, float) and bars_since > float(hard_stale_bars):
+        elif (not continuation_fresh) and isinstance(bars_since, float) and bars_since > float(hard_stale_bars):
             profile.update(
                 {
                     "bucket": "avoid",
@@ -1600,7 +1626,7 @@ def resolve_short_trade_profile(candidate, *, config):
         elif (
             (is_entry_window is True or is_entry_window is None)
             and (rr_value is None or rr_value >= float(premium_rr))
-            and (bars_since is None or bars_since <= float(standard_max_bars))
+            and (continuation_fresh or bars_since is None or bars_since <= float(standard_max_bars))
             and (source_count is None or int(source_count) >= int(premium_min_sources))
             and (confidence is not None and confidence >= float(premium_min_confidence))
         ):
@@ -1615,7 +1641,7 @@ def resolve_short_trade_profile(candidate, *, config):
         elif (
             (is_entry_window is True or is_entry_window is None)
             and (rr_value is None or rr_value >= float(rr_floor))
-            and (bars_since is None or bars_since <= float(standard_max_bars))
+            and (continuation_fresh or bars_since is None or bars_since <= float(standard_max_bars))
             and (source_count is None or int(source_count) >= int(standard_min_sources))
         ):
             profile.update(

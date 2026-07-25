@@ -1472,6 +1472,11 @@ def _evaluate_candidate_backtest_gate(candidate):
     effective_min_wr = float(min_wr)
     effective_min_exp = float(min_exp)
     effective_min_trades = int(min_trades)
+    continuation_profile = _sell_continuation_gate_profile(candidate.get("plan"), signal)
+    if isinstance(continuation_profile, dict):
+        effective_min_wr = float(continuation_profile.get("entry_min_wr", effective_min_wr))
+        effective_min_exp = float(continuation_profile.get("entry_min_exp", effective_min_exp))
+        effective_min_trades = int(continuation_profile.get("entry_min_trades", effective_min_trades))
     if bool(short_play_gate.get("applied")):
         effective_min_wr = max(45.0, float(min_wr) - _safe_float(short_play_gate.get("backtest_win_rate_relax"), 0.0))
         effective_min_exp = max(-0.02, float(min_exp) - _safe_float(short_play_gate.get("backtest_expectancy_relax"), 0.0))
@@ -2055,6 +2060,30 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
     except Exception:
         min_robustness = None
 
+    continuation_profile = _sell_continuation_gate_profile(candidate.get("plan"), signal)
+    if isinstance(continuation_profile, dict):
+        continuation_min_confidence = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", min_confidence),
+            min_confidence,
+        )
+        continuation_min_wr = _safe_float(continuation_profile.get("entry_min_wr"), min_win_rate)
+        continuation_min_exp = _safe_float(continuation_profile.get("entry_min_exp"), min_expectancy)
+        continuation_min_trades = continuation_profile.get("entry_min_trades")
+        continuation_min_robustness = _safe_float(continuation_profile.get("walkforward_min_robustness"), min_robustness)
+        if isinstance(continuation_min_confidence, float):
+            min_confidence = continuation_min_confidence
+        if isinstance(continuation_min_wr, float):
+            min_win_rate = continuation_min_wr
+        if isinstance(continuation_min_exp, float):
+            min_expectancy = continuation_min_exp
+        try:
+            if continuation_min_trades is not None:
+                min_trades = int(continuation_min_trades)
+        except Exception:
+            pass
+        if isinstance(continuation_min_robustness, float):
+            min_robustness = continuation_min_robustness
+
     candidate["profile_runtime_min_confidence"] = min_confidence
     candidate["profile_runtime_min_score"] = min_score
     candidate["profile_runtime_min_win_rate_pct"] = min_win_rate
@@ -2169,6 +2198,10 @@ def _sell_continuation_gate_profile(plan, signal):
         return None
     if not isinstance(plan, dict):
         return None
+    sell_signal_role = str(plan.get("sell_signal_role") or "").strip().lower()
+    alert_intent_hint = str(plan.get("alert_intent_hint") or "").strip().lower()
+    forecast_direction = str(plan.get("forecast_direction") or "").strip().upper()
+    trend_bias = str(plan.get("trend_bias") or "").strip()
     confidence = _plan_confidence_value(plan)
     min_confidence = getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MIN_CONFIDENCE", 88.0)
     try:
@@ -2177,6 +2210,24 @@ def _sell_continuation_gate_profile(plan, signal):
         min_confidence = 88.0
     if not isinstance(confidence, (int, float)) or float(confidence) < float(min_confidence):
         return None
+    if sell_signal_role == "short_continuation":
+        if alert_intent_hint and alert_intent_hint not in {"entry", "watch"}:
+            return None
+        if forecast_direction and forecast_direction != "SELL":
+            return None
+        if trend_bias and trend_bias not in {"ขาลง", "DOWN", "SELL"}:
+            return None
+        if "trend_alignment" in plan and not bool(plan.get("trend_alignment")):
+            return None
+        return {
+            "entry_min_wr": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_HIST_WIN_RATE", 52.0)),
+            "entry_min_trades": int(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_HIST_TRADES", 4)),
+            "entry_min_exp": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_ENTRY_MIN_EXPECTANCY_RR", 0.0)),
+            "walkforward_min_wr": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_WIN_RATE", 56.0)),
+            "walkforward_min_trades": int(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_VALID_TRADES", 4)),
+            "walkforward_min_exp": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_EXPECTANCY_RR", 0.01)),
+            "walkforward_min_robustness": float(getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_WALKFORWARD_MIN_ROBUSTNESS", 35.0)),
+        }
     bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
     max_bars_since = getattr(config, "TELEGRAM_ALERT_SELL_CONTINUATION_MAX_BARS_SINCE_SIGNAL", 2)
     try:
@@ -5684,13 +5735,13 @@ def _build_regime_alert_budget(regime_summary=None):
     )
 
 
-def _build_alert_runtime_context(results, min_conf):
+def _build_alert_runtime_context(results, min_conf, *, config=None, helpers=None, get_now=None):
     return _alerts_pipeline_build_alert_runtime_context(
         results,
         min_conf,
-        config=config,
-        helpers=_pipeline_module_helpers(),
-        get_now=get_thai_now,
+        config=config or globals().get("config"),
+        helpers=helpers or _pipeline_module_helpers(),
+        get_now=get_now or get_thai_now,
     )
 
 
@@ -10058,6 +10109,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         signal = "WAIT"
         reason = "ยังไม่เกิดจังหวะเข้าตาม CDC Action Zone + Williams Vix Fix บนกรอบ 15 นาที"
         sell_trigger = None
+        sell_signal_role = None
+        alert_intent_hint = None
+        alert_intent_hint_reason = None
         detected_pattern = "None"
         take_profit_price = None
         if entry_price is not None and take_profit_pct > 0:
@@ -10076,21 +10130,25 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 signal = "SELL"
                 reason = f"ราคาแตะเป้าปิดทำกำไรตามแผน CDC ที่ {take_profit_pct:.2f}% จากจุดเข้า"
                 sell_trigger = "TAKE_PROFIT"
+                sell_signal_role = "exit"
             elif max_hold_bars and bars_since_entry >= max_hold_bars:
                 signal = "SELL"
                 reason = f"ถือครบ {int(max_hold_bars)} แท่งของแผน CDC แล้ว จึงปิดรอบเพื่อลดการยืดเยื้อ"
                 sell_trigger = "TIME_STOP"
+                sell_signal_role = "exit"
             elif bool(strict_sell_condition.iloc[-1]):
                 if not require_pattern or sell_pattern_ok:
                     signal = "SELL"
                     reason = "CDC พลิกเป็น Red แท่งแรกและ StochRSI เริ่มตัดลง เป็นจังหวะลดความเสี่ยง"
                     sell_trigger = "CDC_RED_REVERSAL"
+                    sell_signal_role = "short_entry"
                     detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
             elif relaxed_entry_enable and bool(relaxed_sell_condition.iloc[-1]) and forecast_dir == "SELL" and forecast_score >= forecast_min_score:
                 if not require_pattern or sell_pattern_ok:
                     signal = "SELL"
                     reason = "แนวโน้มสั้นอ่อนแรง, โซน CDC กลับเป็นลบ และโมเมนตัมเอนลง"
                     sell_trigger = "TREND_ROLLOVER"
+                    sell_signal_role = "short_entry"
                     detected_pattern = sell_pattern_name if sell_pattern_ok else "None"
         if signal == "BUY" and entry_price is not None:
             min_stop_price = entry_price - (abs(entry_price) * (min_sl_pct / 100.0))
@@ -10222,6 +10280,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
                 sell_continuation_override_reason = "ครบอายุ CDC เดิม แต่ตลาดยังลงต่อและราคายังไม่ไกลจากจุดเข้าใหม่"
             else:
                 sell_continuation_override_reason = "ครบอายุ CDC เดิม แต่ตลาดยังลงต่อ ให้รอราคาใกล้จุดเข้าใหม่ก่อน"
+            sell_signal_role = "short_continuation"
+            alert_intent_hint = sell_continuation_override_mode
+            alert_intent_hint_reason = sell_continuation_override_reason
         return {
             "signal": signal,
             "setup": "CDC Action Zone + Williams Vix Fix 15m",
@@ -10233,6 +10294,9 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "bars_since_entry": bars_since_entry,
             "sell_continuation_override_mode": sell_continuation_override_mode,
             "sell_continuation_override_reason": sell_continuation_override_reason,
+            "sell_signal_role": sell_signal_role,
+            "alert_intent_hint": alert_intent_hint,
+            "alert_intent_hint_reason": alert_intent_hint_reason,
             "is_market_top": False,
             "is_vixfix_spike": bool(vixfix_spike.iloc[-1]) if len(vixfix_spike) else False,
             "sell_trigger": sell_trigger,

@@ -36,6 +36,14 @@ def _snapshot_candidate(now_dt, candidate, *, daily_pick=False):
     regime = candidate.get("regime") if isinstance(candidate.get("regime"), dict) else {}
     item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
     trend_snapshot = trad.infer_1h_trend_snapshot(item) if isinstance(item, dict) else {}
+    source_trend_snapshot = (
+        trad.infer_1h_trend_snapshot(
+            item,
+            include_labels=("ActionZone 15m", "Price Action 15m", "Trend Breakout 15m"),
+        )
+        if isinstance(item, dict)
+        else {}
+    )
     signal = str(candidate.get("signal") or "").strip().upper()
     optimizer_key = "sell_optimizer" if signal == "SELL" else "optimizer"
     walkforward = trad._extract_walkforward_metrics(plan, optimizer_key=optimizer_key)
@@ -70,6 +78,8 @@ def _snapshot_candidate(now_dt, candidate, *, daily_pick=False):
         "trend_color": str(plan.get("trend_color") or "").strip().upper() or None,
         "trend_1h": str((trend_snapshot or {}).get("trend") or "").strip().upper() or None,
         "trend_1h_strength": str((trend_snapshot or {}).get("strength") or "").strip().upper() or None,
+        "trend_1h_source": str((source_trend_snapshot or {}).get("trend") or "").strip().upper() or None,
+        "trend_1h_source_strength": str((source_trend_snapshot or {}).get("strength") or "").strip().upper() or None,
         "market_regime": str(regime.get("market_regime") or "").strip().upper() or None,
         "side_bias": str(regime.get("side_bias") or "").strip().upper() or None,
         "short_play_watch_candidate": bool(candidate.get("short_play_watch_candidate")),

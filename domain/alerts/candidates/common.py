@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 _EXIT_TRIGGERS = {"TAKE_PROFIT", "TIME_STOP", "PRECISION60_TAKE_PROFIT", "PRECISION60_TIME_STOP"}
 _REVERSAL_TRIGGERS = {"CDC_RED_REVERSAL", "TREND_ROLLOVER"}
+_CDC_SELL_TREND_1H_SOURCE_LABELS = ("ActionZone 15m", "Price Action 15m", "Trend Breakout 15m")
 _EXIT_REASON_PHRASES = (
     "ถือครบ",
     "ปิดรอบ",
@@ -1727,12 +1728,19 @@ def _evaluate_short_play_watch_quality_floor(candidate, *, helpers, config, shor
         side_bias = str(regime.get("side_bias") or "").strip().upper()
         trend_snapshot = infer_1h_trend_snapshot(item) if callable(infer_1h_trend_snapshot) else {}
         trend_1h = str((trend_snapshot or {}).get("trend") or "").strip().upper()
+        source_trend_snapshot = (
+            infer_1h_trend_snapshot(item, include_labels=_CDC_SELL_TREND_1H_SOURCE_LABELS)
+            if callable(infer_1h_trend_snapshot)
+            else {}
+        )
+        trend_1h_source = str((source_trend_snapshot or {}).get("trend") or "").strip().upper()
         meta["sell_trigger"] = trigger or None
         meta["forecast_direction"] = forecast_dir or None
         meta["sell_continuation_override_mode"] = continuation_mode or None
         meta["market_regime"] = market_regime or None
         meta["side_bias"] = side_bias or None
         meta["trend_1h"] = trend_1h or None
+        meta["trend_1h_source"] = trend_1h_source or None
         if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_SELL_FORECAST", True)):
             if forecast_dir and forecast_dir != "SELL":
                 meta["reason"] = "short_play_watch_sell_forecast_mismatch"
@@ -1742,7 +1750,8 @@ def _evaluate_short_play_watch_quality_floor(candidate, *, helpers, config, shor
                 meta["reason"] = "short_play_watch_sell_regime_mismatch"
                 return False, meta
         if bool(getattr(config, "TELEGRAM_ALERT_SHORT_PLAY_WATCH_STANDARD_SELL_REQUIRE_1H_TREND_DOWN", True)):
-            if trend_1h and trend_1h != "DOWN":
+            effective_trend_1h = trend_1h_source or trend_1h
+            if effective_trend_1h and effective_trend_1h != "DOWN":
                 meta["reason"] = "short_play_watch_sell_1h_trend_mismatch"
                 return False, meta
         if bool(

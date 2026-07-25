@@ -9,7 +9,7 @@ def _normalize_trend_value(value):
     return None
 
 
-def _collect_trend_votes(item):
+def _collect_trend_votes(item, include_labels=None, exclude_labels=None):
     plan_specs = [
         ("ActionZone 15m", item.get("actionzone_15m")),
         ("Price Action 15m", item.get("price_action_15m")),
@@ -18,8 +18,22 @@ def _collect_trend_votes(item):
         ("Sniper 15m", item.get("sniper_15m")),
         ("Quantum 15m", item.get("quantum_15m")),
     ]
+    include_labels = {
+        str(label or "").strip()
+        for label in (include_labels or [])
+        if str(label or "").strip()
+    }
+    exclude_labels = {
+        str(label or "").strip()
+        for label in (exclude_labels or [])
+        if str(label or "").strip()
+    }
     votes = []
     for label, plan in plan_specs:
+        if include_labels and label not in include_labels:
+            continue
+        if exclude_labels and label in exclude_labels:
+            continue
         if not isinstance(plan, dict):
             continue
         trend = _normalize_trend_value(plan.get("trend_1h"))
@@ -40,10 +54,10 @@ def _collect_trend_votes(item):
     return votes
 
 
-def infer_1h_trend_snapshot(item):
+def infer_1h_trend_snapshot(item, include_labels=None, exclude_labels=None):
     if not isinstance(item, dict) or item.get("error"):
         return None
-    votes = _collect_trend_votes(item)
+    votes = _collect_trend_votes(item, include_labels=include_labels, exclude_labels=exclude_labels)
     if not votes:
         return None
     up_score = sum(float(vote["weight"]) for vote in votes if vote["trend"] == "UP")

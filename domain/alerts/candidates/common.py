@@ -2324,6 +2324,55 @@ def score_with_edge_adjustments(base_score, edge, *, confidence, alert_profile_s
     return float(score)
 
 
+def _evaluate_realized_win_rate_gate(candidate, *, config, helpers):
+    if not bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_ENABLE", True)):
+        return True, None, {}
+    if not isinstance(candidate, dict):
+        return True, None, {}
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    symbol = str(candidate.get("symbol") or "").strip().upper()
+    signal = str(candidate.get("signal") or "").strip().upper()
+    if not strategy or not symbol or signal not in ("BUY", "SELL"):
+        return True, None, {}
+    realized_fn = (helpers or {}).get("short_play_watch_realized_metrics")
+    if not callable(realized_fn):
+        return True, None, {}
+    realized = realized_fn(candidate)
+    if not isinstance(realized, dict):
+        return True, None, {}
+    min_settled = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_SETTLED", 6),
+        6.0,
+    )
+    min_win_rate = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_WIN_RATE", 50.0),
+        50.0,
+    )
+    for bucket_key in ("symbol_signal", "strategy_signal", "strategy"):
+        bucket = realized.get(bucket_key)
+        if not isinstance(bucket, dict):
+            continue
+        settled = _safe_float(bucket.get("settled_alerts"), None)
+        win_rate = _safe_float(bucket.get("win_rate_pct"), None)
+        if settled is None or win_rate is None:
+            continue
+        if settled < float(min_settled):
+            continue
+        if win_rate < float(min_win_rate):
+            return False, "realized_win_rate_below_floor", {
+                "realized_source": bucket_key,
+                "realized_settled_alerts": settled,
+                "realized_win_rate_pct": win_rate,
+                "required_realized_win_rate_pct": float(min_win_rate),
+            }
+        return True, None, {
+            "realized_source": bucket_key,
+            "realized_settled_alerts": settled,
+            "realized_win_rate_pct": win_rate,
+        }
+    return True, None, {}
+
+
 def finalize_candidates(context):
     evaluate_candidate_backtest_gate = context["helpers"]["evaluate_candidate_backtest_gate"]
     evaluate_candidate_symbol_strategy_gate = context["helpers"]["evaluate_candidate_symbol_strategy_gate"]
@@ -2452,6 +2501,33 @@ def finalize_candidates(context):
                 continue
         if isinstance(profile_metrics, dict) and profile_metrics:
             candidate["edge_metrics"] = profile_metrics
+        realized_ok, realized_reason, realized_meta = _evaluate_realized_win_rate_gate(
+            candidate,
+            config=context["config"],
+            helpers=context.get("helpers"),
+        )
+        if not realized_ok:
+            context["quality_drop_counts"][realized_reason] += 1
+            record_candidate_reject(
+                context,
+                symbol=candidate.get("symbol"),
+                strategy=candidate.get("strategy"),
+                reason=realized_reason,
+                signal=candidate.get("signal"),
+                confidence=candidate.get("confidence"),
+                plan=candidate.get("plan"),
+                edge_metrics=candidate.get("edge_metrics"),
+                extra={
+                    "stage": "realized_win_rate_gate",
+                    "realized_source": str(realized_meta.get("realized_source") or "").strip() or None,
+                    "realized_settled_alerts": _safe_float(realized_meta.get("realized_settled_alerts"), None),
+                    "realized_win_rate_pct": _safe_float(realized_meta.get("realized_win_rate_pct"), None),
+                    "required_realized_win_rate_pct": _safe_float(
+                        realized_meta.get("required_realized_win_rate_pct"), None
+                    ),
+                },
+            )
+            continue
         candidate["alert_profile"] = candidate_alert_profile(candidate)
         alert_intent, alert_intent_reason = classify_candidate_intent(
             candidate,

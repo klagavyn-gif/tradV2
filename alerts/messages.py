@@ -553,7 +553,7 @@ def build_telegram_message(
     pick_primary_trade_plan = helpers["pick_primary_trade_plan"]
     strict_60_mode_enabled = helpers["strict_60_mode_enabled"]
     strict_60_allow_cdc = helpers["strict_60_allow_cdc"]
-    extract_signal_edge_metrics = helpers["extract_signal_edge_metrics"]
+    extract_signal_edge_metrics = helpers.get("extract_realized_edge_metrics") or helpers["extract_signal_edge_metrics"]
     get_plan_label = helpers["get_plan_label"]
     pick_plan_value = helpers["pick_plan_value"]
     build_trade_action_guidance = helpers["build_trade_action_guidance"]

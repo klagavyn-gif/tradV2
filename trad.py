@@ -1032,6 +1032,19 @@ def _extract_signal_edge_metrics(plan, signal):
     return plan_metrics
 
 
+def _extract_realized_edge_metrics(plan, signal):
+    strategy_code = _infer_plan_strategy_code(plan)
+    if strategy_code:
+        proxy_metrics = _strategy_realized_proxy_metrics(strategy_code)
+        if any(
+            isinstance(proxy_metrics.get(key), (int, float))
+            and math.isfinite(float(proxy_metrics.get(key)))
+            for key in ("win_rate_pct", "expectancy_rr", "trades")
+        ):
+            return proxy_metrics
+    return _extract_signal_edge_metrics(plan, signal)
+
+
 def _normalize_edge_metrics_payload(metrics):
     edge = metrics if isinstance(metrics, dict) else {}
     win_rate = edge.get("win_rate_pct")
@@ -3401,6 +3414,7 @@ def _message_module_helpers():
         "strict_60_mode_enabled": _strict_60_mode_enabled,
         "strict_60_allow_cdc": _strict_60_allow_cdc,
         "extract_signal_edge_metrics": _extract_signal_edge_metrics,
+        "extract_realized_edge_metrics": _extract_realized_edge_metrics,
         "build_alert_profile_lines": _build_alert_profile_lines,
         "append_pattern_context_lines": _append_pattern_context_lines,
         "build_stop_context_lines": _build_stop_context_lines,

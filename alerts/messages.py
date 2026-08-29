@@ -32,16 +32,82 @@ def _append_snapshot_lines(lines, *, price_text=None, change=None, confidence=No
         lines.append("<b>🧩 ชุดสัญญาณ:</b> " + source_text)
 
 
-def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, html_escape, prefix="🧪 Edge"):
+def _get_win_rate_indicator(win_rate):
+    """Returns emoji indicator based on win rate quality."""
+    if not isinstance(win_rate, (int, float)):
+        return ""
+    wr = float(win_rate)
+    if wr >= 70.0:
+        return "🟢"  # Excellent
+    elif wr >= 60.0:
+        return "🟡"  # Good
+    elif wr >= 55.0:
+        return "🟠"  # Moderate
+    else:
+        return "🔴"  # Poor
+
+
+def _get_expectancy_indicator(expectancy):
+    """Returns emoji indicator based on expectancy quality."""
+    if not isinstance(expectancy, (int, float)):
+        return ""
+    exp = float(expectancy)
+    if exp >= 0.15:
+        return "🟢"  # Excellent
+    elif exp >= 0.08:
+        return "🟡"  # Good
+    elif exp >= 0.03:
+        return "🟠"  # Moderate
+    else:
+        return "🔴"  # Poor
+
+
+def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, html_escape, prefix="🧪 Edge", show_indicators=True):
     parts = []
     if isinstance(win_rate, (int, float)):
-        parts.append(f"WR {float(win_rate):.1f}%")
+        wr_indicator = _get_win_rate_indicator(win_rate) if show_indicators else ""
+        parts.append(f"WR {wr_indicator}{float(win_rate):.1f}%")
     if isinstance(expectancy, (int, float)):
-        parts.append(f"ExpRR {float(expectancy):.2f}")
+        exp_indicator = _get_expectancy_indicator(expectancy) if show_indicators else ""
+        parts.append(f"ExpRR {exp_indicator}{float(expectancy):.2f}")
     if isinstance(trades, (int, float)) and float(trades) > 0:
         parts.append(f"Trades {int(round(float(trades)))}")
     if parts:
         lines.append(f"<b>{prefix}:</b> " + " | ".join(html_escape(part) for part in parts))
+
+
+def _append_performance_summary(lines, *, win_rate=None, expectancy=None, trades=None, sample_size=None, html_escape):
+    """Append enhanced performance summary with context and quality assessment."""
+    if not isinstance(win_rate, (int, float)):
+        return
+    
+    wr = float(win_rate)
+    quality_assessment = ""
+    if wr >= 70.0:
+        quality_assessment = "🌟 ยอดเยี่ยม"
+    elif wr >= 60.0:
+        quality_assessment = "👍 ดี"
+    elif wr >= 55.0:
+        quality_assessment = "😐 ปานกลาง"
+    else:
+        quality_assessment = "⚠️ ต่ำกว่าเกณฑ์"
+    
+    perf_parts = [f"Win Rate: {wr:.1f}% {quality_assessment}"]
+    
+    if isinstance(expectancy, (int, float)):
+        exp = float(expectancy)
+        exp_quality = "สูง" if exp >= 0.10 else "ปานกลาง" if exp >= 0.05 else "ต่ำ"
+        perf_parts.append(f"Expectancy: {exp:.2f}R ({exp_quality})")
+    
+    if isinstance(trades, (int, float)) and float(trades) > 0:
+        trade_count = int(round(float(trades)))
+        reliability = "มั่นใจ" if trade_count >= 20 else "ควรใช้ความระมัดระวัง" if trade_count >= 10 else "ข้อมูลน้อย"
+        perf_parts.append(f"Trades: {trade_count} ({reliability})")
+    
+    if isinstance(sample_size, (int, float)) and float(sample_size) > 0:
+        perf_parts.append(f"Sample: {int(sample_size)} alerts")
+    
+    lines.append("<b>📊 สรุปประสิทธิภาพ:</b> " + " | ".join(html_escape(part) for part in perf_parts))
 
 
 def _harmonize_action_guidance(action_guidance, decision, *, signal=None):
@@ -520,6 +586,14 @@ def build_telegram_message(
         trades=edge_metrics.get("trades"),
         html_escape=html_escape,
     )
+    _append_performance_summary(
+        lines,
+        win_rate=edge_metrics.get("win_rate_pct"),
+        expectancy=edge_metrics.get("expectancy_rr"),
+        trades=edge_metrics.get("trades"),
+        sample_size=edge_metrics.get("sample_size"),
+        html_escape=html_escape,
+    )
     action_guidance = build_trade_action_guidance(
         signal,
         plan=primary_plan,
@@ -842,6 +916,14 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         trades=plan.get("historical_trades"),
         html_escape=html_escape,
     )
+    _append_performance_summary(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        sample_size=plan.get("sample_size"),
+        html_escape=html_escape,
+    )
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
 
     context_parts = [
@@ -929,6 +1011,14 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         win_rate=plan.get("historical_win_rate"),
         expectancy=plan.get("historical_avg_rr"),
         trades=plan.get("historical_trades"),
+        html_escape=html_escape,
+    )
+    _append_performance_summary(
+        lines,
+        win_rate=plan.get("historical_win_rate"),
+        expectancy=plan.get("historical_avg_rr"),
+        trades=plan.get("historical_trades"),
+        sample_size=plan.get("sample_size"),
         html_escape=html_escape,
     )
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)
@@ -1072,6 +1162,14 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         trades=super_meta.get("avg_trades"),
         html_escape=html_escape,
         prefix="🏆 Ensemble",
+    )
+    _append_performance_summary(
+        lines,
+        win_rate=avg_wr,
+        expectancy=avg_exp,
+        trades=super_meta.get("avg_trades"),
+        sample_size=super_meta.get("sample_size"),
+        html_escape=html_escape,
     )
     lines.append("<b>⚠️ หมายเหตุ:</b> เป็นตัวเด่นของรอบนี้ แต่ให้ยึดสรุปและแผนด้านล่างเป็นหลัก")
     _append_action_lines(lines, action_guidance, html_escape=html_escape, decision=decision, signal=signal)

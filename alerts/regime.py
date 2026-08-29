@@ -19,11 +19,11 @@ _BLOCKED_BY_SYMBOL_REGIME = {
 }
 
 _MARKET_ALERT_BUDGETS = {
-    "TREND_UP": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
-    "TREND_DOWN": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 2.0},
-    "BREAKOUT_EXPANSION": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
-    "PANIC_REVERSAL": {"run_cap": 2, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 3.0},
-    "RANGE_BALANCED": {"run_cap": 3, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
+    "TREND_UP": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 0.0},
+    "TREND_DOWN": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 2.0},
+    "BREAKOUT_EXPANSION": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
+    "PANIC_REVERSAL": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 3.0},
+    "RANGE_BALANCED": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 1.0},
     "RANGE_HIGH_VOL": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 5.0},
     "LOW_LIQUIDITY_CHOP": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 6.0},
     "RISK_OFF_EVENT": {"run_cap": 1, "per_symbol_cap": 1, "daily_pick_cap": 1, "confidence_uplift": 8.0},
@@ -394,7 +394,14 @@ def apply_regime_to_candidate(candidate, *, regime_payload, config):
         blocked = True
         block_reason = f"blocked_{symbol_regime.lower()}"
     opposing_side_min_conf = _safe_float(getattr(config, "TELEGRAM_ALERT_REGIME_OPPOSING_SIDE_MIN_CONFIDENCE", 84.0), 84.0)
-    if not blocked and signal in ("BUY", "SELL") and side_bias in ("BUY", "SELL") and signal != side_bias and regime_confidence >= 72.0:
+    if (
+        block_enabled
+        and not blocked
+        and signal in ("BUY", "SELL")
+        and side_bias in ("BUY", "SELL")
+        and signal != side_bias
+        and regime_confidence >= 72.0
+    ):
         if confidence is None or confidence < float(opposing_side_min_conf):
             blocked = True
             block_reason = "blocked_opposing_side"

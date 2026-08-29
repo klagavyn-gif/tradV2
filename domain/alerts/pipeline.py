@@ -327,7 +327,12 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             min_conf = float((runtime_context or {}).get("min_confidence"))
         except Exception:
             pass
-    limits = resolve_dispatch_settings(config, runtime_context)
+    limits = resolve_dispatch_settings(
+        config,
+        runtime_context,
+        get_now=get_now,
+        telegram_alert_cache=telegram_alert_cache,
+    )
     min_conf = limits["min_conf"]
     kill = bool((runtime_context or {}).get("kill"))
     reason = (runtime_context or {}).get("kill_reason")
@@ -488,6 +493,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             per_symbol_sent=per_symbol_sent,
             suppress_if_symbol_sent=bool(getattr(config, "TREND_RADAR_SUPPRESS_IF_PRIMARY_SENT", True)),
             max_total_per_symbol=trend_radar_max_total_per_symbol,
+            limits=limits,
         )
         trend_radar_sent = int(trend_radar_dispatch["sent"])
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])
@@ -512,6 +518,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             max_per_run=trend_state_max_per_run,
             per_symbol_sent=per_symbol_sent,
             suppress_if_symbol_sent=bool(getattr(config, "TREND_STATE_ALERT_SUPPRESS_IF_PRIMARY_SENT", True)),
+            limits=limits,
         )
         trend_state_sent = int(trend_state_dispatch["sent"])
         per_symbol_sent = dict(trend_state_dispatch["per_symbol_sent"])

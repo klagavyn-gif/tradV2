@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 
+.dbg/
+
 .yf_cache/
 .data/telegram_alerts/
 .data/yf_history/

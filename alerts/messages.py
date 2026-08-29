@@ -76,38 +76,30 @@ def _append_edge_lines(lines, *, win_rate=None, expectancy=None, trades=None, ht
         lines.append(f"<b>{prefix}:</b> " + " | ".join(html_escape(part) for part in parts))
 
 
-def _append_performance_summary(lines, *, win_rate=None, expectancy=None, trades=None, sample_size=None, html_escape):
-    """Append enhanced performance summary with context and quality assessment."""
+def _append_performance_summary(
+    lines,
+    *,
+    win_rate=None,
+    expectancy=None,
+    trades=None,
+    sample_size=None,
+    html_escape,
+    scope="สถิติย้อนหลัง",
+):
     if not isinstance(win_rate, (int, float)):
         return
-    
+
     wr = float(win_rate)
-    quality_assessment = ""
-    if wr >= 70.0:
-        quality_assessment = "🌟 ยอดเยี่ยม"
-    elif wr >= 60.0:
-        quality_assessment = "👍 ดี"
-    elif wr >= 55.0:
-        quality_assessment = "😐 ปานกลาง"
-    else:
-        quality_assessment = "⚠️ ต่ำกว่าเกณฑ์"
-    
-    perf_parts = [f"Win Rate: {wr:.1f}% {quality_assessment}"]
-    
+    quality_assessment = "ยอดเยี่ยม" if wr >= 70.0 else "ดี" if wr >= 60.0 else "ปานกลาง" if wr >= 55.0 else "ต่ำกว่าเกณฑ์"
+    parts = [f"WR {_get_win_rate_indicator(wr)}{wr:.1f}%", quality_assessment]
     if isinstance(expectancy, (int, float)):
         exp = float(expectancy)
-        exp_quality = "สูง" if exp >= 0.10 else "ปานกลาง" if exp >= 0.05 else "ต่ำ"
-        perf_parts.append(f"Expectancy: {exp:.2f}R ({exp_quality})")
-    
+        parts.append(f"ExpRR {_get_expectancy_indicator(exp)}{exp:.2f}")
     if isinstance(trades, (int, float)) and float(trades) > 0:
-        trade_count = int(round(float(trades)))
-        reliability = "มั่นใจ" if trade_count >= 20 else "ควรใช้ความระมัดระวัง" if trade_count >= 10 else "ข้อมูลน้อย"
-        perf_parts.append(f"Trades: {trade_count} ({reliability})")
-    
+        parts.append(f"n={int(round(float(trades)))}")
     if isinstance(sample_size, (int, float)) and float(sample_size) > 0:
-        perf_parts.append(f"Sample: {int(sample_size)} alerts")
-    
-    lines.append("<b>📊 สรุปประสิทธิภาพ:</b> " + " | ".join(html_escape(part) for part in perf_parts))
+        parts.append(f"sample={int(round(float(sample_size)))}")
+    lines.append(f"<b>📊 Realized Edge ({html_escape(scope)}):</b> " + " | ".join(html_escape(part) for part in parts))
 
 
 def _harmonize_action_guidance(action_guidance, decision, *, signal=None):
@@ -579,13 +571,26 @@ def build_telegram_message(
             allow_cdc=strict_60_allow_cdc(),
         )
     edge_metrics = extract_signal_edge_metrics(primary_plan, signal) if isinstance(primary_plan, dict) else {}
-    _append_edge_lines(
-        lines,
-        win_rate=edge_metrics.get("win_rate_pct"),
-        expectancy=edge_metrics.get("expectancy_rr"),
-        trades=edge_metrics.get("trades"),
-        html_escape=html_escape,
+    action_guidance = build_trade_action_guidance(
+        signal,
+        plan=primary_plan,
+        mode_label=mode_label,
+        source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
     )
+    decision = _resolve_trade_decision(
+        primary_plan,
+        signal=signal,
+        strategy_label="PRIMARY",
+        action_guidance=action_guidance,
+        current_price=item.get("price"),
+    )
+    decision_label = str(decision.get("label") or "").strip()
+    decision_icon = str(decision.get("icon") or "🟡").strip()
+    if decision_label:
+        lines.append(f"<b>🎯 สรุป:</b> {html_escape(decision_icon + ' ' + decision_label)}")
+    decision_reason = str(decision.get("reason") or "").strip()
+    if decision_reason:
+        lines.append("<b>📝 เหตุผล:</b> " + html_escape(decision_reason))
     _append_performance_summary(
         lines,
         win_rate=edge_metrics.get("win_rate_pct"),
@@ -593,21 +598,7 @@ def build_telegram_message(
         trades=edge_metrics.get("trades"),
         sample_size=edge_metrics.get("sample_size"),
         html_escape=html_escape,
-    )
-    action_guidance = build_trade_action_guidance(
-        signal,
-        plan=primary_plan,
-        mode_label=mode_label,
-        source_label=get_plan_label(primary_plan, item) if isinstance(primary_plan, dict) else None,
-    )
-    decision = _append_trade_decision_lines(
-        lines,
-        plan=primary_plan,
-        html_escape=html_escape,
-        signal=signal,
-        strategy_label="PRIMARY",
-        action_guidance=action_guidance,
-        current_price=item.get("price"),
+        scope="กลยุทธ์รวม",
     )
     _append_snapshot_lines(
         lines,
@@ -909,13 +900,6 @@ def build_price_action_message(item, plan, *, helpers, get_now):
         html_escape=html_escape,
     )
     _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-    _append_edge_lines(
-        lines,
-        win_rate=plan.get("historical_win_rate"),
-        expectancy=plan.get("historical_avg_rr"),
-        trades=plan.get("historical_trades"),
-        html_escape=html_escape,
-    )
     _append_performance_summary(
         lines,
         win_rate=plan.get("historical_win_rate"),
@@ -1006,13 +990,6 @@ def build_trend_breakout_message(item, plan, *, helpers, get_now):
         html_escape=html_escape,
     )
     _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-    _append_edge_lines(
-        lines,
-        win_rate=plan.get("historical_win_rate"),
-        expectancy=plan.get("historical_avg_rr"),
-        trades=plan.get("historical_trades"),
-        html_escape=html_escape,
-    )
     _append_performance_summary(
         lines,
         win_rate=plan.get("historical_win_rate"),
@@ -1155,13 +1132,14 @@ def build_super_signal_message(item, signal, super_meta, *, primary_plan=None, h
         html_escape=html_escape,
     )
     _append_hourly_bias_line(lines, item=item, html_escape=html_escape)
-    _append_edge_lines(
+    _append_performance_summary(
         lines,
         win_rate=avg_wr,
         expectancy=avg_exp,
         trades=super_meta.get("avg_trades"),
+        sample_size=super_meta.get("sample_size"),
         html_escape=html_escape,
-        prefix="🏆 Ensemble",
+        scope="Ensemble",
     )
     _append_performance_summary(
         lines,

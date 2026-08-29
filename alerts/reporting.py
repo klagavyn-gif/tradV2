@@ -558,6 +558,18 @@ def _directional_excursions(bars, *, signal, entry_price):
     return _safe_float(mfe), _safe_float(mae)
 
 
+def _close_at_or_before(price_df, alert_time):
+    if price_df is None or getattr(price_df, "empty", True) or not isinstance(alert_time, datetime):
+        return None
+    try:
+        before = price_df.loc[price_df.index <= pd.Timestamp(alert_time)]
+        if before is None or getattr(before, "empty", True):
+            return None
+        return _safe_float(before.iloc[-1].get("Close"))
+    except Exception:
+        return None
+
+
 def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars):
     signal = str((entry or {}).get("signal") or "").strip().upper()
     alert_time = _alert_timestamp_value((entry or {}).get("timestamp"))
@@ -602,16 +614,29 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
     if entry_price is None or stop_loss is None:
         outcome["exit_reason"] = "missing_entry_or_stop"
         return outcome
-    if signal == "BUY" and stop_loss >= entry_price:
-        outcome["exit_reason"] = "invalid_stop_direction"
-        return outcome
-    if signal == "SELL" and stop_loss <= entry_price:
-        outcome["exit_reason"] = "invalid_stop_direction"
-        return outcome
     if price_df is None or getattr(price_df, "empty", True):
         outcome["outcome_status"] = "open"
         outcome["exit_reason"] = "history_unavailable"
         return outcome
+
+    # Recover wrong-side entry_price from the market price at alert time. SELL
+    # signals were historically recorded with the old long reference as entry,
+    # which places the stop_loss on the wrong side of the short.
+    if signal == "SELL" and stop_loss <= entry_price:
+        recovered = _close_at_or_before(price_df, alert_time)
+        if recovered is not None and stop_loss > recovered:
+            entry_price = recovered
+        else:
+            outcome["exit_reason"] = "invalid_stop_direction"
+            return outcome
+    if signal == "BUY" and stop_loss >= entry_price:
+        recovered = _close_at_or_before(price_df, alert_time)
+        if recovered is not None and stop_loss < recovered:
+            entry_price = recovered
+        else:
+            outcome["exit_reason"] = "invalid_stop_direction"
+            return outcome
+    outcome["entry_price"] = entry_price
 
     future = price_df.loc[price_df.index >= pd.Timestamp(alert_time)]
     if future.empty:

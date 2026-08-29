@@ -160,6 +160,17 @@ def _safe_int(value, default=None):
         return default
 
 
+def _realized_entry_price(plan, signal, *, pick_plan_value):
+    signal_text = str(signal or "").strip().upper()
+    if signal_text == "SELL":
+        # For short/exit signals the trade is entered at the current price, not
+        # the original long entry reference stored on the plan. Using the wrong
+        # entry puts the stop_loss on the wrong side and corrupts realized
+        # win/loss classification.
+        return pick_plan_value(plan, ["current_price", "price", "entry_price"])
+    return pick_plan_value(plan, ["entry_price", "current_price", "price"])
+
+
 def _alert_timestamp_value(value):
     text = str(value or "").strip()
     if not text:
@@ -354,7 +365,7 @@ def candidate_ops_snapshot(candidate, *, helpers):
     candidate_message_preview_fn = helpers["candidate_message_preview"]
 
     plan = candidate.get("plan")
-    entry_price = pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
+    entry_price = _realized_entry_price(plan, candidate.get("signal"), pick_plan_value=pick_plan_value) if isinstance(plan, dict) else None
     stop_loss = pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
     take_profit = pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
     snapshot = candidate_backtest_snapshot_fn(candidate)
@@ -590,6 +601,12 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
         return outcome
     if entry_price is None or stop_loss is None:
         outcome["exit_reason"] = "missing_entry_or_stop"
+        return outcome
+    if signal == "BUY" and stop_loss >= entry_price:
+        outcome["exit_reason"] = "invalid_stop_direction"
+        return outcome
+    if signal == "SELL" and stop_loss <= entry_price:
+        outcome["exit_reason"] = "invalid_stop_direction"
         return outcome
     if price_df is None or getattr(price_df, "empty", True):
         outcome["outcome_status"] = "open"
@@ -1392,7 +1409,7 @@ def record_telegram_alert_history(
 
     snapshot = candidate_backtest_snapshot_fn(candidate)
     plan = candidate.get("plan")
-    entry_price = pick_plan_value(plan, ["entry_price", "current_price", "price"]) if isinstance(plan, dict) else None
+    entry_price = _realized_entry_price(plan, candidate.get("signal"), pick_plan_value=pick_plan_value) if isinstance(plan, dict) else None
     stop_loss = pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
     take_profit = pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
     profile = candidate.get("alert_profile")

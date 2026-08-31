@@ -84,6 +84,30 @@ def _suppress_stale_primary_candidates(candidates, *, config, quality_drop_count
     return filtered
 
 
+def _suppress_stale_entry_candidates(candidates, *, config, quality_drop_counts=None):
+    if not bool(getattr(config, "TELEGRAM_ALERT_PRIMARY_ENTRY_FRESHNESS_GATE_ENABLE", True)):
+        return list(candidates or [])
+    max_bars = coerce_int(getattr(config, "TELEGRAM_ALERT_PRIMARY_ENTRY_MAX_BARS_SINCE_SIGNAL", 4), 4)
+    filtered = []
+    stale_entry_filtered = 0
+    for row in candidates or []:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        if str(row.get("alert_intent") or "").strip().lower() != "entry":
+            filtered.append(row)
+            continue
+        bars_since = _candidate_bars_since_signal(row)
+        if isinstance(bars_since, float) and bars_since > float(max_bars):
+            stale_entry_filtered += 1
+            continue
+        filtered.append(row)
+    if isinstance(quality_drop_counts, dict) and stale_entry_filtered > 0:
+        key = "primary_stale_entry_suppressed"
+        quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + int(stale_entry_filtered)
+    return filtered
+
+
 def _primary_candidate_sort_key(candidate, *, config):
     if not isinstance(candidate, dict):
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -382,6 +406,11 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             return 0
 
     candidates = _suppress_stale_primary_candidates(
+        candidates,
+        config=config,
+        quality_drop_counts=quality_drop_counts,
+    )
+    candidates = _suppress_stale_entry_candidates(
         candidates,
         config=config,
         quality_drop_counts=quality_drop_counts,

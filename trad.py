@@ -1518,7 +1518,17 @@ def _evaluate_candidate_backtest_gate(candidate):
     ):
         return False, "candidate_trades_below_min", metrics
     if not isinstance(wr, (int, float)) or float(wr) < float(effective_min_wr):
-        return False, "candidate_win_rate_below_min", metrics
+        expectancy_override = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_ENTRY_EXPECTANCY_WR_OVERRIDE_RR", 0.30),
+            0.30,
+        )
+        # Keep profitable low-win-rate but strongly positive-expectancy strategies
+        # instead of rejecting on win rate alone.
+        if not (
+            isinstance(exp, (int, float))
+            and float(exp) >= float(expectancy_override)
+        ):
+            return False, "candidate_win_rate_below_min", metrics
     cdc_allow_missing_expectancy = (
         strategy == "CDCVIX15"
         and not isinstance(exp, (int, float))
@@ -2126,7 +2136,15 @@ def _evaluate_candidate_symbol_strategy_gate(candidate):
     if isinstance(min_win_rate, (int, float)) and (
         not isinstance(win_rate, (int, float)) or float(win_rate) < float(min_win_rate)
     ):
-        return False, "candidate_profile_win_rate_below_min", metrics
+        expectancy_override = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_ENTRY_EXPECTANCY_WR_OVERRIDE_RR", 0.30),
+            0.30,
+        )
+        if not (
+            isinstance(expectancy, (int, float))
+            and float(expectancy) >= float(expectancy_override)
+        ):
+            return False, "candidate_profile_win_rate_below_min", metrics
     cdc_allow_profile_missing_expectancy = (
         strategy == "CDCVIX15"
         and isinstance(min_expectancy, (int, float))
@@ -2401,7 +2419,15 @@ def _evaluate_entry_quality_gate(plan, signal):
     if isinstance(trades, (int, float)) and int(trades) < int(min_trades):
         return False, "trades_below_min", metrics
     if isinstance(wr, (int, float)) and float(wr) < float(min_wr):
-        return False, "win_rate_below_min", metrics
+        expectancy_override = _safe_float(
+            getattr(config, "TELEGRAM_ALERT_ENTRY_EXPECTANCY_WR_OVERRIDE_RR", 0.30),
+            0.30,
+        )
+        if not (
+            isinstance(exp, (int, float))
+            and float(exp) >= float(expectancy_override)
+        ):
+            return False, "win_rate_below_min", metrics
     if isinstance(exp, (int, float)) and float(exp) < float(min_exp):
         return False, "expectancy_below_min", metrics
     wf_ok, wf_reason, wf_metrics = _evaluate_walkforward_gate(plan, signal)

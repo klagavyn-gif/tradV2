@@ -545,6 +545,12 @@ TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_SETTLED = _env_int(
 TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_WIN_RATE = _env_float(
     "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_WIN_RATE", 50.0
 )
+# Block entry for buckets whose realized R-expectancy (avg realized RR) is at or
+# below this floor. This is the primary realized gate: it cuts proven losers by
+# expectancy instead of judging win rate alone (a low-WR/high-RR bucket is kept).
+TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_EXPECTANCY_RR = _env_float(
+    "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_EXPECTANCY_RR", 0.0
+)
 TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES = _env_bool("TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES", True)
 TELEGRAM_ALERT_REGIME_ENABLED = _env_bool("TELEGRAM_ALERT_REGIME_ENABLED", True)
 TELEGRAM_ALERT_REGIME_BLOCK_ENABLED = _env_bool("TELEGRAM_ALERT_REGIME_BLOCK_ENABLED", True)

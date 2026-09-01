@@ -2348,17 +2348,32 @@ def _evaluate_realized_win_rate_gate(candidate, *, config, helpers):
         getattr(config, "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_WIN_RATE", 50.0),
         50.0,
     )
+    min_expectancy = _safe_float(
+        getattr(config, "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_EXPECTANCY_RR", 0.0),
+        0.0,
+    )
     for bucket_key in ("symbol_signal", "strategy_signal", "strategy"):
         bucket = realized.get(bucket_key)
         if not isinstance(bucket, dict):
             continue
         settled = _safe_float(bucket.get("settled_alerts"), None)
         win_rate = _safe_float(bucket.get("win_rate_pct"), None)
-        if settled is None or win_rate is None:
+        expectancy = _safe_float(bucket.get("avg_rr_realized"), None)
+        if settled is None:
             continue
         if settled < float(min_settled):
             continue
-        if win_rate < float(min_win_rate):
+        # Expectancy-first: cut buckets that lose money on average in R terms.
+        if isinstance(expectancy, (int, float)) and float(expectancy) <= float(min_expectancy):
+            return False, "realized_expectancy_below_floor", {
+                "realized_source": bucket_key,
+                "realized_settled_alerts": settled,
+                "realized_win_rate_pct": win_rate,
+                "realized_expectancy_rr": expectancy,
+                "required_realized_expectancy_rr": float(min_expectancy),
+            }
+        # Fallback when expectancy is unavailable: reject a very low win rate.
+        if not isinstance(expectancy, (int, float)) and isinstance(win_rate, (int, float)) and float(win_rate) < float(min_win_rate):
             return False, "realized_win_rate_below_floor", {
                 "realized_source": bucket_key,
                 "realized_settled_alerts": settled,
@@ -2369,6 +2384,7 @@ def _evaluate_realized_win_rate_gate(candidate, *, config, helpers):
             "realized_source": bucket_key,
             "realized_settled_alerts": settled,
             "realized_win_rate_pct": win_rate,
+            "realized_expectancy_rr": expectancy,
         }
     return True, None, {}
 
@@ -2522,8 +2538,12 @@ def finalize_candidates(context):
                     "realized_source": str(realized_meta.get("realized_source") or "").strip() or None,
                     "realized_settled_alerts": _safe_float(realized_meta.get("realized_settled_alerts"), None),
                     "realized_win_rate_pct": _safe_float(realized_meta.get("realized_win_rate_pct"), None),
+                    "realized_expectancy_rr": _safe_float(realized_meta.get("realized_expectancy_rr"), None),
                     "required_realized_win_rate_pct": _safe_float(
                         realized_meta.get("required_realized_win_rate_pct"), None
+                    ),
+                    "required_realized_expectancy_rr": _safe_float(
+                        realized_meta.get("required_realized_expectancy_rr"), None
                     ),
                 },
             )

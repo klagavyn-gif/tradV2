@@ -1088,16 +1088,35 @@ def _format_counter_items(counter_map, *, limit=3, key_map=None):
     return ", ".join([f"{text} {count}" for text, count in items[: max(1, int(limit))]])
 
 
-def _top_quality_drop_counts(quality_drop_counts, *, limit=3):
+_QUALITY_DROP_FRIENDLY_LABELS = {
+    "all_weather_no_actionable_subplans": "ไม่มี setup ที่เข้าได้",
+    "candidate_win_rate_below_min": "Win Rate ต่ำกว่าเกณฑ์",
+    "candidate_expectancy_below_min": "Expectancy ต่ำกว่าเกณฑ์",
+    "candidate_profile_win_rate_below_min": "WR โปรไฟล์ต่ำกว่าเกณฑ์",
+    "candidate_missing_edge_metrics": "ไม่มีสถิติ edge",
+    "trend_radar_watch_intent_filtered": "Trend Radar เป็นแค่ Watch",
+    "realized_expectancy_below_floor": "Expectancy จริงติดลบ",
+    "realized_win_rate_below_floor": "Win Rate จริงต่ำกว่าเกณฑ์",
+    "regime_min_confidence_not_met": "Regime ต้องการ confidence สูงขึ้น",
+    "primary_stale_entry_suppressed": "สัญญาณเข้าเก่าเกินไป",
+    "primary_stale_exit_suppressed": "สัญญาณออกเก่าเกินไป",
+}
+
+
+def _top_quality_drop_counts(quality_drop_counts, *, limit=3, key_map=None):
     if not isinstance(quality_drop_counts, dict):
         return "-"
     cleaned = []
     for key, value in quality_drop_counts.items():
         count = _safe_int(value)
-        text = str(key or "").strip()
-        if count is None or count <= 0 or not text:
+        raw = str(key or "").strip()
+        if count is None or count <= 0 or not raw:
             continue
-        cleaned.append((text.replace("_", " "), int(count)))
+        if isinstance(key_map, dict):
+            text = str(key_map.get(raw, raw.replace("_", " ")))
+        else:
+            text = raw.replace("_", " ")
+        cleaned.append((text, int(count)))
     if not cleaned:
         return "-"
     cleaned.sort(key=lambda item: (-item[1], item[0]))
@@ -1269,9 +1288,18 @@ def build_telegram_daily_summary_message(
         helpers=helpers,
     )
     candidate_backtest_snapshot = helpers["candidate_backtest_snapshot"]
+    if ranked:
+        trade_status = "🟢 มีสัญญาณพร้อมพิจารณา"
+    elif daily_pick_count > 0:
+        trade_status = "🟡 มี Daily Pick เฝ้ารอ"
+    elif isinstance(latest_run, dict) and (_safe_int(latest_run.get("sent_count")) or 0) > 0:
+        trade_status = "🟢 มีสัญญาณส่งไปแล้ว"
+    else:
+        trade_status = "⛔ ยังไม่ควรเข้าเทรด"
     lines = [
         "<b>Daily 09:00 Summary</b>",
         f"⏱️ <b>เวลา:</b> {html.escape(now_text)}",
+        f"🎯 <b>สถานะวันนี้:</b> {html.escape(trade_status)}",
     ]
 
     runtime_parts = [
@@ -1288,7 +1316,10 @@ def build_telegram_daily_summary_message(
         regime_text = str(alert_budget.get("market_regime") or "-").strip().upper() or "-"
         run_cap = _fmt_count(alert_budget.get("adjusted_run_cap"))
         daily_cap = _fmt_count(alert_budget.get("adjusted_daily_pick_cap"))
-        quality_drop_text = _top_quality_drop_counts(latest_run.get("quality_drop_counts"))
+        quality_drop_text = _top_quality_drop_counts(
+            latest_run.get("quality_drop_counts"),
+            key_map=_QUALITY_DROP_FRIENDLY_LABELS,
+        )
         lines.append(
             "🧭 <b>ภาพรวม:</b> "
             + f"regime {html.escape(regime_text)}"
@@ -1342,7 +1373,7 @@ def build_telegram_daily_summary_message(
         "🎯 <b>ผลงานจริง "
         + f"{html.escape(_fmt_number(realized_days, digits=0))}d:</b> "
         + f"WR {html.escape(_fmt_number(realized_summary.get('win_rate_pct'), suffix='%'))}"
-        + f" | RR {html.escape(_fmt_number(realized_summary.get('avg_rr_realized'), digits=2))}"
+        + f" | Expectancy {html.escape(_fmt_number(realized_summary.get('avg_rr_realized'), digits=2, suffix='R'))}"
         + f" | PnL {html.escape(_fmt_number(realized_summary.get('avg_pnl_pct'), digits=2, suffix='%'))}"
         + f" | settled {html.escape(_fmt_count(realized_summary.get('settled_alerts')))}"
         + f" | alerts/day {html.escape(_fmt_number(realized_summary.get('alerts_per_day_avg'), digits=1))}"
@@ -1371,7 +1402,10 @@ def build_telegram_daily_summary_message(
     else:
         no_candidate_reason = "-"
         if isinstance(latest_run, dict):
-            no_candidate_reason = _top_quality_drop_counts(latest_run.get("quality_drop_counts"))
+            no_candidate_reason = _top_quality_drop_counts(
+                latest_run.get("quality_drop_counts"),
+                key_map=_QUALITY_DROP_FRIENDLY_LABELS,
+            )
         lines.append(
             "📌 <b>ตัวเด่นตอนนี้:</b> ยังไม่มี candidate ที่ผ่าน gate"
             + (f" | เหตุหลัก {html.escape(no_candidate_reason)}" if no_candidate_reason != "-" else "")

@@ -1297,7 +1297,7 @@ def build_telegram_daily_summary_message(
     else:
         trade_status = "⛔ ยังไม่ควรเข้าเทรด"
     lines = [
-        "<b>Daily 09:00 Summary</b>",
+        "<b>Daily Summary</b>",
         f"⏱️ <b>เวลา:</b> {html.escape(now_text)}",
         f"🎯 <b>สถานะวันนี้:</b> {html.escape(trade_status)}",
     ]

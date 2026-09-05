@@ -141,6 +141,11 @@ def run_once(symbols, period, notify_telegram, verify_output=None, verify_includ
     latest_run = trad._read_latest_telegram_run_report()
     realized_report_days = trad._alert_realized_report_days()
     realized_performance = trad._build_telegram_alert_realized_report(days=realized_report_days)
+    if notify_telegram:
+        try:
+            trad._dispatch_trade_close_notifications(realized_report_days=realized_report_days)
+        except Exception as exc:
+            trad.logger.error("Trade close notifications failed: %s", exc)
     verify_request = {
         "symbols": uniq,
         "period": period,

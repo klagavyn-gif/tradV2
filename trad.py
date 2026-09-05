@@ -78,6 +78,7 @@ from alerts.reporting import (
     build_telegram_alert_report as _alerts_reporting_build_telegram_alert_report,
     build_telegram_alert_realized_report as _alerts_reporting_build_telegram_alert_realized_report,
     candidate_backtest_snapshot as _alerts_reporting_candidate_backtest_snapshot,
+    dispatch_trade_close_notifications as _alerts_reporting_dispatch_trade_close_notifications,
     candidate_message_preview as _alerts_reporting_candidate_message_preview,
     candidate_ops_snapshot as _alerts_reporting_candidate_ops_snapshot,
     live_feedback_training_fieldnames as _alerts_reporting_live_feedback_training_fieldnames,
@@ -6443,6 +6444,18 @@ def _build_telegram_alert_realized_report(days=30, strategies=None, symbols=None
     )
 
 
+def _dispatch_trade_close_notifications(realized_report_days=None):
+    return _alerts_reporting_dispatch_trade_close_notifications(
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        send_telegram_alert=send_telegram_alert,
+        history_lock=_ALERT_HISTORY_LOCK,
+        strategy_order=_TELEGRAM_REPORT_STRATEGY_ORDER,
+        realized_report_days=realized_report_days,
+    )
+
+
 def _build_telegram_alert_feedback_export(days=90, strategies=None, symbols=None, include_open=False):
     return _alerts_reporting_build_telegram_alert_feedback_export(
         days=days,
@@ -6488,6 +6501,7 @@ def _reporting_module_helpers():
         "alert_realized_enabled": _alert_realized_enabled,
         "alert_realized_interval": _alert_realized_interval,
         "alert_realized_max_hold_bars": _alert_realized_max_hold_bars,
+        "alert_realized_report_days": _alert_realized_report_days,
         "alert_realized_export_outcomes": _alert_realized_export_outcomes,
         "alert_outcomes_file_path": _alert_outcomes_file_path,
         "alert_realized_summary_file_path": _alert_realized_summary_file_path,

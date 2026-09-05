@@ -986,6 +986,229 @@ def _build_telegram_realized_report_from_entries(entries, *, days_value, helpers
     return summary
 
 
+def _trade_close_outcome_icon(result):
+    if result == "win":
+        return "✅"
+    if result == "loss":
+        return "❌"
+    return "⏱️"
+
+
+def _trade_close_exit_reason_label(exit_reason):
+    text = str(exit_reason or "").strip().lower()
+    if text in ("take_profit", "tp"):
+        return "กระทบเป้า (TP)"
+    if text in ("stop_loss", "sl"):
+        return "กระทบหยุดขาดทุน (SL)"
+    if text in ("time_exit", "time_stop", "time_stop_exit"):
+        return "หมดเวลา Hold Plan"
+    if text in ("invalid_stop_direction",):
+        return "ข้อมูล Stop ผิดด้าน"
+    if text in ("missing_entry_or_stop",):
+        return "ข้อมูล Entry/Stop ไม่ครบ"
+    if text in ("non_directional",):
+        return "ไม่ใช่สัญญาณ BUY/SELL"
+    if text in ("missing_timestamp",):
+        return "ไม่มีเวลาสัญญาณ"
+    if text in ("history_unavailable",):
+        return "ไม่มีข้อมูลราคา"
+    return "—"
+
+
+def _build_trade_close_message(outcome, *, get_now):
+    symbol = str(outcome.get("symbol") or "").strip().upper() or "—"
+    signal = str(outcome.get("signal") or "").strip().upper() or "—"
+    result = str(outcome.get("outcome_result") or "").strip().lower()
+    icon = _trade_close_outcome_icon(result)
+    result_label = {"win": "ชนะ", "loss": "แพ้", "flat": "เสมอ"}.get(result, result or "—")
+    strategy = str(outcome.get("strategy") or "—").strip().upper()
+    entry_price = outcome.get("entry_price")
+    exit_price = outcome.get("exit_price")
+    stop_loss = outcome.get("stop_loss")
+    take_profit = outcome.get("take_profit")
+    rr = outcome.get("rr_realized")
+    pnl = outcome.get("pnl_pct")
+    bars_to_outcome = outcome.get("bars_to_outcome")
+    window_bars = outcome.get("evaluation_window_bars")
+    exit_reason = _trade_close_exit_reason_label(outcome.get("exit_reason"))
+    timestamp = str(outcome.get("timestamp") or "").strip() or "—"
+    intent = str(outcome.get("alert_intent") or "").strip().lower() or "—"
+    tv_symbol = symbol.replace("-", "")
+
+    lines = []
+    lines.append(f"{icon} <b>ปิดไม้แล้ว — {result_label}</b>")
+    lines.append("────────────────")
+    lines.append(f"<b>เหรียญ:</b> {html.escape(symbol)} | <b>สัญญาณ:</b> {html.escape(signal)}")
+    lines.append(f"<b>กลยุทธ์:</b> {html.escape(strategy)} | <b>Intent:</b> {html.escape(intent)}")
+    lines.append(f"<b>เวลาเข้า:</b> {html.escape(timestamp)}")
+    if isinstance(entry_price, (int, float)):
+        lines.append(f"<b>Entry:</b> {entry_price:.6g}")
+    if isinstance(exit_price, (int, float)):
+        lines.append(f"<b>Exit:</b> {exit_price:.6g}")
+    if isinstance(stop_loss, (int, float)):
+        lines.append(f"<b>SL:</b> {stop_loss:.6g}")
+    if isinstance(take_profit, (int, float)):
+        lines.append(f"<b>TP:</b> {take_profit:.6g}")
+    if isinstance(rr, (int, float)):
+        lines.append(f"<b>RR:</b> {rr:+.2f}R")
+    if isinstance(pnl, (int, float)):
+        lines.append(f"<b>PnL:</b> {pnl:+.2f}%")
+    if isinstance(bars_to_outcome, (int, float)) and isinstance(window_bars, int):
+        lines.append(f"<b>แท่งที่เข้าไป:</b> {int(bars_to_outcome)}/{window_bars}")
+    lines.append(f"<b>สาเหตุปิด:</b> {html.escape(exit_reason)}")
+    lines.append("────────────────")
+    lines.append("🕒 <b>เวลา:</b> " + get_now().strftime("%Y-%m-%d %H:%M"))
+    lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 TradingView</a>")
+    return "\n".join(lines)
+
+
+def _load_previous_settled_outcome_ids(path):
+    payload = _read_json_file(path)
+    if not isinstance(payload, dict):
+        return set()
+    outcomes = payload.get("outcomes")
+    if not isinstance(outcomes, list):
+        return set()
+    ids = set()
+    for row in outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("outcome_status") or "").strip().lower() != "settled":
+            continue
+        alert_id = str(row.get("alert_id") or "").strip()
+        if alert_id:
+            ids.add(alert_id)
+    return ids
+
+
+def _load_notified_close_ids(path):
+    payload = _read_json_file(path)
+    if not isinstance(payload, dict):
+        return set()
+    ids = payload.get("notified_alert_ids")
+    if not isinstance(ids, list):
+        return set()
+    return {str(item).strip() for item in ids if str(item).strip()}
+
+
+def _save_notified_close_ids(path, ids, *, max_keep=500):
+    trimmed = sorted(set(str(item).strip() for item in ids if str(item).strip()))[-max_keep:]
+    write_json_atomic(path, {"notified_alert_ids": trimmed, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+
+
+def dispatch_trade_close_notifications(
+    *,
+    config,
+    helpers,
+    get_now,
+    send_telegram_alert,
+    history_lock,
+    strategy_order,
+    realized_report_days=None,
+):
+    """Detect newly-settled outcomes and send a close notification for each.
+
+    Reads the previously-persisted outcomes, regenerates fresh outcomes from
+    alert history, diffs to find alert_ids that are settled now but were not
+    settled before (or were already notified), and sends a Telegram message
+    per newly settled outcome.
+    """
+    if not bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_NOTIFICATIONS_ENABLE", True)):
+        return {"enabled": False, "sent": 0, "skipped": 0}
+    if not callable(send_telegram_alert):
+        return {"enabled": False, "sent": 0, "skipped": 0}
+    if not bool(helpers.get("alert_realized_enabled")()):
+        return {"enabled": False, "sent": 0, "skipped": 0}
+
+    outcomes_path = helpers["alert_outcomes_file_path"]()
+    notified_path = outcomes_path.replace("realized_outcomes.json", "notified_closes.json")
+    max_per_run = int(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_MAX_PER_RUN", 5) or 5)
+    only_entry = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_ONLY_ENTRY", True))
+    skip_flat = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT", False))
+
+    # Snapshot the previously-settled alert_ids BEFORE regeneration.
+    previous_settled_ids = _load_previous_settled_outcome_ids(outcomes_path)
+    already_notified_ids = _load_notified_close_ids(notified_path)
+
+    # Regenerate fresh outcomes by calling the existing report builder.
+    days_value = int(realized_report_days or helpers.get("alert_realized_report_days", lambda: 90)() or 90)
+    summary = _build_telegram_realized_report_from_entries(
+        helpers["read_telegram_alert_history"](days=days_value),
+        days_value=days_value,
+        helpers=helpers,
+        get_now=get_now,
+        strategy_order=strategy_order,
+        history_lock=history_lock,
+    )
+
+    # Read the freshly-written outcomes file.
+    fresh_payload = _read_json_file(outcomes_path)
+    if not isinstance(fresh_payload, dict):
+        return {"enabled": True, "sent": 0, "skipped": 0, "error": "no_fresh_outcomes"}
+    fresh_outcomes = fresh_payload.get("outcomes")
+    if not isinstance(fresh_outcomes, list):
+        return {"enabled": True, "sent": 0, "skipped": 0, "error": "no_outcomes_list"}
+
+    sent = 0
+    skipped = 0
+    newly_notified = list(already_notified_ids)
+    for outcome in fresh_outcomes:
+        if not isinstance(outcome, dict):
+            continue
+        if str(outcome.get("outcome_status") or "").strip().lower() != "settled":
+            continue
+        alert_id = str(outcome.get("alert_id") or "").strip()
+        if not alert_id:
+            continue
+        # Skip if already notified.
+        if alert_id in already_notified_ids:
+            skipped += 1
+            continue
+        # Skip if it was already settled in the previous snapshot (we just
+        # hadn't notified yet — still notify, but this prevents re-notifying
+        # across multiple runs in the same cycle).
+        # Only notify for outcomes that are NEWLY settled since last run.
+        if alert_id in previous_settled_ids:
+            # Was already settled before — mark as notified without sending.
+            newly_notified.append(alert_id)
+            skipped += 1
+            continue
+        intent = str(outcome.get("alert_intent") or "").strip().lower()
+        if only_entry and intent != "entry":
+            newly_notified.append(alert_id)
+            skipped += 1
+            continue
+        result = str(outcome.get("outcome_result") or "").strip().lower()
+        if skip_flat and result == "flat":
+            newly_notified.append(alert_id)
+            skipped += 1
+            continue
+        if sent >= max_per_run:
+            skipped += 1
+            continue
+        message = _build_trade_close_message(outcome, get_now=get_now)
+        if not isinstance(message, str) or not message.strip():
+            continue
+        if send_telegram_alert(message):
+            sent += 1
+            newly_notified.append(alert_id)
+
+    # Persist notified ids so we never send the same close twice.
+    if newly_notified != list(already_notified_ids):
+        try:
+            _save_notified_close_ids(notified_path, newly_notified)
+        except Exception:
+            pass
+
+    return {
+        "enabled": True,
+        "sent": sent,
+        "skipped": skipped,
+        "previous_settled": len(previous_settled_ids),
+        "already_notified": len(already_notified_ids),
+    }
+
+
 def record_telegram_run_report(
     *,
     results,

@@ -223,7 +223,7 @@ def _candidate_evaluation_window_bars(candidate, *, config):
     plan = (candidate or {}).get("plan")
     strategy = str((candidate or {}).get("strategy") or "").strip().upper()
     if isinstance(plan, dict):
-        for key in ("max_forward_bars", "time_stop_bars", "holding_window_bars"):
+        for key in ("max_forward_bars", "time_stop_bars", "holding_window_bars", "max_hold_bars"):
             candidate_value = _safe_int(plan.get(key))
             if isinstance(candidate_value, int) and candidate_value > 0:
                 return candidate_value
@@ -586,6 +586,8 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
         "strategy": str((entry or {}).get("strategy") or "").strip().upper() or "UNKNOWN",
         "symbol": str((entry or {}).get("symbol") or "").strip().upper(),
         "signal": signal,
+        "alert_intent": str((entry or {}).get("alert_intent") or "").strip().lower() or None,
+        "alert_intent_reason": str((entry or {}).get("alert_intent_reason") or "").strip() or None,
         "daily_pick": bool((entry or {}).get("daily_pick")),
         "timeframe": str((entry or {}).get("timeframe") or "").strip().lower() or None,
         "evaluation_window_bars": window_bars,
@@ -917,6 +919,58 @@ def _build_telegram_realized_report_from_entries(entries, *, days_value, helpers
             if bucket["settled_alerts"] > 0:
                 bucket["win_rate_pct"] = (float(bucket["wins"]) / float(bucket["settled_alerts"])) * 100.0
     summary["by_month"] = {key: by_month[key] for key in sorted(by_month.keys())}
+
+    entry_only_rows = [row for row in outcomes if str(row.get("alert_intent") or "").strip().lower() == "entry"]
+    entry_settled = [row for row in entry_only_rows if row.get("outcome_status") == "settled"]
+    entry_wins = [row for row in entry_settled if row.get("outcome_result") == "win"]
+    entry_losses = [row for row in entry_settled if row.get("outcome_result") == "loss"]
+    entry_flats = [row for row in entry_settled if row.get("outcome_result") == "flat"]
+
+    def _count_entry_rows(rows, *, group_by):
+        buckets = {}
+        for row in rows:
+            timestamp = _alert_timestamp_value(row.get("timestamp"))
+            if not isinstance(timestamp, datetime):
+                continue
+            if group_by == "month":
+                key = timestamp.strftime("%Y-%m")
+            else:
+                key = str(row.get("strategy") or "UNKNOWN").strip().upper() or "UNKNOWN"
+            bucket = buckets.setdefault(
+                key,
+                {"settled_alerts": 0, "wins": 0, "losses": 0, "flats": 0, "win_rate_pct": None, "_rows": []},
+            )
+            bucket["settled_alerts"] += 1
+            bucket["_rows"].append(row)
+            result = row.get("outcome_result")
+            if result == "win":
+                bucket["wins"] += 1
+            elif result == "loss":
+                bucket["losses"] += 1
+            elif result == "flat":
+                bucket["flats"] += 1
+        for key, bucket in buckets.items():
+            if bucket["settled_alerts"] > 0:
+                bucket["win_rate_pct"] = (float(bucket["wins"]) / float(bucket["settled_alerts"])) * 100.0
+            bucket["avg_rr_realized"] = _realized_metric_average(bucket["_rows"], "rr_realized")
+            bucket["avg_pnl_pct"] = _realized_metric_average(bucket["_rows"], "pnl_pct")
+            bucket.pop("_rows", None)
+        return buckets
+
+    entry_by_month = _count_entry_rows(entry_settled, group_by="month")
+    entry_by_strategy = _count_entry_rows(entry_settled, group_by="strategy")
+
+    summary["entry_only"] = {
+        "settled_alerts": len(entry_settled),
+        "wins": len(entry_wins),
+        "losses": len(entry_losses),
+        "flats": len(entry_flats),
+        "win_rate_pct": (float(len(entry_wins)) / float(len(entry_settled))) * 100.0 if entry_settled else None,
+        "avg_rr_realized": _realized_metric_average(entry_settled, "rr_realized"),
+        "avg_pnl_pct": _realized_metric_average(entry_settled, "pnl_pct"),
+        "by_month": {key: entry_by_month[key] for key in sorted(entry_by_month.keys())},
+        "by_strategy": entry_by_strategy,
+    }
 
     with history_lock:
         write_json_atomic(helpers["alert_realized_summary_file_path"](), summary)

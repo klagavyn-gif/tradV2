@@ -551,6 +551,31 @@ TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_WIN_RATE = _env_float(
 TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_EXPECTANCY_RR = _env_float(
     "TELEGRAM_ALERT_PRIMARY_REALIZED_GATE_MIN_EXPECTANCY_RR", 0.0
 )
+# Pause/recover state machine for realized buckets. A strategy|symbol|signal
+# bucket whose recent entry outcomes lose money is paused (candidates blocked),
+# and recovers automatically when recent performance improves. Hysteresis is
+# applied (pause floor < recover floor) to avoid flip-flopping.
+TELEGRAM_ALERT_REALIZED_PAUSE_ENABLE = _env_bool(
+    "TELEGRAM_ALERT_REALIZED_PAUSE_ENABLE", True
+)
+TELEGRAM_ALERT_REALIZED_PAUSE_RECENT_DAYS = _env_int(
+    "TELEGRAM_ALERT_REALIZED_PAUSE_RECENT_DAYS", 30
+)
+TELEGRAM_ALERT_REALIZED_PAUSE_MIN_RECENT_SETTLED = _env_int(
+    "TELEGRAM_ALERT_REALIZED_PAUSE_MIN_RECENT_SETTLED", 4
+)
+TELEGRAM_ALERT_REALIZED_PAUSE_EXPECTANCY_FLOOR = _env_float(
+    "TELEGRAM_ALERT_REALIZED_PAUSE_EXPECTANCY_FLOOR", -0.10
+)
+TELEGRAM_ALERT_REALIZED_RECOVER_EXPECTANCY_FLOOR = _env_float(
+    "TELEGRAM_ALERT_REALIZED_RECOVER_EXPECTANCY_FLOOR", 0.05
+)
+TELEGRAM_ALERT_REALIZED_PAUSE_WIN_RATE_FLOOR = _env_float(
+    "TELEGRAM_ALERT_REALIZED_PAUSE_WIN_RATE_FLOOR", 40.0
+)
+TELEGRAM_ALERT_REALIZED_RECOVER_WIN_RATE_FLOOR = _env_float(
+    "TELEGRAM_ALERT_REALIZED_RECOVER_WIN_RATE_FLOOR", 50.0
+)
 TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES = _env_bool("TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES", True)
 # Trade-close notifications: send a Telegram message when a previously-open
 # alert settles (win/loss/time-exit) at its hold-plan horizon.

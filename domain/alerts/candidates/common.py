@@ -2334,6 +2334,11 @@ def _evaluate_realized_win_rate_gate(candidate, *, config, helpers):
     signal = str(candidate.get("signal") or "").strip().upper()
     if not strategy or not symbol or signal not in ("BUY", "SELL"):
         return True, None, {}
+    pause_fn = (helpers or {}).get("evaluate_realized_pause")
+    if callable(pause_fn):
+        pause_action, pause_meta = pause_fn(candidate)
+        if pause_action in ("pause_now_block", "paused_keep_block"):
+            return False, "realized_bucket_paused", pause_meta if isinstance(pause_meta, dict) else {}
     realized_fn = (helpers or {}).get("short_play_watch_realized_metrics")
     if not callable(realized_fn):
         return True, None, {}
@@ -2545,6 +2550,11 @@ def finalize_candidates(context):
                     "required_realized_expectancy_rr": _safe_float(
                         realized_meta.get("required_realized_expectancy_rr"), None
                     ),
+                    "realized_pause_action": str(realized_meta.get("realized_pause_action") or "").strip() or None,
+                    "realized_pause_bucket": str(realized_meta.get("realized_pause_bucket") or "").strip() or None,
+                    "recent_settled": _safe_float(realized_meta.get("recent_settled"), None),
+                    "recent_win_rate_pct": _safe_float(realized_meta.get("recent_win_rate_pct"), None),
+                    "recent_expectancy_rr": _safe_float(realized_meta.get("recent_expectancy_rr"), None),
                 },
             )
             continue

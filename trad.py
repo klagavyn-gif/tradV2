@@ -44,6 +44,12 @@ from alerts.auto_tuning import (
     read_alert_history_entries as _alerts_auto_tuning_read_alert_history_entries,
     write_auto_tuned_thresholds as _alerts_auto_tuning_write_auto_tuned_thresholds,
 )
+from alerts.realized_pause import (
+    evaluate_pause as _alerts_realized_pause_evaluate_pause,
+    load_pause_state as _alerts_realized_pause_load_pause_state,
+    make_bucket_key as _alerts_realized_pause_make_bucket_key,
+    save_pause_state as _alerts_realized_pause_save_pause_state,
+)
 from alerts.messages import (
     build_all_weather_message as _alerts_build_all_weather_message,
     build_daily_best_pick_message as _alerts_build_daily_best_pick_message,
@@ -937,6 +943,117 @@ def _alert_realized_outcome_aggregates():
     }
     _ALERT_REALIZED_OUTCOMES_CACHE["aggregates"] = aggregates
     return aggregates
+
+
+def _realized_pause_state_path():
+    return os.path.join(_alert_history_dir(), "realized_pause_state.json")
+
+
+def _load_realized_pause_state():
+    return _alerts_realized_pause_load_pause_state(_realized_pause_state_path())
+
+
+def _save_realized_pause_state(state):
+    with _ALERT_HISTORY_LOCK:
+        return _alerts_realized_pause_save_pause_state(_realized_pause_state_path(), state)
+
+
+def _recent_realized_bucket_metrics(strategy, symbol, signal, *, days):
+    payload = _load_alert_realized_outcomes_payload()
+    outcomes = payload.get("outcomes") if isinstance(payload, dict) else None
+    if not isinstance(outcomes, list):
+        return None, None, None
+    cutoff = None
+    try:
+        days = int(days)
+        if days > 0:
+            cutoff = datetime.now() - timedelta(days=days)
+    except Exception:
+        cutoff = None
+    settled = 0
+    wins = 0
+    rr_sum = 0.0
+    rr_count = 0
+    for row in outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("outcome_status") or "").strip().lower() != "settled":
+            continue
+        if str(row.get("alert_intent") or "").strip().lower() != "entry":
+            continue
+        if str(row.get("strategy") or "").strip().upper() != strategy:
+            continue
+        if normalize_symbol(row.get("symbol") or "") != symbol:
+            continue
+        if str(row.get("signal") or "").strip().upper() != signal:
+            continue
+        if cutoff is not None:
+            ts_text = str(row.get("timestamp") or "").strip()
+            ts = None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+                try:
+                    ts = datetime.strptime(ts_text, fmt)
+                    break
+                except Exception:
+                    continue
+            if isinstance(ts, datetime) and ts < cutoff:
+                continue
+        settled += 1
+        if str(row.get("outcome_result") or "").strip().lower() == "win":
+            wins += 1
+        rr = _safe_float(row.get("rr_realized"))
+        if rr is not None:
+            rr_sum += rr
+            rr_count += 1
+    win_rate = (float(wins) / float(settled) * 100.0) if settled > 0 else None
+    expectancy = (rr_sum / rr_count) if rr_count > 0 else None
+    return settled, win_rate, expectancy
+
+
+def _evaluate_realized_pause(candidate):
+    if not bool(getattr(config, "TELEGRAM_ALERT_REALIZED_PAUSE_ENABLE", True)):
+        return "allow", {}
+    if not isinstance(candidate, dict):
+        return "allow", {}
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    signal = str(candidate.get("signal") or "").strip().upper()
+    if not strategy or not symbol or signal not in ("BUY", "SELL"):
+        return "allow", {}
+    recent_days = int(getattr(config, "TELEGRAM_ALERT_REALIZED_PAUSE_RECENT_DAYS", 30) or 30)
+    min_recent_settled = int(getattr(config, "TELEGRAM_ALERT_REALIZED_PAUSE_MIN_RECENT_SETTLED", 4) or 4)
+    pause_floor_exp = float(getattr(config, "TELEGRAM_ALERT_REALIZED_PAUSE_EXPECTANCY_FLOOR", -0.10) or -0.10)
+    recover_floor_exp = float(getattr(config, "TELEGRAM_ALERT_REALIZED_RECOVER_EXPECTANCY_FLOOR", 0.05) or 0.05)
+    pause_floor_wr = float(getattr(config, "TELEGRAM_ALERT_REALIZED_PAUSE_WIN_RATE_FLOOR", 40.0) or 40.0)
+    recover_floor_wr = float(getattr(config, "TELEGRAM_ALERT_REALIZED_RECOVER_WIN_RATE_FLOOR", 50.0) or 50.0)
+
+    bucket = _alerts_realized_pause_make_bucket_key(strategy, symbol, signal)
+    settled, win_rate, expectancy = _recent_realized_bucket_metrics(
+        strategy, symbol, signal, days=recent_days
+    )
+    state = _load_realized_pause_state()
+    action, updated_state, changed = _alerts_realized_pause_evaluate_pause(
+        state=state,
+        bucket=bucket,
+        recent_settled=settled,
+        recent_win_rate=win_rate,
+        recent_expectancy=expectancy,
+        pause_floor_exp=pause_floor_exp,
+        recover_floor_exp=recover_floor_exp,
+        min_recent_settled=min_recent_settled,
+        pause_floor_wr=pause_floor_wr,
+        recover_floor_wr=recover_floor_wr,
+    )
+    if changed:
+        _save_realized_pause_state(updated_state)
+    meta = {
+        "realized_pause_action": action,
+        "realized_pause_bucket": bucket,
+        "recent_settled": settled,
+        "recent_win_rate_pct": win_rate,
+        "recent_expectancy_rr": expectancy,
+    }
+    return action, meta
 
 
 def _short_play_watch_realized_metrics(candidate):
@@ -5825,6 +5942,7 @@ def _pipeline_module_helpers():
         "extract_walkforward_metrics": _extract_walkforward_metrics,
         "short_play_watch_realized_metrics": _short_play_watch_realized_metrics,
         "short_play_watch_strategy_support_metrics": _short_play_watch_strategy_support_metrics,
+        "evaluate_realized_pause": _evaluate_realized_pause,
         "score_candidate_with_live_ai": _score_candidate_with_live_ai,
         "score_candidate_with_live_entry_ai": _score_candidate_with_live_entry_ai,
         "build_market_regime_snapshot": _build_market_regime_snapshot,

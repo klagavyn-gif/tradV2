@@ -570,6 +570,65 @@ def _close_at_or_before(price_df, alert_time):
         return None
 
 
+_WATCH_ONLY_STRATEGIES = ("TRADAR15", "TRENDRADAR15", "TREND_RADAR", "TRENDSTATE", "TRENDSTATE15")
+_EXIT_PLAN_REASON_PHRASES = (
+    "ถือครบ",
+    "ปิดรอบ",
+    "แตะเป้าปิดทำกำไร",
+    "ปิดกำไร",
+    "time stop",
+    "take profit",
+    "close round",
+    "อ่อนแรง",
+    "เอนลง",
+    "กลับเป็นลบ",
+)
+_ENTRY_PLAN_REASON_PHRASES = (
+    "ยังหนุน",
+    "เริ่มฟื้น",
+    "vixfix spike",
+    "panic low",
+    "regime trend",
+)
+
+
+def infer_alert_intent(row):
+    """Infer an alert's intent for historical rows that predate alert_intent.
+
+    Priority (highest first):
+      1. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
+      2. existing alert_intent     -> keep   (entry/exit already classified)
+      3. watch-only strategy       -> watch
+      4. tier_action               -> entry/watch
+      5. plan_reason entry phrases -> entry
+      6. default                   -> watch  (conservative, avoid overclaiming)
+    """
+    if not isinstance(row, dict):
+        return "watch", "invalid_row"
+    existing = str(row.get("alert_intent") or "").strip().lower()
+    existing_reason = str(row.get("alert_intent_reason") or "").strip()
+    plan_reason = str(row.get("plan_reason") or "").strip().lower()
+    strategy = str(row.get("strategy") or "").strip().upper()
+    tier_action = str(row.get("tier_action") or "").strip()
+
+    if any(phrase in plan_reason for phrase in _EXIT_PLAN_REASON_PHRASES):
+        return "exit", "plan_reason_exit"
+    if existing in ("entry", "exit"):
+        return existing, existing_reason or "existing_intent"
+    if strategy in _WATCH_ONLY_STRATEGIES:
+        return "watch", "strategy_watch_only"
+    if tier_action:
+        if "เข้าได้" in tier_action or "เข้าเมื่อ" in tier_action:
+            return "entry", "tier_action_entry"
+        if "รอ" in tier_action or "ดูทิศทาง" in tier_action:
+            return "watch", "tier_action_watch"
+    if any(phrase in plan_reason for phrase in _ENTRY_PLAN_REASON_PHRASES):
+        return "entry", "plan_reason_entry"
+    if existing == "watch":
+        return "watch", existing_reason or "existing_intent"
+    return "watch", "default_watch"
+
+
 def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars):
     signal = str((entry or {}).get("signal") or "").strip().upper()
     alert_time = _alert_timestamp_value((entry or {}).get("timestamp"))
@@ -580,14 +639,16 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
     window_bars = _safe_int((entry or {}).get("evaluation_window_bars"), max_hold_bars)
     if not isinstance(window_bars, int) or window_bars < 1:
         window_bars = max_hold_bars
+    inferred_intent, inferred_intent_reason = infer_alert_intent(entry)
     outcome = {
         "alert_id": alert_id,
         "timestamp": str((entry or {}).get("timestamp") or "").strip() or None,
         "strategy": str((entry or {}).get("strategy") or "").strip().upper() or "UNKNOWN",
         "symbol": str((entry or {}).get("symbol") or "").strip().upper(),
         "signal": signal,
-        "alert_intent": str((entry or {}).get("alert_intent") or "").strip().lower() or None,
-        "alert_intent_reason": str((entry or {}).get("alert_intent_reason") or "").strip() or None,
+        "alert_intent": inferred_intent,
+        "alert_intent_reason": inferred_intent_reason,
+        "alert_intent_was_inferred": not bool(str((entry or {}).get("alert_intent") or "").strip()),
         "daily_pick": bool((entry or {}).get("daily_pick")),
         "timeframe": str((entry or {}).get("timeframe") or "").strip().lower() or None,
         "evaluation_window_bars": window_bars,

@@ -597,7 +597,7 @@ def infer_alert_intent(row):
 
     Priority (highest first):
       1. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
-      2. existing alert_intent     -> keep   (entry/exit already classified)
+      2. existing alert_intent     -> keep   (entry/exit/watch already classified)
       3. watch-only strategy       -> watch
       4. tier_action               -> entry/watch
       5. plan_reason entry phrases -> entry
@@ -613,7 +613,7 @@ def infer_alert_intent(row):
 
     if any(phrase in plan_reason for phrase in _EXIT_PLAN_REASON_PHRASES):
         return "exit", "plan_reason_exit"
-    if existing in ("entry", "exit"):
+    if existing in ("entry", "exit", "watch"):
         return existing, existing_reason or "existing_intent"
     if strategy in _WATCH_ONLY_STRATEGIES:
         return "watch", "strategy_watch_only"
@@ -624,8 +624,6 @@ def infer_alert_intent(row):
             return "watch", "tier_action_watch"
     if any(phrase in plan_reason for phrase in _ENTRY_PLAN_REASON_PHRASES):
         return "entry", "plan_reason_entry"
-    if existing == "watch":
-        return "watch", existing_reason or "existing_intent"
     return "watch", "default_watch"
 
 
@@ -1153,7 +1151,16 @@ def _load_notified_close_ids(path):
 
 
 def _save_notified_close_ids(path, ids, *, max_keep=500):
-    trimmed = sorted(set(str(item).strip() for item in ids if str(item).strip()))[-max_keep:]
+    # Preserve insertion order so trimming keeps the most recently added ids
+    # (alert_id is a SHA1 hash, so sorted() would evict arbitrarily).
+    seen = set()
+    ordered = []
+    for item in ids:
+        text = str(item).strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    trimmed = ordered[-max_keep:]
     write_json_atomic(path, {"notified_alert_ids": trimmed, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
 
@@ -1182,14 +1189,19 @@ def dispatch_trade_close_notifications(
         return {"enabled": False, "sent": 0, "skipped": 0}
 
     outcomes_path = helpers["alert_outcomes_file_path"]()
-    notified_path = outcomes_path.replace("realized_outcomes.json", "notified_closes.json")
+    notified_path = os.path.join(os.path.dirname(outcomes_path), "notified_closes.json")
     max_per_run = int(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_MAX_PER_RUN", 5) or 5)
     only_entry = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_ONLY_ENTRY", True))
     skip_flat = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT", False))
 
-    # Snapshot the previously-settled alert_ids BEFORE regeneration.
+    # Snapshot the previously-settled alert_ids BEFORE regeneration. This is
+    # used only to bootstrap the notified set on first run so historical
+    # trades are not re-notified as if they just closed.
     previous_settled_ids = _load_previous_settled_outcome_ids(outcomes_path)
     already_notified_ids = _load_notified_close_ids(notified_path)
+    if not os.path.exists(notified_path) and previous_settled_ids:
+        _save_notified_close_ids(notified_path, previous_settled_ids)
+        already_notified_ids = set(previous_settled_ids)
 
     # Regenerate fresh outcomes by calling the existing report builder.
     days_value = int(realized_report_days or helpers.get("alert_realized_report_days", lambda: 90)() or 90)
@@ -1212,6 +1224,8 @@ def dispatch_trade_close_notifications(
 
     sent = 0
     skipped = 0
+    capped = 0
+    failed = 0
     newly_notified = list(already_notified_ids)
     for outcome in fresh_outcomes:
         if not isinstance(outcome, dict):
@@ -1221,21 +1235,13 @@ def dispatch_trade_close_notifications(
         alert_id = str(outcome.get("alert_id") or "").strip()
         if not alert_id:
             continue
-        # Skip if already notified.
+        # Already handled (sent or intentionally skipped) in a previous run.
         if alert_id in already_notified_ids:
-            skipped += 1
-            continue
-        # Skip if it was already settled in the previous snapshot (we just
-        # hadn't notified yet — still notify, but this prevents re-notifying
-        # across multiple runs in the same cycle).
-        # Only notify for outcomes that are NEWLY settled since last run.
-        if alert_id in previous_settled_ids:
-            # Was already settled before — mark as notified without sending.
-            newly_notified.append(alert_id)
             skipped += 1
             continue
         intent = str(outcome.get("alert_intent") or "").strip().lower()
         if only_entry and intent != "entry":
+            # Intentional skip: never notify non-entry closes, but remember it.
             newly_notified.append(alert_id)
             skipped += 1
             continue
@@ -1245,7 +1251,8 @@ def dispatch_trade_close_notifications(
             skipped += 1
             continue
         if sent >= max_per_run:
-            skipped += 1
+            # Leave un-notified so it retries next run; do not drop silently.
+            capped += 1
             continue
         message = _build_trade_close_message(outcome, get_now=get_now)
         if not isinstance(message, str) or not message.strip():
@@ -1253,8 +1260,13 @@ def dispatch_trade_close_notifications(
         if send_telegram_alert(message):
             sent += 1
             newly_notified.append(alert_id)
+        else:
+            # Failed send: leave un-notified so it retries next run.
+            failed += 1
 
-    # Persist notified ids so we never send the same close twice.
+    # Persist notified ids so we never send the same close twice. Only ids
+    # that were actually sent (or intentionally skipped) are persisted; failed
+    # and capped ids remain for retry on the next run.
     if newly_notified != list(already_notified_ids):
         try:
             _save_notified_close_ids(notified_path, newly_notified)
@@ -1265,6 +1277,8 @@ def dispatch_trade_close_notifications(
         "enabled": True,
         "sent": sent,
         "skipped": skipped,
+        "capped": capped,
+        "failed": failed,
         "previous_settled": len(previous_settled_ids),
         "already_notified": len(already_notified_ids),
     }

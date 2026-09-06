@@ -101,10 +101,18 @@ def evaluate_pause(
     )
 
     if is_paused:
-        recovered = (
-            sufficient
-            and isinstance(recent_expectancy, (int, float))
-            and float(recent_expectancy) >= float(recover_floor_exp)
+        # Recover on either expectancy (when available) or win-rate (when a
+        # bucket was paused by win-rate because expectancy was absent).
+        recovered = sufficient and (
+            (
+                isinstance(recent_expectancy, (int, float))
+                and float(recent_expectancy) >= float(recover_floor_exp)
+            )
+            or (
+                recent_expectancy is None
+                and isinstance(recent_win_rate, (int, float))
+                and float(recent_win_rate) >= float(recover_floor_wr)
+            )
         )
         if recovered:
             paused.pop(bucket, None)

@@ -913,6 +913,11 @@ def _alert_realized_outcome_aggregates():
     for row in rows:
         if not isinstance(row, dict) or str(row.get("outcome_status") or "").strip().lower() != "settled":
             continue
+        # Only entry-intent outcomes reflect the performance of signals that
+        # recommended a new trade. Watch/exit closes must not leak into the
+        # realized gate that decides whether to allow new entries.
+        if str(row.get("alert_intent") or "").strip().lower() != "entry":
+            continue
         strategy = str(row.get("strategy") or "").strip().upper()
         symbol = normalize_symbol(row.get("symbol") or "")
         signal = str(row.get("signal") or "").strip().upper()

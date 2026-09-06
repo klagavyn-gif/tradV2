@@ -6239,6 +6239,43 @@ def _load_auto_tuned_thresholds():
     return payload
 
 
+def _realized_by_alert_id_for_auto_tune():
+    payload = _load_alert_realized_outcomes_payload()
+    outcomes = payload.get("outcomes") if isinstance(payload, dict) else None
+    if not isinstance(outcomes, list):
+        return {}
+    mapping = {}
+    for row in outcomes:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("outcome_status") or "").strip().lower() != "settled":
+            continue
+        if str(row.get("alert_intent") or "").strip().lower() != "entry":
+            continue
+        alert_id = str(row.get("alert_id") or "").strip()
+        if not alert_id:
+            continue
+        result = str(row.get("outcome_result") or "").strip().lower()
+        mapping[alert_id] = {
+            "win": result == "win",
+            "rr": _safe_float(row.get("rr_realized")),
+        }
+    return mapping
+
+
+def _auto_tune_realized_tuning_config():
+    if not bool(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_ENABLE", True)):
+        return {"enable": False}
+    return {
+        "enable": True,
+        "min_settled": int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_MIN_SETTLED", 6) or 6),
+        "full_settled": int(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_FULL_SETTLED", 20) or 20),
+        "target_win_rate": float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_TARGET_WIN_RATE", 55.0) or 55.0),
+        "wr_uplift_per_point": float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_WR_UPLIFT_PER_POINT", 0.5) or 0.5),
+        "exp_uplift_per_r": float(getattr(config, "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_EXP_UPLIFT_PER_R", 1.5) or 1.5),
+    }
+
+
 def _refresh_auto_tuned_thresholds(history_days=None):
     if not _alert_auto_tune_enabled():
         return None
@@ -6304,6 +6341,8 @@ def _refresh_auto_tuned_thresholds(history_days=None):
         symbol_min_blend_weight=symbol_min_blend_weight,
         symbol_confidence_cap_over_strategy=symbol_confidence_cap_over_strategy,
         symbol_sell_win_rate_cap_over_base=symbol_sell_win_rate_cap_over_base,
+        realized_by_alert_id=_realized_by_alert_id_for_auto_tune(),
+        realized_tuning=_auto_tune_realized_tuning_config(),
     )
     saved = _alerts_auto_tuning_write_auto_tuned_thresholds(path, payload)
     if saved:

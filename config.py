@@ -618,6 +618,28 @@ TELEGRAM_ALERT_AUTO_TUNE_OUTPUT_PATH = _env_str(
     "TELEGRAM_ALERT_AUTO_TUNE_OUTPUT_PATH",
     ".data/telegram_alerts/auto_tuned_thresholds.json",
 )
+# Calibrate auto-tune win-rate/expectancy thresholds from realized outcomes
+# (entry-only, settled) instead of relying solely on optimistic backtest
+# metrics. When a bucket's realized performance is weak, its thresholds are
+# raised (more selective); when realized is strong, thresholds are relaxed.
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_ENABLE = _env_bool(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_ENABLE", True
+)
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_MIN_SETTLED = _env_int(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_MIN_SETTLED", 6
+)
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_FULL_SETTLED = _env_int(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_FULL_SETTLED", 20
+)
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_TARGET_WIN_RATE = _env_float(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_TARGET_WIN_RATE", 55.0
+)
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_WR_UPLIFT_PER_POINT = _env_float(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_WR_UPLIFT_PER_POINT", 0.5
+)
+TELEGRAM_ALERT_AUTO_TUNE_REALIZED_EXP_UPLIFT_PER_R = _env_float(
+    "TELEGRAM_ALERT_AUTO_TUNE_REALIZED_EXP_UPLIFT_PER_R", 1.5
+)
 TELEGRAM_DAILY_BEST_PICK_ENABLED = _env_bool("TELEGRAM_DAILY_BEST_PICK_ENABLED", True)
 TELEGRAM_DAILY_BEST_PICK_HOUR = _env_int("TELEGRAM_DAILY_BEST_PICK_HOUR", 9)
 TELEGRAM_DAILY_BEST_PICK_MINUTE = _env_int("TELEGRAM_DAILY_BEST_PICK_MINUTE", 0)

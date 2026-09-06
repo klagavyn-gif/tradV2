@@ -344,6 +344,67 @@ def _top_subset(rows, *, target_count, score_field="score", minimum_keep=4, mini
     return ranked[:keep_count]
 
 
+def _realized_metrics(rows):
+    settled = 0
+    wins = 0
+    rr_sum = 0.0
+    rr_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        win = row.get("_realized_win")
+        rr = _to_float(row.get("_realized_rr"))
+        has_win = isinstance(win, bool)
+        has_rr = rr is not None
+        if not has_win and not has_rr:
+            continue
+        settled += 1
+        if has_win and win:
+            wins += 1
+        if has_rr:
+            rr_sum += rr
+            rr_count += 1
+    win_rate = (float(wins) / float(settled) * 100.0) if settled > 0 else None
+    expectancy = (rr_sum / rr_count) if rr_count > 0 else None
+    return settled, win_rate, expectancy
+
+
+def _realized_selectivity_uplift(rows, *, realized_tuning):
+    if not isinstance(realized_tuning, dict) or not bool(realized_tuning.get("enable", True)):
+        return 0.0, 0.0, {}
+    settled, win_rate, expectancy = _realized_metrics(rows)
+    if not settled:
+        return 0.0, 0.0, {"realized_settled": 0}
+    min_settled = _to_int(realized_tuning.get("min_settled"), 6)
+    full_settled = _to_int(realized_tuning.get("full_settled"), 20)
+    weight = _sample_blend_weight(
+        settled,
+        min_alerts=min_settled,
+        full_weight_alerts=full_settled,
+        min_weight=0.0,
+    )
+    target_wr = _to_float(realized_tuning.get("target_win_rate"), 55.0)
+    wr_uplift_per_point = _to_float(realized_tuning.get("wr_uplift_per_point"), 0.5)
+    exp_uplift_per_r = _to_float(realized_tuning.get("exp_uplift_per_r"), 1.5)
+
+    wr_uplift = 0.0
+    if win_rate is not None and target_wr is not None and win_rate < target_wr:
+        wr_uplift = (target_wr - win_rate) * wr_uplift_per_point * weight
+    exp_uplift = 0.0
+    if expectancy is not None and expectancy < 0.0:
+        exp_uplift = (-expectancy) * exp_uplift_per_r * weight
+
+    stats = {
+        "realized_settled": settled,
+        "realized_win_rate_pct": round(win_rate, 3) if win_rate is not None else None,
+        "realized_expectancy_rr": round(expectancy, 4) if expectancy is not None else None,
+        "realized_blend_weight": round(weight, 4),
+        "realized_wr_uplift": round(wr_uplift, 4),
+        "realized_exp_uplift": round(exp_uplift, 4),
+    }
+    return wr_uplift, exp_uplift, stats
+
+
 def _build_side_tuned_profile(
     rows,
     *,
@@ -354,6 +415,7 @@ def _build_side_tuned_profile(
     fresh_signal_max_bars,
     stale_signal_start_bars,
     stale_signal_min_weight,
+    realized_tuning=None,
 ):
     selected = _top_subset(rows, target_count=target_count)
     if not selected:
@@ -417,6 +479,10 @@ def _build_side_tuned_profile(
         absolute_lower=58.0,
         absolute_upper=98.0,
     )
+    realized_wr_uplift, realized_exp_uplift, realized_stats = _realized_selectivity_uplift(
+        selected,
+        realized_tuning=realized_tuning,
+    )
     tuned[f"{side_prefix}min_win_rate_pct"] = _bounded_value(
         base_wr,
         _weighted_quantile(
@@ -424,7 +490,8 @@ def _build_side_tuned_profile(
             selected_weights,
             0.12,
             default=base_wr,
-        ),
+        )
+        + realized_wr_uplift,
         lower_delta=-2.0,
         upper_delta=6.0,
         absolute_lower=50.0,
@@ -437,7 +504,8 @@ def _build_side_tuned_profile(
             selected_weights,
             0.15,
             default=base_exp,
-        ),
+        )
+        + realized_exp_uplift,
         lower_delta=-0.03,
         upper_delta=0.08,
         absolute_lower=-0.02,
@@ -528,6 +596,8 @@ def _build_side_tuned_profile(
             0.15,
         ),
     }
+    if isinstance(realized_stats, dict):
+        stats.update(realized_stats)
     return {k: v for k, v in tuned.items() if v is not None}, stats
 
 
@@ -542,6 +612,7 @@ def _build_symbol_tuned_profiles(
     fresh_signal_max_bars,
     stale_signal_start_bars,
     stale_signal_min_weight,
+    realized_tuning=None,
 ):
     directional = [
         row for row in entries
@@ -579,6 +650,7 @@ def _build_symbol_tuned_profiles(
                 fresh_signal_max_bars=fresh_signal_max_bars,
                 stale_signal_start_bars=stale_signal_start_bars,
                 stale_signal_min_weight=stale_signal_min_weight,
+                realized_tuning=realized_tuning,
             )
             tuned.update(buy_tuned)
             symbol_stats["buy"] = buy_stats
@@ -593,6 +665,7 @@ def _build_symbol_tuned_profiles(
                 fresh_signal_max_bars=fresh_signal_max_bars,
                 stale_signal_start_bars=stale_signal_start_bars,
                 stale_signal_min_weight=stale_signal_min_weight,
+                realized_tuning=realized_tuning,
             )
             tuned.update(sell_tuned)
             symbol_stats["sell"] = sell_stats
@@ -613,6 +686,7 @@ def _build_strategy_tuned_profiles(
     fresh_signal_max_bars,
     stale_signal_start_bars,
     stale_signal_min_weight,
+    realized_tuning=None,
 ):
     directional = [row for row in entries if row.get("signal") in ("BUY", "SELL") and row.get("strategy") not in ("DAILY_SUMMARY",)]
     grouped = defaultdict(list)
@@ -646,6 +720,7 @@ def _build_strategy_tuned_profiles(
                 fresh_signal_max_bars=fresh_signal_max_bars,
                 stale_signal_start_bars=stale_signal_start_bars,
                 stale_signal_min_weight=stale_signal_min_weight,
+                realized_tuning=realized_tuning,
             )
             tuned.update(buy_tuned)
             strategy_stats["buy"] = buy_stats
@@ -660,6 +735,7 @@ def _build_strategy_tuned_profiles(
                 fresh_signal_max_bars=fresh_signal_max_bars,
                 stale_signal_start_bars=stale_signal_start_bars,
                 stale_signal_min_weight=stale_signal_min_weight,
+                realized_tuning=realized_tuning,
             )
             tuned.update(sell_tuned)
             strategy_stats["sell"] = sell_stats
@@ -777,8 +853,19 @@ def build_auto_tuned_thresholds(
     symbol_min_blend_weight=0.15,
     symbol_confidence_cap_over_strategy=2.0,
     symbol_sell_win_rate_cap_over_base=0.5,
+    realized_by_alert_id=None,
+    realized_tuning=None,
 ):
-    directional = [row for row in (entries or []) if isinstance(row, dict) and str(row.get("signal") or "").upper() in ("BUY", "SELL")]
+    entries = list(entries or [])
+    if isinstance(realized_by_alert_id, dict) and realized_by_alert_id:
+        for row in entries:
+            if not isinstance(row, dict):
+                continue
+            realized = realized_by_alert_id.get(str(row.get("alert_id") or "").strip())
+            if isinstance(realized, dict):
+                row["_realized_win"] = bool(realized.get("win")) if "win" in realized else None
+                row["_realized_rr"] = _to_float(realized.get("rr"))
+    directional = [row for row in entries if isinstance(row, dict) and str(row.get("signal") or "").upper() in ("BUY", "SELL")]
     timestamps = [row.get("_timestamp_obj") for row in directional if isinstance(row.get("_timestamp_obj"), datetime)]
     if timestamps:
         observed_days = max(1, (max(timestamps).date() - min(timestamps).date()).days + 1)
@@ -795,6 +882,7 @@ def build_auto_tuned_thresholds(
         fresh_signal_max_bars=fresh_signal_max_bars,
         stale_signal_start_bars=stale_signal_start_bars,
         stale_signal_min_weight=stale_signal_min_weight,
+        realized_tuning=realized_tuning,
     )
     tuned_symbol_profiles, symbol_stats = _build_symbol_tuned_profiles(
         directional,
@@ -806,6 +894,7 @@ def build_auto_tuned_thresholds(
         fresh_signal_max_bars=fresh_signal_max_bars,
         stale_signal_start_bars=stale_signal_start_bars,
         stale_signal_min_weight=stale_signal_min_weight,
+        realized_tuning=realized_tuning,
     )
     tuned_symbol_profiles, symbol_stats = _shrink_symbol_tuned_profiles(
         tuned_symbol_profiles,
@@ -844,6 +933,7 @@ def build_auto_tuned_thresholds(
         "symbol_min_blend_weight": float(symbol_min_blend_weight),
         "symbol_confidence_cap_over_strategy": float(symbol_confidence_cap_over_strategy),
         "symbol_sell_win_rate_cap_over_base": float(symbol_sell_win_rate_cap_over_base),
+        "realized_tuning": dict(realized_tuning) if isinstance(realized_tuning, dict) else {},
         "telegram_alert_strategy_quality_profiles": tuned_strategy_profiles,
         "telegram_alert_symbol_quality_profiles": tuned_symbol_profiles,
         "cdc_vixfix_symbol_profiles": tuned_cdc_profiles,

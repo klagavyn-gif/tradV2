@@ -16,7 +16,7 @@ def coerce_int(value, default, *, minimum=1):
     return max(int(minimum), number)
 
 
-def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram_alert_cache=None):
+def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram_alert_cache=None, global_trade_counter=None):
     min_conf = coerce_float(getattr(config, "TELEGRAM_ALERT_MIN_CONFIDENCE", 69.0), 69.0)
     try:
         min_conf = coerce_float((runtime_context or {}).get("min_confidence"), min_conf)
@@ -37,6 +37,7 @@ def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram
             pass
     dynamic_min_conf = float((runtime_context or {}).get("dynamic_min_confidence") or float(min_conf))
 
+    counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
     max_trade_alerts_remaining = None
     global_trade_alert_ttl = None
     try:
@@ -50,8 +51,8 @@ def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram
             26 * 60 * 60,
             minimum=60,
         )
-        if callable(get_now) and telegram_alert_cache is not None:
-            sent_today = int(get_global_trade_alerts_sent(telegram_alert_cache, get_now) or 0)
+        if callable(get_now) and counter is not None:
+            sent_today = int(get_global_trade_alerts_sent(counter, get_now) or 0)
             max_trade_alerts_remaining = max(0, int(max_trade_per_day) - sent_today)
     except Exception:
         max_trade_alerts_remaining = None

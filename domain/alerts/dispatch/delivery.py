@@ -56,6 +56,7 @@ def dispatch_primary_candidates(
     telegram_alert_cache,
     record_telegram_alert_history,
     limits,
+    global_trade_counter=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -65,6 +66,7 @@ def dispatch_primary_candidates(
     per_symbol_sent = {}
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
+    counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
 
     for candidate in candidates:
         if isinstance(max_trade_remaining, int) and max_trade_remaining >= 0 and sent >= max_trade_remaining:
@@ -92,7 +94,7 @@ def dispatch_primary_candidates(
             cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=limits["cooldown_ttl"])
             if isinstance(max_trade_remaining, int) and max_trade_remaining >= 0:
                 mark_global_trade_alert_sent(
-                    telegram_alert_cache,
+                    counter,
                     get_now,
                     ttl_seconds=global_trade_ttl,
                 )
@@ -211,6 +213,7 @@ def dispatch_trend_state_candidates(
     per_symbol_sent,
     suppress_if_symbol_sent,
     limits=None,
+    global_trade_counter=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -219,6 +222,7 @@ def dispatch_trend_state_candidates(
     dropped_by_daily_cap = 0
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
+    counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
 
     for candidate in trend_state_candidates:
         if not isinstance(candidate, dict):
@@ -247,7 +251,7 @@ def dispatch_trend_state_candidates(
         cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=int(cooldown_ttl))
         if isinstance(max_trade_remaining, int) and max_trade_remaining >= 0:
             mark_global_trade_alert_sent(
-                telegram_alert_cache,
+                counter,
                 get_now,
                 ttl_seconds=global_trade_ttl,
             )
@@ -289,6 +293,7 @@ def dispatch_trend_radar_candidates(
     suppress_if_symbol_sent,
     max_total_per_symbol,
     limits=None,
+    global_trade_counter=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -297,6 +302,7 @@ def dispatch_trend_radar_candidates(
     dropped_by_daily_cap = 0
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
+    counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
 
     for candidate in trend_radar_candidates:
         if not isinstance(candidate, dict):
@@ -327,7 +333,7 @@ def dispatch_trend_radar_candidates(
         cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=int(cooldown_ttl))
         if isinstance(max_trade_remaining, int) and max_trade_remaining >= 0:
             mark_global_trade_alert_sent(
-                telegram_alert_cache,
+                counter,
                 get_now,
                 ttl_seconds=global_trade_ttl,
             )

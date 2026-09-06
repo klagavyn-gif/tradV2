@@ -206,6 +206,81 @@ class _TTLCache:
                 self._data.popitem(last=False)
 
 
+class _PersistentDailyCounter:
+    """A small file-backed cache with the same get/set interface as _TTLCache.
+
+    Used for the global daily trade budget so the count survives process
+    restarts (each GitHub Actions run is a fresh process)."""
+    def __init__(self, path, default_ttl_seconds):
+        self.path = str(path or "")
+        self.default_ttl_seconds = float(default_ttl_seconds or 26 * 60 * 60)
+        self._lock = threading.Lock()
+
+    def _read(self):
+        if not self.path or not os.path.exists(self.path):
+            return {}
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}
+
+    def _write(self, data):
+        if not self.path:
+            return
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, exist_ok=True)
+        fd = None
+        temp_path = None
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix=".tmp_counter_", suffix=".json", dir=directory)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                fd = None
+                json.dump(data, f, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, self.path)
+        finally:
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except Exception:
+                    pass
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+
+    def get(self, key):
+        now = time.time()
+        with self._lock:
+            data = self._read()
+            item = data.get(str(key))
+            if not isinstance(item, dict):
+                return None
+            expires_at = item.get("expires_at")
+            if isinstance(expires_at, (int, float)) and float(expires_at) <= now:
+                return None
+            return item.get("value")
+
+    def set(self, key, value, ttl_seconds=None):
+        now = time.time()
+        ttl = self.default_ttl_seconds if ttl_seconds is None else float(ttl_seconds)
+        if ttl <= 0:
+            return
+        with self._lock:
+            data = self._read()
+            data = {
+                str(k): v
+                for k, v in data.items()
+                if isinstance(v, dict) and isinstance(v.get("expires_at"), (int, float)) and float(v["expires_at"]) > now
+            }
+            data[str(key)] = {"value": value, "expires_at": now + ttl}
+            self._write(data)
+
+
 _YF_CACHE = _TTLCache(
     maxsize=getattr(config, "YF_CACHE_MAXSIZE", 256),
     ttl_seconds=getattr(config, "YF_CACHE_TTL_SECONDS", 180),
@@ -218,6 +293,10 @@ _ANALYZE_EXECUTOR = ThreadPoolExecutor(max_workers=int(getattr(config, "ANALYZE_
 _TELEGRAM_ALERT_CACHE = _TTLCache(
     maxsize=256,
     ttl_seconds=int(getattr(config, "TELEGRAM_ALERT_TTL_SECONDS", 1800)),
+)
+_GLOBAL_TRADE_COUNTER = _PersistentDailyCounter(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), ".data", "telegram_alerts", "global_trade_counter.json"),
+    default_ttl_seconds=int(getattr(config, "TELEGRAM_ALERT_GLOBAL_TRADE_ALERT_TTL_SECONDS", 26 * 60 * 60) or 26 * 60 * 60),
 )
 
 _HISTORY_STORE_LOCK = threading.Lock()
@@ -6038,6 +6117,7 @@ def _pipeline_module_helpers():
         "build_daily_summary_message": _build_daily_summary_message,
         "send_telegram_alert": send_telegram_alert,
         "telegram_alert_cache": _TELEGRAM_ALERT_CACHE,
+        "global_trade_counter": _GLOBAL_TRADE_COUNTER,
         "record_telegram_alert_history": _record_telegram_alert_history,
         "track_alert_performance": _track_alert_performance,
         "record_telegram_run_report": _record_telegram_run_report,

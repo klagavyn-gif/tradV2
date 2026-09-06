@@ -339,6 +339,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     build_daily_summary_message = helpers["build_daily_summary_message"]
     send_telegram_alert = helpers["send_telegram_alert"]
     telegram_alert_cache = helpers["telegram_alert_cache"]
+    global_trade_counter = helpers.get("global_trade_counter")
     record_telegram_alert_history = helpers["record_telegram_alert_history"]
     track_alert_performance = helpers["track_alert_performance"]
     record_telegram_run_report = helpers["record_telegram_run_report"]
@@ -356,6 +357,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         runtime_context,
         get_now=get_now,
         telegram_alert_cache=telegram_alert_cache,
+        global_trade_counter=global_trade_counter,
     )
     min_conf = limits["min_conf"]
     kill = bool((runtime_context or {}).get("kill"))
@@ -439,6 +441,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         telegram_alert_cache=telegram_alert_cache,
         record_telegram_alert_history=record_telegram_alert_history,
         limits=limits,
+        global_trade_counter=global_trade_counter,
     )
     sent = int(primary_dispatch["sent"])
     dropped_by_cache = int(primary_dispatch["dropped_by_cache"])
@@ -523,6 +526,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             suppress_if_symbol_sent=bool(getattr(config, "TREND_RADAR_SUPPRESS_IF_PRIMARY_SENT", True)),
             max_total_per_symbol=trend_radar_max_total_per_symbol,
             limits=limits,
+            global_trade_counter=global_trade_counter,
         )
         trend_radar_sent = int(trend_radar_dispatch["sent"])
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])
@@ -548,6 +552,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             per_symbol_sent=per_symbol_sent,
             suppress_if_symbol_sent=bool(getattr(config, "TREND_STATE_ALERT_SUPPRESS_IF_PRIMARY_SENT", True)),
             limits=limits,
+            global_trade_counter=global_trade_counter,
         )
         trend_state_sent = int(trend_state_dispatch["sent"])
         per_symbol_sent = dict(trend_state_dispatch["per_symbol_sent"])

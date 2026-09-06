@@ -1290,7 +1290,7 @@ def _plan_price_metrics(candidate):
     }
 
 
-def resolve_sltp_live_profile(candidate, *, config):
+def resolve_sltp_live_profile(candidate, *, config, helpers=None):
     if not bool(getattr(config, "TELEGRAM_ALERT_SLTP_PROFILE_ENABLE", True)):
         return None
     if not isinstance(candidate, dict):
@@ -1430,13 +1430,67 @@ def resolve_sltp_live_profile(candidate, *, config):
                     "score_adjustment": -abs(float(watch_penalty)),
                 }
             )
+    _apply_realized_sltp_adjustment(profile, candidate, config=config, helpers=helpers)
     return profile
 
 
-def attach_sltp_live_context(candidate, *, config):
+def _apply_realized_sltp_adjustment(profile, candidate, *, config, helpers):
+    if not isinstance(profile, dict) or not isinstance(candidate, dict):
+        return
+    if not bool(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_ENABLE", True)):
+        return
+    if str(profile.get("bucket") or "").strip().lower() == "avoid":
+        return
+    realized_fn = (helpers or {}).get("realized_sltp_metrics")
+    if not callable(realized_fn):
+        return
+    realized = realized_fn(candidate)
+    if not isinstance(realized, dict):
+        return
+    min_winners = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_MIN_WINNERS", 5), 5.0)
+    winner_count = _safe_float(realized.get("winner_count"), 0.0)
+    if winner_count is None or winner_count < float(min_winners):
+        return
+    suggested_stop = _safe_float(realized.get("suggested_stop_pct"), None)
+    suggested_target = _safe_float(realized.get("suggested_target_pct"), None)
+    stop_risk = _safe_float(profile.get("stop_risk_pct"), None)
+    target_reward = _safe_float(profile.get("target_reward_pct"), None)
+    stop_tolerance = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_STOP_WIDTH_TOLERANCE", 1.5), 1.5)
+    target_tolerance = _safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_TARGET_TOLERANCE", 1.25), 1.25)
+    max_penalty = abs(_safe_float(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_MAX_PENALTY", 2.0), 2.0))
+
+    penalty = 0.0
+    notes = []
+    if isinstance(suggested_stop, float) and isinstance(stop_risk, float) and suggested_stop > 0:
+        over = float(stop_risk) / float(suggested_stop)
+        if over > float(stop_tolerance):
+            stop_penalty = min(float(max_penalty), (over - float(stop_tolerance)) * 0.5)
+            penalty += stop_penalty
+            notes.append(f"stop กว้างเกินจริง {over:.2f}x")
+            profile["realized_stop_over_width"] = round(over, 3)
+            profile["realized_stop_penalty"] = round(stop_penalty, 3)
+    if isinstance(suggested_target, float) and isinstance(target_reward, float) and suggested_target > 0:
+        over = float(target_reward) / float(suggested_target)
+        if over > float(target_tolerance):
+            target_penalty = min(float(max_penalty), (over - float(target_tolerance)) * 0.5)
+            penalty += target_penalty
+            notes.append(f"target สูงเกินจริง {over:.2f}x")
+            profile["realized_target_over_height"] = round(over, 3)
+            profile["realized_target_penalty"] = round(target_penalty, 3)
+    if penalty > 0.0:
+        current = _safe_float(profile.get("score_adjustment"), 0.0)
+        profile["score_adjustment"] = float(current) - float(penalty)
+        profile["realized_sltp_penalty"] = round(float(penalty), 3)
+        profile["realized_sltp_note"] = ", ".join(notes)
+        profile["realized_sltp_winner_count"] = int(winner_count)
+        profile["realized_sltp_suggested_stop_pct"] = suggested_stop
+        profile["realized_sltp_suggested_target_pct"] = suggested_target
+
+
+def attach_sltp_live_context(candidate, *, config, helpers=None):
     if not isinstance(candidate, dict):
         return candidate
-    profile = resolve_sltp_live_profile(candidate, config=config)
+    profile = resolve_sltp_live_profile(candidate, config=config, helpers=helpers)
     if not isinstance(profile, dict):
         return candidate
     candidate["sltp_live_label"] = str(profile.get("label") or "").strip() or None
@@ -2575,7 +2629,7 @@ def finalize_candidates(context):
             candidate = score_candidate_with_live_ai(candidate)
         candidate = attach_ai_dispatch_context(candidate, config=context["config"])
         candidate = attach_short_trade_context(candidate, config=context["config"])
-        candidate = attach_sltp_live_context(candidate, config=context["config"])
+        candidate = attach_sltp_live_context(candidate, config=context["config"], helpers=context.get("helpers"))
         if callable(score_candidate_with_live_entry_ai):
             candidate = score_candidate_with_live_entry_ai(candidate)
         candidate = attach_entry_ai_context(candidate, config=context["config"])

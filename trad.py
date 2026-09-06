@@ -1056,6 +1056,76 @@ def _evaluate_realized_pause(candidate):
     return action, meta
 
 
+def _median_value(values):
+    values = sorted([float(v) for v in values if isinstance(v, (int, float)) and math.isfinite(float(v))])
+    if not values:
+        return None
+    n = len(values)
+    if n % 2:
+        return values[n // 2]
+    return (values[n // 2 - 1] + values[n // 2]) / 2.0
+
+
+def _realized_sltp_metrics(candidate):
+    if not isinstance(candidate, dict):
+        return {}
+    strategy = str(candidate.get("strategy") or "").strip().upper()
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    signal = str(candidate.get("signal") or "").strip().upper()
+    if not strategy or not symbol or signal not in ("BUY", "SELL"):
+        return {}
+    payload = _load_alert_realized_outcomes_payload()
+    outcomes = payload.get("outcomes") if isinstance(payload, dict) else None
+    if not isinstance(outcomes, list):
+        return {}
+
+    def collect(matcher):
+        mfes = []
+        maes = []
+        wins = 0
+        for row in outcomes:
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("outcome_status") or "").strip().lower() != "settled":
+                continue
+            if str(row.get("alert_intent") or "").strip().lower() != "entry":
+                continue
+            if str(row.get("outcome_result") or "").strip().lower() != "win":
+                continue
+            if not matcher(row):
+                continue
+            wins += 1
+            mfe = _safe_float(row.get("mfe_pct"))
+            mae = _safe_float(row.get("mae_pct"))
+            if mfe is not None:
+                mfes.append(mfe)
+            if mae is not None:
+                maes.append(mae)
+        return wins, mfes, maes
+
+    wins, mfes, maes = collect(
+        lambda r: str(r.get("strategy") or "").strip().upper() == strategy
+        and normalize_symbol(r.get("symbol") or "") == symbol
+        and str(r.get("signal") or "").strip().upper() == signal
+    )
+    if wins < 3:
+        wins, mfes, maes = collect(
+            lambda r: str(r.get("strategy") or "").strip().upper() == strategy
+            and str(r.get("signal") or "").strip().upper() == signal
+        )
+
+    winner_mae = _median_value(maes)
+    winner_mfe = _median_value(mfes)
+    safety = float(getattr(config, "TELEGRAM_ALERT_SLTP_REALIZED_STOP_SAFETY_FACTOR", 1.5) or 1.5)
+    return {
+        "winner_count": wins,
+        "winner_mae_pct_median": winner_mae,
+        "winner_mfe_pct_median": winner_mfe,
+        "suggested_stop_pct": (winner_mae * safety) if winner_mae is not None else None,
+        "suggested_target_pct": winner_mfe,
+    }
+
+
 def _short_play_watch_realized_metrics(candidate):
     if not isinstance(candidate, dict):
         return {}
@@ -5943,6 +6013,7 @@ def _pipeline_module_helpers():
         "short_play_watch_realized_metrics": _short_play_watch_realized_metrics,
         "short_play_watch_strategy_support_metrics": _short_play_watch_strategy_support_metrics,
         "evaluate_realized_pause": _evaluate_realized_pause,
+        "realized_sltp_metrics": _realized_sltp_metrics,
         "score_candidate_with_live_ai": _score_candidate_with_live_ai,
         "score_candidate_with_live_entry_ai": _score_candidate_with_live_entry_ai,
         "build_market_regime_snapshot": _build_market_regime_snapshot,

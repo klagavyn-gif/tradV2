@@ -1,0 +1,122 @@
+{
+  "enabled": true,
+  "generated_at": "2026-09-06 18:47:04",
+  "window_days": 90.0,
+  "total_alerts": 174,
+  "eligible_directional_alerts": 153,
+  "settled_alerts": 152,
+  "open_alerts": 0,
+  "unsupported_alerts": 1,
+  "wins": 59,
+  "losses": 93,
+  "flats": 0,
+  "win_rate_pct": 38.81578947368421,
+  "avg_rr_realized": -0.06817819195162433,
+  "avg_pnl_pct": -0.2099565611413082,
+  "alerts_per_day_avg": 1.9333333333333333,
+  "alerts_per_30d_est": 58.0,
+  "by_strategy": {
+    "AW15": {
+      "alerts": 3,
+      "settled_alerts": 3,
+      "open_alerts": 0,
+      "wins": 2,
+      "losses": 1,
+      "flats": 0,
+      "avg_rr_realized": 0.14265758849244334,
+      "avg_pnl_pct": 0.14021969388861963,
+      "win_rate_pct": 66.66666666666666
+    },
+    "CDCVIX15": {
+      "alerts": 149,
+      "settled_alerts": 149,
+      "open_alerts": 0,
+      "wins": 57,
+      "losses": 92,
+      "flats": 0,
+      "avg_rr_realized": -0.07242320766526329,
+      "avg_pnl_pct": -0.21700708976607186,
+      "win_rate_pct": 38.25503355704698
+    },
+    "TRENDSTATE": {
+      "alerts": 1,
+      "settled_alerts": 0,
+      "open_alerts": 0,
+      "wins": 0,
+      "losses": 0,
+      "flats": 0,
+      "avg_rr_realized": null,
+      "avg_pnl_pct": null,
+      "win_rate_pct": null
+    }
+  },
+  "by_month": {
+    "2026-06": {
+      "alerts": 112,
+      "settled_alerts": 112,
+      "wins": 45,
+      "losses": 67,
+      "flats": 0,
+      "alerts_per_day_in_month": 3.7333333333333334,
+      "win_rate_pct": 40.17857142857143
+    },
+    "2026-07": {
+      "alerts": 41,
+      "settled_alerts": 40,
+      "wins": 14,
+      "losses": 26,
+      "flats": 0,
+      "alerts_per_day_in_month": 1.3225806451612903,
+      "win_rate_pct": 35.0
+    }
+  },
+  "entry_only": {
+    "settled_alerts": 72,
+    "wins": 30,
+    "losses": 42,
+    "flats": 0,
+    "win_rate_pct": 41.66666666666667,
+    "avg_rr_realized": -0.20897723697261686,
+    "avg_pnl_pct": -0.4552538970527411,
+    "by_month": {
+      "2026-06": {
+        "settled_alerts": 44,
+        "wins": 18,
+        "losses": 26,
+        "flats": 0,
+        "win_rate_pct": 40.909090909090914,
+        "avg_rr_realized": -0.3087163028263773,
+        "avg_pnl_pct": -0.5998328274466311
+      },
+      "2026-07": {
+        "settled_alerts": 28,
+        "wins": 12,
+        "losses": 16,
+        "flats": 0,
+        "win_rate_pct": 42.857142857142854,
+        "avg_rr_realized": -0.05224441920242194,
+        "avg_pnl_pct": -0.22805843500519943
+      }
+    },
+    "by_strategy": {
+      "CDCVIX15": {
+        "settled_alerts": 69,
+        "wins": 28,
+        "losses": 41,
+        "flats": 0,
+        "win_rate_pct": 40.57971014492754,
+        "avg_rr_realized": -0.22426570764501075,
+        "avg_pnl_pct": -0.4811440531806264
+      },
+      "AW15": {
+        "settled_alerts": 3,
+        "wins": 2,
+        "losses": 1,
+        "flats": 0,
+        "win_rate_pct": 66.66666666666666,
+        "avg_rr_realized": 0.14265758849244334,
+        "avg_pnl_pct": 0.14021969388861963
+      }
+    }
+  }
+}

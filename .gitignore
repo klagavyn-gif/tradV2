@@ -4,7 +4,11 @@ __pycache__/
 .dbg/
 
 .yf_cache/
-.data/telegram_alerts/
+.data/telegram_alerts/*
+!.data/telegram_alerts/realized_outcomes.json
+!.data/telegram_alerts/realized_summary.json
+!.data/telegram_alerts/realized_report.json
+!.data/telegram_alerts/realized_report.md
 .data/yf_history/
 .data/market_history/
 .data/research/

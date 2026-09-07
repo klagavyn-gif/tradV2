@@ -5,7 +5,27 @@ from domain.alerts.dispatch.cache_policy import (
     mark_global_trade_alert_sent,
 )
 
-from datetime import datetime
+from datetime import datetime, timedelta
+
+
+def _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_seconds):
+    if not isinstance(recent_cache_keys, dict) or not recent_cache_keys:
+        return False
+    key = str(cache_key or "").strip()
+    if not key:
+        return False
+    sent_at = recent_cache_keys.get(key)
+    if sent_at is None:
+        return False
+    if not callable(get_now):
+        return False
+    now = get_now()
+    if not isinstance(now, datetime):
+        return False
+    try:
+        return sent_at >= now - timedelta(seconds=int(cooldown_seconds))
+    except Exception:
+        return False
 
 
 def _parse_candidate_datetime(value):
@@ -57,6 +77,7 @@ def dispatch_primary_candidates(
     record_telegram_alert_history,
     limits,
     global_trade_counter=None,
+    recent_cache_keys=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -85,6 +106,9 @@ def dispatch_primary_candidates(
         if not cache_key:
             continue
         if cache_contains(telegram_alert_cache, cache_key):
+            dropped_by_cache += 1
+            continue
+        if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, limits["cooldown_ttl"]):
             dropped_by_cache += 1
             continue
         message = candidate.get("message")
@@ -214,6 +238,7 @@ def dispatch_trend_state_candidates(
     suppress_if_symbol_sent,
     limits=None,
     global_trade_counter=None,
+    recent_cache_keys=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -241,6 +266,9 @@ def dispatch_trend_state_candidates(
         if not cache_key:
             continue
         if cache_contains(telegram_alert_cache, cache_key):
+            dropped_by_cache += 1
+            continue
+        if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_ttl):
             dropped_by_cache += 1
             continue
         message = candidate.get("message")
@@ -294,6 +322,7 @@ def dispatch_trend_radar_candidates(
     max_total_per_symbol,
     limits=None,
     global_trade_counter=None,
+    recent_cache_keys=None,
 ):
     sent = 0
     dropped_by_cache = 0
@@ -323,6 +352,9 @@ def dispatch_trend_radar_candidates(
         if not cache_key:
             continue
         if cache_contains(telegram_alert_cache, cache_key):
+            dropped_by_cache += 1
+            continue
+        if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_ttl):
             dropped_by_cache += 1
             continue
         message = candidate.get("message")

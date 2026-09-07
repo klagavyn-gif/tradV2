@@ -6118,6 +6118,7 @@ def _pipeline_module_helpers():
         "send_telegram_alert": send_telegram_alert,
         "telegram_alert_cache": _TELEGRAM_ALERT_CACHE,
         "global_trade_counter": _GLOBAL_TRADE_COUNTER,
+        "load_recent_alert_cache_keys": _load_recent_alert_cache_keys,
         "record_telegram_alert_history": _record_telegram_alert_history,
         "track_alert_performance": _track_alert_performance,
         "record_telegram_run_report": _record_telegram_run_report,
@@ -6405,6 +6406,57 @@ def _alert_history_file_path():
 
 def _alert_history_csv_path():
     return os.path.join(_alert_history_dir(), "alert_history.csv")
+
+
+def _load_recent_alert_cache_keys(get_now, max_age_seconds=12 * 3600):
+    """Load {cache_key: latest_timestamp} for alerts sent within max_age_seconds.
+
+    The in-memory cooldown cache resets every process, so a fresh GitHub
+    Actions run would otherwise re-send the same signal. This reads the
+    persisted alert history (which is cached across runs) so the cooldown
+    survives process restarts."""
+    path = _alert_history_file_path()
+    result = {}
+    if not os.path.exists(path) or not callable(get_now):
+        return result
+    try:
+        now_dt = get_now()
+        if not isinstance(now_dt, datetime):
+            return result
+        cutoff = now_dt - timedelta(seconds=max_age_seconds)
+    except Exception:
+        return result
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = str(line or "").strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                cache_key = str(row.get("cache_key") or "").strip()
+                if not cache_key:
+                    continue
+                ts_text = str(row.get("timestamp") or "").strip()
+                ts = None
+                try:
+                    ts = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    try:
+                        ts = datetime.strptime(ts_text, "%Y-%m-%d %H:%M")
+                    except Exception:
+                        continue
+                if ts < cutoff:
+                    continue
+                if cache_key not in result or ts > result[cache_key]:
+                    result[cache_key] = ts
+    except Exception:
+        pass
+    return result
 
 
 def _alert_run_report_enabled():

@@ -340,6 +340,8 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     send_telegram_alert = helpers["send_telegram_alert"]
     telegram_alert_cache = helpers["telegram_alert_cache"]
     global_trade_counter = helpers.get("global_trade_counter")
+    load_recent_alert_cache_keys = helpers.get("load_recent_alert_cache_keys")
+    recent_cache_keys = load_recent_alert_cache_keys(get_now) if callable(load_recent_alert_cache_keys) else {}
     record_telegram_alert_history = helpers["record_telegram_alert_history"]
     track_alert_performance = helpers["track_alert_performance"]
     record_telegram_run_report = helpers["record_telegram_run_report"]
@@ -442,6 +444,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         record_telegram_alert_history=record_telegram_alert_history,
         limits=limits,
         global_trade_counter=global_trade_counter,
+        recent_cache_keys=recent_cache_keys,
     )
     sent = int(primary_dispatch["sent"])
     dropped_by_cache = int(primary_dispatch["dropped_by_cache"])
@@ -527,6 +530,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             max_total_per_symbol=trend_radar_max_total_per_symbol,
             limits=limits,
             global_trade_counter=global_trade_counter,
+            recent_cache_keys=recent_cache_keys,
         )
         trend_radar_sent = int(trend_radar_dispatch["sent"])
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])
@@ -553,6 +557,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             suppress_if_symbol_sent=bool(getattr(config, "TREND_STATE_ALERT_SUPPRESS_IF_PRIMARY_SENT", True)),
             limits=limits,
             global_trade_counter=global_trade_counter,
+            recent_cache_keys=recent_cache_keys,
         )
         trend_state_sent = int(trend_state_dispatch["sent"])
         per_symbol_sent = dict(trend_state_dispatch["per_symbol_sent"])

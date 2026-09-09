@@ -8,7 +8,7 @@ import re
 import tempfile
 from calendar import monthrange
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -1193,6 +1193,13 @@ def dispatch_trade_close_notifications(
     max_per_run = int(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_MAX_PER_RUN", 5) or 5)
     only_entry = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_ONLY_ENTRY", True))
     skip_flat = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT", False))
+    max_age_days = int(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_MAX_AGE_DAYS", 7) or 7)
+    age_cutoff = None
+    if max_age_days > 0:
+        try:
+            age_cutoff = get_now() - timedelta(days=max_age_days)
+        except Exception:
+            age_cutoff = None
 
     # Snapshot the previously-settled alert_ids BEFORE regeneration. This is
     # used only to bootstrap the notified set on first run so historical
@@ -1239,6 +1246,14 @@ def dispatch_trade_close_notifications(
         if alert_id in already_notified_ids:
             skipped += 1
             continue
+        # Skip closes whose entry is older than the configured window, and
+        # remember them so stale backlogs are not re-checked every run.
+        if isinstance(age_cutoff, datetime):
+            ts = _alert_timestamp_value(outcome.get("timestamp"))
+            if isinstance(ts, datetime) and ts < age_cutoff:
+                newly_notified.append(alert_id)
+                skipped += 1
+                continue
         intent = str(outcome.get("alert_intent") or "").strip().lower()
         if only_entry and intent != "entry":
             # Intentional skip: never notify non-entry closes, but remember it.

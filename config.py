@@ -612,6 +612,12 @@ TELEGRAM_ALERT_TRADE_CLOSE_ONLY_ENTRY = _env_bool(
 TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT = _env_bool(
     "TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT", False
 )
+# Only notify close for entries whose alert timestamp is within this many days.
+# Prevents a backlog of stale closes (e.g. historical duplicate entries) from
+# flooding the channel long after the trades actually closed.
+TELEGRAM_ALERT_TRADE_CLOSE_MAX_AGE_DAYS = _env_int(
+    "TELEGRAM_ALERT_TRADE_CLOSE_MAX_AGE_DAYS", 7
+)
 TELEGRAM_ALERT_REGIME_ENABLED = _env_bool("TELEGRAM_ALERT_REGIME_ENABLED", True)
 TELEGRAM_ALERT_REGIME_BLOCK_ENABLED = _env_bool("TELEGRAM_ALERT_REGIME_BLOCK_ENABLED", True)
 TELEGRAM_ALERT_REGIME_SCORE_MULTIPLIER_ENABLED = _env_bool("TELEGRAM_ALERT_REGIME_SCORE_MULTIPLIER_ENABLED", True)

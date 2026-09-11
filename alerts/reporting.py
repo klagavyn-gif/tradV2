@@ -699,7 +699,19 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
             return outcome
     outcome["entry_price"] = entry_price
 
-    future = price_df.loc[price_df.index >= pd.Timestamp(alert_time)]
+    # A take_profit on the wrong side of the recovered entry would trigger a
+    # fake immediate win; treat such plans as invalid instead.
+    if isinstance(take_profit, (int, float)):
+        if signal == "BUY" and take_profit <= entry_price:
+            outcome["exit_reason"] = "invalid_take_profit_direction"
+            return outcome
+        if signal == "SELL" and take_profit >= entry_price:
+            outcome["exit_reason"] = "invalid_take_profit_direction"
+            return outcome
+
+    # Evaluate strictly AFTER the alert bar so the entry bar's own high/low
+    # cannot be used for stop/tp triggers or excursions (no same-bar lookahead).
+    future = price_df.loc[price_df.index > pd.Timestamp(alert_time)]
     if future.empty:
         outcome["outcome_status"] = "open"
         outcome["exit_reason"] = "no_future_bars"
@@ -709,9 +721,6 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
     bars_observed = len(window)
     outcome["bars_observed"] = int(bars_observed)
     outcome["maturity_progress_pct"] = round(min(100.0, (float(bars_observed) / float(window_bars)) * 100.0), 2)
-    mfe_pct, mae_pct = _directional_excursions(window, signal=signal, entry_price=entry_price)
-    outcome["mfe_pct"] = mfe_pct
-    outcome["mae_pct"] = mae_pct
 
     risk = abs(float(entry_price) - float(stop_loss))
     settled_row = None
@@ -758,6 +767,13 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
             settled_row = row
             settled_bars = idx
             break
+
+    # Compute MFE/MAE only up to the actual exit bar (or the full window on a
+    # time-exit), so bars after the trade already closed do not inflate them.
+    excursion_window = window.iloc[:settled_bars] if settled_bars else window
+    mfe_pct, mae_pct = _directional_excursions(excursion_window, signal=signal, entry_price=entry_price)
+    outcome["mfe_pct"] = mfe_pct
+    outcome["mae_pct"] = mae_pct
 
     if settled_reason:
         outcome["outcome_status"] = "settled"

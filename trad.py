@@ -90,7 +90,9 @@ from alerts.reporting import (
     live_feedback_training_fieldnames as _alerts_reporting_live_feedback_training_fieldnames,
     read_latest_telegram_run_report as _alerts_reporting_read_latest_telegram_run_report,
     read_telegram_alert_history as _alerts_reporting_read_telegram_alert_history,
+    read_shadow_alert_history as _alerts_reporting_read_shadow_alert_history,
     record_telegram_alert_history as _alerts_reporting_record_telegram_alert_history,
+    record_shadow_alert_history as _alerts_reporting_record_shadow_alert_history,
     record_telegram_run_report as _alerts_reporting_record_telegram_run_report,
     sync_alert_history_csv_locked as _alerts_reporting_sync_alert_history_csv_locked,
     write_verify_output as _alerts_reporting_write_verify_output,
@@ -6120,6 +6122,7 @@ def _pipeline_module_helpers():
         "global_trade_counter": _GLOBAL_TRADE_COUNTER,
         "load_recent_alert_cache_keys": _load_recent_alert_cache_keys,
         "record_telegram_alert_history": _record_telegram_alert_history,
+        "record_shadow_alert_history": _record_shadow_alert_history,
         "track_alert_performance": _track_alert_performance,
         "record_telegram_run_report": _record_telegram_run_report,
     }
@@ -6406,6 +6409,10 @@ def _alert_history_file_path():
 
 def _alert_history_csv_path():
     return os.path.join(_alert_history_dir(), "alert_history.csv")
+
+
+def _shadow_alert_history_file_path():
+    return os.path.join(_alert_history_dir(), "shadow_alert_history.jsonl")
 
 
 def _load_recent_alert_cache_keys(get_now, max_age_seconds=12 * 3600):
@@ -6784,6 +6791,27 @@ def _read_telegram_alert_history(days=None, strategies=None, symbols=None):
     )
 
 
+def _read_shadow_alert_history(days=None, strategies=None, symbols=None):
+    return _alerts_reporting_read_shadow_alert_history(
+        days=days,
+        strategies=strategies,
+        symbols=symbols,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
+
+
+def _record_shadow_alert_history(candidate):
+    return _alerts_reporting_record_shadow_alert_history(
+        candidate,
+        config=config,
+        helpers=_reporting_module_helpers(),
+        get_now=get_thai_now,
+        history_lock=_ALERT_HISTORY_LOCK,
+    )
+
+
 def _build_telegram_alert_report(days=30, strategies=None, symbols=None, limit_examples_per_strategy=1):
     return _alerts_reporting_build_telegram_alert_report(
         days=days,
@@ -6863,6 +6891,7 @@ def _reporting_module_helpers():
         "alert_history_enabled": _alert_history_enabled,
         "alert_history_file_path": _alert_history_file_path,
         "alert_history_csv_path": _alert_history_csv_path,
+        "shadow_alert_history_file_path": _shadow_alert_history_file_path,
         "alert_realized_enabled": _alert_realized_enabled,
         "alert_realized_interval": _alert_realized_interval,
         "alert_realized_max_hold_bars": _alert_realized_max_hold_bars,
@@ -6886,6 +6915,7 @@ def _reporting_module_helpers():
         "alert_history_trim_locked": _alert_history_trim_locked,
         "timedelta": timedelta,
         "read_telegram_alert_history": _read_telegram_alert_history,
+        "read_shadow_alert_history": _read_shadow_alert_history,
         "history_store_read": _history_store_read,
         "get_yf_history": get_yf_history,
         "telegram_kill_switch_state": _telegram_kill_switch_state,

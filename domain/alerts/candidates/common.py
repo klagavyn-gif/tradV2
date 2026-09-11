@@ -2611,6 +2611,14 @@ def finalize_candidates(context):
                     "recent_expectancy_rr": _safe_float(realized_meta.get("recent_expectancy_rr"), None),
                 },
             )
+            # Shadow-track the would-be entry so a paused/gated bucket keeps
+            # producing realized data and can recover when it improves.
+            record_shadow = (context.get("helpers") or {}).get("record_shadow_alert_history")
+            if callable(record_shadow) and str(candidate.get("signal") or "").strip().upper() in ("BUY", "SELL"):
+                try:
+                    record_shadow(candidate)
+                except Exception:
+                    pass
             continue
         candidate["alert_profile"] = candidate_alert_profile(candidate)
         alert_intent, alert_intent_reason = classify_candidate_intent(

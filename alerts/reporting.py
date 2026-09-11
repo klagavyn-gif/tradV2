@@ -647,6 +647,7 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
         "alert_intent": inferred_intent,
         "alert_intent_reason": inferred_intent_reason,
         "alert_intent_was_inferred": not bool(str((entry or {}).get("alert_intent") or "").strip()),
+        "shadow": bool((entry or {}).get("shadow")),
         "daily_pick": bool((entry or {}).get("daily_pick")),
         "timeframe": str((entry or {}).get("timeframe") or "").strip().lower() or None,
         "evaluation_window_bars": window_bars,
@@ -1228,8 +1229,12 @@ def dispatch_trade_close_notifications(
 
     # Regenerate fresh outcomes by calling the existing report builder.
     days_value = int(realized_report_days or helpers.get("alert_realized_report_days", lambda: 90)() or 90)
+    regen_entries = helpers["read_telegram_alert_history"](days=days_value)
+    shadow_reader = helpers.get("read_shadow_alert_history")
+    if callable(shadow_reader):
+        regen_entries = regen_entries + shadow_reader(days=days_value)
     summary = _build_telegram_realized_report_from_entries(
-        helpers["read_telegram_alert_history"](days=days_value),
+        regen_entries,
         days_value=days_value,
         helpers=helpers,
         get_now=get_now,
@@ -1260,6 +1265,11 @@ def dispatch_trade_close_notifications(
             continue
         # Already handled (sent or intentionally skipped) in a previous run.
         if alert_id in already_notified_ids:
+            skipped += 1
+            continue
+        # Shadow (ghost) trades are evaluated but never sent to Telegram.
+        if bool(outcome.get("shadow")):
+            newly_notified.append(alert_id)
             skipped += 1
             continue
         # Skip closes whose entry is older than the configured window, and
@@ -1989,6 +1999,121 @@ def record_telegram_alert_history(
         return
 
 
+def record_shadow_alert_history(candidate, *, config, helpers, get_now, history_lock):
+    """Record a gated/paused entry candidate into the shadow history so its
+    outcome is still evaluated (without sending a real Telegram alert). This
+    lets a paused bucket keep producing realized data and recover."""
+    if not isinstance(candidate, dict):
+        return
+    pick_plan_value = helpers["pick_plan_value"]
+    normalize_symbol = helpers["normalize_symbol"]
+    plan = candidate.get("plan")
+    signal = str(candidate.get("signal") or "").strip().upper()
+    entry_price = _realized_entry_price(plan, signal, pick_plan_value=pick_plan_value) if isinstance(plan, dict) else None
+    stop_loss = pick_plan_value(plan, ["stop_loss"]) if isinstance(plan, dict) else None
+    take_profit = pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
+    strategy = str(candidate.get("strategy") or "UNKNOWN").strip().upper()
+    symbol = normalize_symbol(candidate.get("symbol") or "")
+    timestamp = get_now().strftime("%Y-%m-%d %H:%M:%S")
+    message_plain = re.sub(r"<[^>]+>", "", str(candidate.get("message") or "")).strip()
+    entry = {
+        "alert_id": _alert_id_value({
+            "timestamp": timestamp,
+            "strategy": strategy,
+            "symbol": symbol,
+            "signal": signal,
+            "cache_key": str(candidate.get("cache_key") or "").strip(),
+            "message_plain": message_plain,
+        }),
+        "timestamp": timestamp,
+        "strategy": strategy,
+        "symbol": symbol,
+        "signal": signal,
+        "timeframe": _candidate_timeframe(candidate, config=config),
+        "evaluation_window_bars": _candidate_evaluation_window_bars(candidate, config=config),
+        "alert_intent": "entry",
+        "alert_intent_reason": "shadow_entry",
+        "daily_pick": False,
+        "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
+        "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
+        "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
+        "cache_key": str(candidate.get("cache_key") or "").strip(),
+        "message_plain": message_plain,
+        "shadow": True,
+    }
+    shadow_path_fn = helpers.get("shadow_alert_history_file_path")
+    if not callable(shadow_path_fn):
+        return
+    path = shadow_path_fn()
+    if not path:
+        return
+    try:
+        max_rows = int(getattr(config, "TELEGRAM_ALERT_HISTORY_MAX_ROWS", 20000) or 20000)
+    except Exception:
+        max_rows = 20000
+    try:
+        with history_lock:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            alert_history_trim_locked(path, max_rows=max_rows)
+    except Exception:
+        return
+
+
+def read_shadow_alert_history(*, days=None, strategies=None, symbols=None, helpers, get_now, history_lock):
+    shadow_path_fn = helpers.get("shadow_alert_history_file_path")
+    if not callable(shadow_path_fn):
+        return []
+    path = shadow_path_fn()
+    normalize_symbol = helpers["normalize_symbol"]
+    if not path or not os.path.exists(path):
+        return []
+    strategy_filter = {str(v or "").strip().upper() for v in (strategies or []) if str(v or "").strip()}
+    symbol_filter = {normalize_symbol(v) for v in (symbols or []) if normalize_symbol(v)}
+    cutoff = None
+    if isinstance(days, (int, float)) and float(days) > 0:
+        cutoff = get_now() - helpers["timedelta"](days=float(days))
+    entries = []
+    try:
+        with history_lock:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+    except Exception:
+        return []
+    for raw_line in lines:
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        strategy = str(row.get("strategy") or "").strip().upper()
+        symbol = normalize_symbol(row.get("symbol") or "")
+        if strategy_filter and strategy not in strategy_filter:
+            continue
+        if symbol_filter and symbol not in symbol_filter:
+            continue
+        ts_text = str(row.get("timestamp") or "").strip()
+        ts_value = None
+        if ts_text:
+            try:
+                ts_value = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+            except Exception:
+                ts_value = None
+        if cutoff is not None and isinstance(ts_value, datetime) and ts_value < cutoff:
+            continue
+        row["_timestamp_obj"] = ts_value
+        row["strategy"] = strategy
+        row["symbol"] = symbol
+        row["shadow"] = True
+        entries.append(row)
+    entries.sort(key=lambda row: row.get("_timestamp_obj") or datetime.min, reverse=True)
+    return entries
+
+
 def read_telegram_alert_history(*, days=None, strategies=None, symbols=None, helpers, get_now, history_lock):
     path = helpers["alert_history_file_path"]()
     normalize_symbol = helpers["normalize_symbol"]
@@ -2240,6 +2365,13 @@ def build_telegram_alert_realized_report(*, days=30, strategies=None, symbols=No
         strategies=strategies,
         symbols=symbols,
     )
+    shadow_entries = helpers.get("read_shadow_alert_history")
+    if callable(shadow_entries):
+        entries = entries + shadow_entries(
+            days=days,
+            strategies=strategies,
+            symbols=symbols,
+        )
     try:
         days_value = float(days) if days is not None else None
     except Exception:

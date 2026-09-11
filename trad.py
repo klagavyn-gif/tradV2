@@ -10533,6 +10533,7 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         alert_intent_hint_reason = None
         detected_pattern = "None"
         take_profit_price = None
+        short_take_profit_price = None
         if entry_price is not None and take_profit_pct > 0:
             take_profit_price = entry_price * (1.0 + (take_profit_pct / 100.0))
         if entry_recent:
@@ -10586,6 +10587,8 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
         elif signal == "SELL":
             sell_entry_price = current_price if current_price is not None else entry_price
             if sell_entry_price is not None:
+                if take_profit_pct > 0:
+                    short_take_profit_price = sell_entry_price * (1.0 - (take_profit_pct / 100.0))
                 min_stop_price = sell_entry_price + (abs(sell_entry_price) * (min_sl_pct / 100.0))
                 atr_stop_price = None
                 if atr is not None and atr > 0:
@@ -10743,6 +10746,15 @@ def _cdc_vixfix_15m_plan(symbol, data_15m=None):
             "wvf_range_high": float(range_high.iloc[-1]) if pd.notna(range_high.iloc[-1]) else None,
             "wvf_range_low": float(range_low.iloc[-1]) if pd.notna(range_low.iloc[-1]) else None,
             "take_profit_price": float(take_profit_price) if isinstance(take_profit_price, (int, float)) else None,
+            "take_profit": (
+                float(take_profit_price)
+                if signal == "BUY" and isinstance(take_profit_price, (int, float))
+                else (
+                    float(short_take_profit_price)
+                    if sell_signal_role in ("short_entry", "short_continuation") and isinstance(short_take_profit_price, (int, float))
+                    else None
+                )
+            ),
             "max_hold_bars": max_hold_bars,
             "reason": reason,
             "detected_pattern": detected_pattern,

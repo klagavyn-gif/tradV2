@@ -91,8 +91,8 @@ def _build_all_weather_candidates(item, symbol, context):
 
 def _build_cdc_candidates(item, symbol, context):
     normalize_confidence = context["helpers"]["normalize_confidence"]
+    evaluate_entry_quality_gate = context["helpers"]["evaluate_entry_quality_gate"]
     build_cdc_vixfix_message = context["helpers"]["build_cdc_vixfix_message"]
-    extract_signal_edge_metrics = context["helpers"]["extract_signal_edge_metrics"]
     format_price_value = context["helpers"]["format_price_value"]
     alert_profile_score_adjustment = context["helpers"]["alert_profile_score_adjustment"]
 
@@ -109,10 +109,24 @@ def _build_cdc_candidates(item, symbol, context):
     required_conf = min(float(context["min_conf"]), float(cdc_min_conf))
     if cdc_signal not in ("BUY", "SELL") or cdc_conf is None or cdc_conf < required_conf:
         return
+    gate_ok, gate_reason, edge = evaluate_entry_quality_gate(cdc_plan, cdc_signal)
+    if not gate_ok:
+        add_quality_drop(context, gate_reason)
+        record_candidate_reject(
+            context,
+            symbol=symbol,
+            strategy="CDCVIX15",
+            reason=gate_reason,
+            signal=cdc_signal,
+            confidence=cdc_conf,
+            plan=cdc_plan,
+            edge_metrics=edge,
+            extra={"stage": "entry_quality_gate"},
+        )
+        return
     cdc_message = build_cdc_vixfix_message(item, cdc_plan)
     if not cdc_message:
         return
-    edge = extract_signal_edge_metrics(cdc_plan, cdc_signal)
     freshness = 6.0
     last_signal_time = str(cdc_plan.get("last_signal_time") or "").strip()
     if not last_signal_time:

@@ -1138,14 +1138,25 @@ def _build_trade_close_message(outcome, *, get_now):
     return "\n".join(lines)
 
 
+def _ordered_alert_ids(values):
+    seen = set()
+    ordered = []
+    for item in values:
+        text = str(item).strip()
+        if text and text not in seen:
+            seen.add(text)
+            ordered.append(text)
+    return ordered
+
+
 def _load_previous_settled_outcome_ids(path):
     payload = _read_json_file(path)
     if not isinstance(payload, dict):
-        return set()
+        return []
     outcomes = payload.get("outcomes")
     if not isinstance(outcomes, list):
-        return set()
-    ids = set()
+        return []
+    ids = []
     for row in outcomes:
         if not isinstance(row, dict):
             continue
@@ -1153,30 +1164,24 @@ def _load_previous_settled_outcome_ids(path):
             continue
         alert_id = str(row.get("alert_id") or "").strip()
         if alert_id:
-            ids.add(alert_id)
-    return ids
+            ids.append(alert_id)
+    return _ordered_alert_ids(ids)
 
 
 def _load_notified_close_ids(path):
     payload = _read_json_file(path)
     if not isinstance(payload, dict):
-        return set()
+        return []
     ids = payload.get("notified_alert_ids")
     if not isinstance(ids, list):
-        return set()
-    return {str(item).strip() for item in ids if str(item).strip()}
+        return []
+    return _ordered_alert_ids(ids)
 
 
-def _save_notified_close_ids(path, ids, *, max_keep=500):
+def _save_notified_close_ids(path, ids, *, max_keep=10000):
     # Preserve insertion order so trimming keeps the most recently added ids
     # (alert_id is a SHA1 hash, so sorted() would evict arbitrarily).
-    seen = set()
-    ordered = []
-    for item in ids:
-        text = str(item).strip()
-        if text and text not in seen:
-            seen.add(text)
-            ordered.append(text)
+    ordered = _ordered_alert_ids(ids)
     trimmed = ordered[-max_keep:]
     write_json_atomic(path, {"notified_alert_ids": trimmed, "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
 
@@ -1222,9 +1227,11 @@ def dispatch_trade_close_notifications(
     # used only to bootstrap the notified set on first run so historical
     # trades are not re-notified as if they just closed.
     previous_settled_ids = _load_previous_settled_outcome_ids(outcomes_path)
-    already_notified_ids = _load_notified_close_ids(notified_path)
+    already_notified_order = _load_notified_close_ids(notified_path)
+    already_notified_ids = set(already_notified_order)
     if not os.path.exists(notified_path) and previous_settled_ids:
         _save_notified_close_ids(notified_path, previous_settled_ids)
+        already_notified_order = list(previous_settled_ids)
         already_notified_ids = set(previous_settled_ids)
 
     # Regenerate fresh outcomes by calling the existing report builder.
@@ -1254,7 +1261,14 @@ def dispatch_trade_close_notifications(
     skipped = 0
     capped = 0
     failed = 0
-    newly_notified = list(already_notified_ids)
+    newly_notified = list(already_notified_order)
+    handled_ids = set(already_notified_ids)
+
+    def mark_handled(alert_id):
+        if alert_id not in handled_ids:
+            newly_notified.append(alert_id)
+            handled_ids.add(alert_id)
+
     for outcome in fresh_outcomes:
         if not isinstance(outcome, dict):
             continue
@@ -1264,12 +1278,12 @@ def dispatch_trade_close_notifications(
         if not alert_id:
             continue
         # Already handled (sent or intentionally skipped) in a previous run.
-        if alert_id in already_notified_ids:
+        if alert_id in handled_ids:
             skipped += 1
             continue
         # Shadow (ghost) trades are evaluated but never sent to Telegram.
         if bool(outcome.get("shadow")):
-            newly_notified.append(alert_id)
+            mark_handled(alert_id)
             skipped += 1
             continue
         # Skip closes whose entry is older than the configured window, and
@@ -1277,18 +1291,18 @@ def dispatch_trade_close_notifications(
         if isinstance(age_cutoff, datetime):
             ts = _alert_timestamp_value(outcome.get("timestamp"))
             if isinstance(ts, datetime) and ts < age_cutoff:
-                newly_notified.append(alert_id)
+                mark_handled(alert_id)
                 skipped += 1
                 continue
         intent = str(outcome.get("alert_intent") or "").strip().lower()
         if only_entry and intent != "entry":
             # Intentional skip: never notify non-entry closes, but remember it.
-            newly_notified.append(alert_id)
+            mark_handled(alert_id)
             skipped += 1
             continue
         result = str(outcome.get("outcome_result") or "").strip().lower()
         if skip_flat and result == "flat":
-            newly_notified.append(alert_id)
+            mark_handled(alert_id)
             skipped += 1
             continue
         if sent >= max_per_run:
@@ -1300,7 +1314,7 @@ def dispatch_trade_close_notifications(
             continue
         if send_telegram_alert(message):
             sent += 1
-            newly_notified.append(alert_id)
+            mark_handled(alert_id)
         else:
             # Failed send: leave un-notified so it retries next run.
             failed += 1
@@ -1308,7 +1322,7 @@ def dispatch_trade_close_notifications(
     # Persist notified ids so we never send the same close twice. Only ids
     # that were actually sent (or intentionally skipped) are persisted; failed
     # and capped ids remain for retry on the next run.
-    if newly_notified != list(already_notified_ids):
+    if newly_notified != already_notified_order:
         try:
             _save_notified_close_ids(notified_path, newly_notified)
         except Exception:

@@ -33,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: telegram-alerts
+  group: telegram-alert-state-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:

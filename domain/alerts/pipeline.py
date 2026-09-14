@@ -341,7 +341,11 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     telegram_alert_cache = helpers["telegram_alert_cache"]
     global_trade_counter = helpers.get("global_trade_counter")
     load_recent_alert_cache_keys = helpers.get("load_recent_alert_cache_keys")
-    recent_cache_keys = load_recent_alert_cache_keys(get_now) if callable(load_recent_alert_cache_keys) else {}
+    recent_cache_keys = (
+        load_recent_alert_cache_keys(get_now, max_age_seconds=26 * 60 * 60)
+        if callable(load_recent_alert_cache_keys)
+        else {}
+    )
     record_telegram_alert_history = helpers["record_telegram_alert_history"]
     track_alert_performance = helpers["track_alert_performance"]
     record_telegram_run_report = helpers["record_telegram_run_report"]
@@ -475,6 +479,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             limits=limits,
             daily_pick_cap=daily_pick_cap,
             per_symbol_sent=per_symbol_sent,
+            recent_cache_keys=recent_cache_keys,
         )
         daily_pick_sent = int(daily_dispatch["sent"])
         per_symbol_sent = dict(daily_dispatch["per_symbol_sent"])
@@ -489,6 +494,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
                 telegram_alert_cache=telegram_alert_cache,
                 record_telegram_alert_history=record_telegram_alert_history,
                 limits=limits,
+                recent_cache_keys=recent_cache_keys,
             ):
                 sent += 1
                 daily_summary_sent = 1

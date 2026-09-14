@@ -2388,6 +2388,9 @@ def _evaluate_realized_win_rate_gate(candidate, *, config, helpers):
     signal = str(candidate.get("signal") or "").strip().upper()
     if not strategy or not symbol or signal not in ("BUY", "SELL"):
         return True, None, {}
+    intent, _ = classify_candidate_intent(candidate, config=config, helpers=helpers)
+    if intent != "entry":
+        return True, None, {}
     pause_fn = (helpers or {}).get("evaluate_realized_pause")
     if callable(pause_fn):
         pause_action, pause_meta = pause_fn(candidate)

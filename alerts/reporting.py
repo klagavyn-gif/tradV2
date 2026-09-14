@@ -1643,6 +1643,11 @@ def build_telegram_daily_summary_message(
     latest_run = read_latest_telegram_run_report(helpers["alert_run_report_file_path"]())
     realized_payload = _read_json_file(helpers["alert_realized_summary_file_path"]()) or {}
     realized_summary = _summary_section(realized_payload)
+    entry_realized_summary = realized_summary.get("entry_only")
+    if not isinstance(entry_realized_summary, dict):
+        entry_realized_summary = {}
+    entry_settled = _safe_int(entry_realized_summary.get("settled_alerts"), 0) or 0
+    entry_alerts_per_day = float(entry_settled) / float(realized_days) if realized_days > 0 else None
     feedback_summary = _summary_section(_read_json_file(helpers["alert_feedback_summary_file_path"]()) or {})
     training_summary = _summary_section(_read_json_file(helpers["live_feedback_training_summary_file_path"]()) or {})
     calibration_summary = _summary_section(_read_json_file(helpers["live_feedback_calibration_summary_file_path"]()) or {})
@@ -1777,13 +1782,13 @@ def build_telegram_daily_summary_message(
 
     realized_generated_at = str(realized_summary.get("generated_at") or realized_payload.get("generated_at") or "").strip()
     lines.append(
-        "🎯 <b>ผลงานจริง "
+        "🎯 <b>ผลงานจริงเฉพาะไม้เข้า "
         + f"{html.escape(_fmt_number(realized_days, digits=0))}d:</b> "
-        + f"WR {html.escape(_fmt_number(realized_summary.get('win_rate_pct'), suffix='%'))}"
-        + f" | Expectancy {html.escape(_fmt_number(realized_summary.get('avg_rr_realized'), digits=2, suffix='R'))}"
-        + f" | PnL {html.escape(_fmt_number(realized_summary.get('avg_pnl_pct'), digits=2, suffix='%'))}"
-        + f" | settled {html.escape(_fmt_count(realized_summary.get('settled_alerts')))}"
-        + f" | alerts/day {html.escape(_fmt_number(realized_summary.get('alerts_per_day_avg'), digits=1))}"
+        + f"WR {html.escape(_fmt_number(entry_realized_summary.get('win_rate_pct'), suffix='%'))}"
+        + f" | Expectancy {html.escape(_fmt_number(entry_realized_summary.get('avg_rr_realized'), digits=2, suffix='R'))}"
+        + f" | PnL {html.escape(_fmt_number(entry_realized_summary.get('avg_pnl_pct'), digits=2, suffix='%'))}"
+        + f" | settled {html.escape(_fmt_count(entry_realized_summary.get('settled_alerts')))}"
+        + f" | entries/day {html.escape(_fmt_number(entry_alerts_per_day, digits=1))}"
     )
     if realized_generated_at:
         lines.append(f"📅 <b>อัปเดตผลงาน:</b> {html.escape(realized_generated_at)}")
@@ -1836,12 +1841,12 @@ def build_telegram_daily_summary_message(
     return {
         "strategy": "DAILY_SUMMARY",
         "signal": "INFO",
-        "score": float(_safe_float(realized_summary.get("win_rate_pct"), 0.0) or 0.0),
-        "confidence": float(_safe_float(realized_summary.get("win_rate_pct"), 0.0) or 0.0),
+        "score": float(_safe_float(entry_realized_summary.get("win_rate_pct"), 0.0) or 0.0),
+        "confidence": float(_safe_float(entry_realized_summary.get("win_rate_pct"), 0.0) or 0.0),
         "edge_metrics": {
-            "win_rate_pct": _safe_float(realized_summary.get("win_rate_pct")),
-            "expectancy_rr": _safe_float(realized_summary.get("avg_rr_realized")),
-            "trades": _safe_float(realized_summary.get("settled_alerts")),
+            "win_rate_pct": _safe_float(entry_realized_summary.get("win_rate_pct")),
+            "expectancy_rr": _safe_float(entry_realized_summary.get("avg_rr_realized")),
+            "trades": _safe_float(entry_realized_summary.get("settled_alerts")),
         },
         "message": "\n".join(lines),
         "cache_key": f"DAILYSUMMARY_EXEC|{now_dt.strftime('%Y%m%d')}",
@@ -2013,6 +2018,33 @@ def record_telegram_alert_history(
         return
 
 
+def _shadow_history_contains_locked(path, *, alert_id, cache_key, strategy, symbol, signal):
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except Exception:
+        return False
+    for raw_line in lines:
+        try:
+            row = json.loads(str(raw_line or "").strip())
+        except Exception:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("alert_id") or "").strip() == alert_id:
+            return True
+        if (
+            str(row.get("cache_key") or "").strip() == cache_key
+            and str(row.get("strategy") or "").strip().upper() == strategy
+            and str(row.get("symbol") or "").strip().upper() == symbol
+            and str(row.get("signal") or "").strip().upper() == signal
+        ):
+            return True
+    return False
+
+
 def record_shadow_alert_history(candidate, *, config, helpers, get_now, history_lock):
     """Record a gated/paused entry candidate into the shadow history so its
     outcome is still evaluated (without sending a real Telegram alert). This
@@ -2028,17 +2060,15 @@ def record_shadow_alert_history(candidate, *, config, helpers, get_now, history_
     take_profit = pick_plan_value(plan, ["take_profit", "take_profit_2", "exit_price"]) if isinstance(plan, dict) else None
     strategy = str(candidate.get("strategy") or "UNKNOWN").strip().upper()
     symbol = normalize_symbol(candidate.get("symbol") or "")
+    cache_key = str(candidate.get("cache_key") or "").strip()
+    if not cache_key:
+        return
+    identity = f"shadow|{strategy}|{symbol}|{signal}|{cache_key}"
+    alert_id = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
     timestamp = get_now().strftime("%Y-%m-%d %H:%M:%S")
     message_plain = re.sub(r"<[^>]+>", "", str(candidate.get("message") or "")).strip()
     entry = {
-        "alert_id": _alert_id_value({
-            "timestamp": timestamp,
-            "strategy": strategy,
-            "symbol": symbol,
-            "signal": signal,
-            "cache_key": str(candidate.get("cache_key") or "").strip(),
-            "message_plain": message_plain,
-        }),
+        "alert_id": alert_id,
         "timestamp": timestamp,
         "strategy": strategy,
         "symbol": symbol,
@@ -2051,7 +2081,7 @@ def record_shadow_alert_history(candidate, *, config, helpers, get_now, history_
         "entry_price": float(entry_price) if isinstance(entry_price, (int, float)) else None,
         "stop_loss": float(stop_loss) if isinstance(stop_loss, (int, float)) else None,
         "take_profit": float(take_profit) if isinstance(take_profit, (int, float)) else None,
-        "cache_key": str(candidate.get("cache_key") or "").strip(),
+        "cache_key": cache_key,
         "message_plain": message_plain,
         "shadow": True,
     }
@@ -2067,6 +2097,15 @@ def record_shadow_alert_history(candidate, *, config, helpers, get_now, history_
         max_rows = 20000
     try:
         with history_lock:
+            if _shadow_history_contains_locked(
+                path,
+                alert_id=alert_id,
+                cache_key=cache_key,
+                strategy=strategy,
+                symbol=symbol,
+                signal=signal,
+            ):
+                return
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             alert_history_trim_locked(path, max_rows=max_rows)

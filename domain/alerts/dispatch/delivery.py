@@ -156,6 +156,7 @@ def dispatch_daily_candidates(
     limits,
     daily_pick_cap,
     per_symbol_sent,
+    recent_cache_keys=None,
 ):
     sent = 0
     sent_candidates = []
@@ -165,7 +166,12 @@ def dispatch_daily_candidates(
         if sent >= int(daily_pick_cap):
             break
         daily_key = build_daily_pick_cache_key(get_now, daily_candidate)
-        if cache_contains(telegram_alert_cache, daily_key):
+        if cache_contains(telegram_alert_cache, daily_key) or _recently_sent_in_history(
+            recent_cache_keys,
+            daily_key,
+            get_now,
+            26 * 60 * 60,
+        ):
             continue
         daily_symbol = str(daily_candidate.get("symbol") or "")
         if daily_symbol and int(per_symbol_sent.get(daily_symbol, 0)) >= int(limits["max_per_symbol"]):
@@ -199,6 +205,7 @@ def dispatch_daily_summary(
     telegram_alert_cache,
     record_telegram_alert_history,
     limits,
+    recent_cache_keys=None,
 ):
     daily_message = daily_summary.get("message") if isinstance(daily_summary, dict) else None
     daily_key = daily_summary.get("cache_key") if isinstance(daily_summary, dict) else None
@@ -206,7 +213,12 @@ def dispatch_daily_summary(
         return False
     if not isinstance(daily_key, str) or not daily_key.strip():
         return False
-    if cache_contains(telegram_alert_cache, daily_key):
+    if cache_contains(telegram_alert_cache, daily_key) or _recently_sent_in_history(
+        recent_cache_keys,
+        daily_key,
+        get_now,
+        26 * 60 * 60,
+    ):
         return False
     if not isinstance(daily_message, str) or not daily_message.strip():
         return False

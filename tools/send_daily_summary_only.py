@@ -130,13 +130,17 @@ def main(argv=None):
         min_conf=dynamic_min_conf,
     )
 
+    recent_cache_keys = trad._load_recent_alert_cache_keys(
+        trad.get_thai_now,
+        max_age_seconds=26 * 60 * 60,
+    )
     cache_key = ""
     cache_hit = False
     sent = False
     status = "no_summary_payload"
     if isinstance(daily_summary, dict):
         cache_key = str(daily_summary.get("cache_key") or "").strip()
-        cache_hit = bool(cache_contains(trad._TELEGRAM_ALERT_CACHE, cache_key))
+        cache_hit = bool(cache_contains(trad._TELEGRAM_ALERT_CACHE, cache_key) or cache_key in recent_cache_keys)
         if cache_hit:
             status = "cached"
         else:
@@ -148,6 +152,7 @@ def main(argv=None):
                     telegram_alert_cache=trad._TELEGRAM_ALERT_CACHE,
                     record_telegram_alert_history=trad._record_telegram_alert_history,
                     limits=limits,
+                    recent_cache_keys=recent_cache_keys,
                 )
             )
             status = "sent" if sent else "send_failed"

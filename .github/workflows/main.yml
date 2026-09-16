@@ -25,9 +25,6 @@ on:
         description: Internal retry reason
         required: false
         default: ""
-  schedule:
-    - cron: "*/15 * * * *"
-    - cron: "5,10,20,25 2 * * *"
 
 permissions:
   contents: read

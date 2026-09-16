@@ -30,9 +30,6 @@ on:
         description: Internal retry reason
         required: false
         default: ""
-  schedule:
-    # Retry through the first hour after 09:00 Asia/Bangkok (02:00 UTC)
-    - cron: "0,10,20,30,40,50 2 * * *"
 
 permissions:
   contents: read

@@ -1,0 +1,54 @@
+name: Telegram Send Test
+run-name: Telegram send test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-send-test-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_PROGRESS_BAR: "off"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+      - name: Validate Telegram secrets
+        run: |
+          test -n "$TELEGRAM_BOT_TOKEN"
+          test -n "$TELEGRAM_CHAT_ID"
+      - name: Install dependencies
+        run: |
+          python -m pip install -r requirements.txt --no-input --prefer-binary
+      - name: Send test message
+        run: |
+          python - <<'PY'
+          import sys
+
+          import trad
+
+          message = (
+              "tradV2 Telegram test\n"
+              "Cloud Scheduler -> GitHub Actions -> Telegram\n"
+              "สถานะ: ส่งได้ปกติ (ข้อความทดสอบ ไม่ใช่สัญญาณเทรด)"
+          )
+          ok = trad.send_telegram_alert(message)
+          print("SEND_OK" if ok else "SEND_FAILED")
+          sys.exit(0 if ok else 1)
+          PY

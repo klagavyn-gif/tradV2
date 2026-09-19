@@ -3,6 +3,7 @@ import email.utils
 import html
 import json
 import os
+import pathlib
 import re
 import urllib.error
 import urllib.request
@@ -279,6 +280,104 @@ def build_ai_snapshot(candidates, alert_history=None, *, now=None):
     }
 
 
+def extract_price_levels(candidates, verify_payload=None, alert_history=None, now=None):
+    levels = {}
+
+    def ensure(symbol):
+        return levels.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "price": None,
+                "signal": "",
+                "regime": "",
+                "entry": None,
+                "stop": None,
+                "target": None,
+                "rr": None,
+                "forecast": "",
+            },
+        )
+
+    per_symbol = ((verify_payload or {}).get("all_weather") or {}).get("per_symbol") or []
+    for row in per_symbol:
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        level = ensure(symbol)
+        level["price"] = _safe_float(row.get("price"))
+        level["signal"] = str(row.get("signal") or "").strip().upper()
+        level["regime"] = str(row.get("regime") or "").strip().upper()
+
+    recent_cutoff = (now or datetime.datetime.now()) - datetime.timedelta(hours=24)
+    history_rows = []
+    for entry in alert_history or []:
+        if not isinstance(entry, dict):
+            continue
+        symbol = str(entry.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        stamp = _parse_alert_time(entry.get("timestamp"))
+        if stamp is not None and stamp < recent_cutoff:
+            continue
+        history_rows.append((stamp or datetime.datetime.min, entry))
+    history_rows.sort(key=lambda item: item[0], reverse=True)
+    for _, entry in history_rows:
+        symbol = str(entry.get("symbol") or "").strip().upper()
+        level = ensure(symbol)
+        for key, source in (("entry", "entry_price"), ("stop", "stop_loss"), ("target", "take_profit")):
+            if level.get(key) is None:
+                value = _safe_float(entry.get(source))
+                if value is not None:
+                    level[key] = value
+
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        symbol = str(candidate.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        level = ensure(symbol)
+        for key, source in (
+            ("entry", "entry_price"),
+            ("stop", "stop_loss"),
+            ("target", "take_profit"),
+            ("rr", "risk_reward"),
+        ):
+            value = _safe_float(candidate.get(source))
+            if value is not None:
+                level[key] = value
+        forecast = str(candidate.get("forecast_direction") or "").strip().upper()
+        if forecast:
+            level["forecast"] = forecast
+        if not level["signal"]:
+            level["signal"] = str(candidate.get("signal") or "").strip().upper()
+    return levels
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _level_line(symbol, level):
+    parts = [symbol]
+    if _is_number(level.get("price")):
+        parts.append("price {:.6g}".format(float(level["price"])))
+    if _is_number(level.get("entry")):
+        parts.append("entry {:.6g}".format(float(level["entry"])))
+    if _is_number(level.get("stop")):
+        parts.append("stop {:.6g}".format(float(level["stop"])))
+    if _is_number(level.get("target")):
+        parts.append("target {:.6g}".format(float(level["target"])))
+    if _is_number(level.get("rr")):
+        parts.append("RR {:.2f}".format(float(level["rr"])))
+    if level.get("forecast"):
+        parts.append("forecast {}".format(level["forecast"]))
+    return " | ".join(parts)
+
+
 def build_calibration(alert_history, outcomes, *, min_samples):
     prob_by_id = {}
     for row in alert_history or []:
@@ -320,43 +419,57 @@ def build_calibration(alert_history, outcomes, *, min_samples):
     return result
 
 
-def _build_llm_prompt(snapshot, calibration, news):
+def _build_llm_prompt(snapshot, calibration, news, levels, config):
+    max_symbols = max(1, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_SYMBOLS_IN_PROMPT", 4), 4))
+    max_news = max(0, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_NEWS_IN_PROMPT", 4), 4))
     lines = ["ข้อมูลตลาดล่าสุด:"]
-    bias_text = {"up": "เอียงขึ้น", "down": "เอียงลง", "mixed": "ผสม/ไร้ทิศทาง"}.get(snapshot.get("bias"), "ไม่ชัด")
-    lines.append("- แนวโน้มจากโมเดล: {}".format(bias_text))
+    lines.append("- แนวโน้มจากโมเดล: {}".format(_bias_text(snapshot.get("bias"))))
     if snapshot.get("top_bullish"):
         lines.append(
             "- ฝั่งขึ้น: {}".format(
-                ", ".join(
-                    "{} ({:.2f})".format(row["symbol"], row["prob_win"]) for row in snapshot["top_bullish"]
-                )
+                ", ".join("{} ({:.2f})".format(row["symbol"], row["prob_win"]) for row in snapshot["top_bullish"][:2])
             )
         )
     if snapshot.get("top_bearish"):
         lines.append(
             "- ฝั่งลง: {}".format(
-                ", ".join(
-                    "{} ({:.2f})".format(row["symbol"], row["prob_win"]) for row in snapshot["top_bearish"]
-                )
+                ", ".join("{} ({:.2f})".format(row["symbol"], row["prob_win"]) for row in snapshot["top_bearish"][:2])
             )
         )
     if calibration:
         lines.append(
-            "- Calibration ของโมเดล: {}".format(
+            "- Calibration: {}".format(
                 ", ".join(
-                    "prob {} => WR {:.0f}% (n={})".format(item["label"], item["win_rate_pct"], item["n"])
-                    for item in calibration
+                    "{} => {:.0f}% (n={})".format(item["label"], item["win_rate_pct"], item["n"])
+                    for item in calibration[:3]
                 )
             )
         )
-    if news:
-        lines.append("- พาดหัวข่าวล่าสุด:")
-        for item in news:
-            lines.append("  [{}] {}".format(item.get("sentiment"), item.get("title")))
+    focus = []
+    for row in list(snapshot.get("top_bullish") or [])[: max_symbols // 2 + 1]:
+        focus.append((row["symbol"], row["signal"], row["prob_win"]))
+    for row in list(snapshot.get("top_bearish") or [])[: max_symbols // 2 + 1]:
+        focus.append((row["symbol"], row["signal"], row["prob_win"]))
+    if focus:
+        lines.append("- ระดับราคา:")
+        for symbol, signal, prob in focus[:max_symbols]:
+            level = levels.get(symbol) or {}
+            line = _level_line(symbol, level)
+            if isinstance(prob, float):
+                line = "{} | prob {:.2f} | signal {}".format(line, prob, signal)
+            lines.append("  - " + line)
+    if news and max_news:
+        titles = []
+        for item in news[:max_news]:
+            title = str(item.get("title") or "").strip()
+            if len(title) > 90:
+                title = title[:87] + "..."
+            titles.append("[{}] {}".format(item.get("sentiment"), title))
+        lines.append("- ข่าว: " + " ; ".join(titles))
     lines.append("")
     lines.append(
         "ให้สรุป 3-4 ข้อ เป็นภาษาไทย แต่ละข้อไม่เกิน 120 ตัวอักษร "
-        "บอกแนวโน้มที่อาจเกิดขึ้น ความเสี่ยงหลัก และสิ่งที่ต้องรอ confirmation "
+        "อ้างถึงระดับราคาจริงเมื่อเกี่ยวข้อง บอกความเสี่ยงหลักและสิ่งที่ต้องรอ confirmation "
         "ห้ามบอกให้ซื้อหรือขาย"
     )
     return "\n".join(lines)
@@ -373,7 +486,7 @@ def _post_gemini(url, api_key, body, timeout):
         return json.loads(response.read())
 
 
-def generate_llm_narrative(config, snapshot, calibration, news):
+def generate_llm_narrative(config, snapshot, calibration, news, levels=None):
     if not bool(getattr(config, "DAILY_AI_LLM_ENABLE", True)):
         return None
     provider = str(getattr(config, "DAILY_AI_LLM_PROVIDER", "gemini") or "gemini").strip().lower()
@@ -383,12 +496,13 @@ def generate_llm_narrative(config, snapshot, calibration, news):
     if not api_key:
         return None
     model = str(getattr(config, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
-    max_tokens = max(100, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_OUTPUT_TOKENS", 1200), 1200))
+    max_tokens = max(100, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_OUTPUT_TOKENS", 800), 800))
     timeout = float(getattr(config, "DAILY_AI_LLM_TIMEOUT_SECONDS", 25.0) or 25.0)
     url = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent".format(model)
+    prompt = _build_llm_prompt(snapshot, calibration, news, levels or {}, config)
     body = {
         "systemInstruction": {"parts": [{"text": _SYSTEM_PROMPT}]},
-        "contents": [{"role": "user", "parts": [{"text": _build_llm_prompt(snapshot, calibration, news)}]}],
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens},
     }
     thinking_level = str(getattr(config, "DAILY_AI_LLM_THINKING_LEVEL", "low") or "").strip().lower()
@@ -421,7 +535,41 @@ def _bias_text(bias):
     return {"up": "เอียงขึ้น", "down": "เอียงลง", "mixed": "ผสม/ไร้ทิศทาง"}.get(bias, "ไม่ชัด")
 
 
-def _render_html(snapshot, calibration, news, narrative):
+def _reference_levels(snapshot, levels, limit=3):
+    result = []
+    seen = set()
+    for row in list(snapshot.get("top_bullish") or []) + list(snapshot.get("top_bearish") or []):
+        symbol = str(row.get("symbol") or "").strip().upper()
+        if not symbol or symbol in seen:
+            continue
+        level = (levels or {}).get(symbol)
+        if not isinstance(level, dict):
+            continue
+        if not any(_is_number(level.get(key)) for key in ("entry", "stop", "target", "price")):
+            continue
+        seen.add(symbol)
+        result.append((symbol, level))
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _scorecard_text(scorecard):
+    if not isinstance(scorecard, dict) or not scorecard.get("evaluated"):
+        return None
+    parts = [
+        "{}/{} ถูก ({:.0f}%)".format(
+            scorecard.get("hits"), scorecard.get("evaluated"), scorecard.get("hit_rate_pct") or 0.0
+        )
+    ]
+    for bias, label in (("up", "ขึ้น"), ("down", "ลง")):
+        bucket = (scorecard.get("by_bias") or {}).get(bias)
+        if isinstance(bucket, dict) and bucket.get("n"):
+            parts.append("{} {}/{}".format(label, bucket.get("hits"), bucket.get("n")))
+    return " | ".join(parts)
+
+
+def _render_html(snapshot, calibration, news, narrative, levels=None, scorecard=None):
     lines = ["<b>AI Outlook รายวัน</b>"]
     lines.append("แนวโน้มจากโมเดล: <b>{}</b>".format(_bias_text(snapshot.get("bias"))))
     if snapshot.get("top_bullish"):
@@ -440,6 +588,11 @@ def _render_html(snapshot, calibration, news, narrative):
                 )
             )
         )
+    reference = _reference_levels(snapshot, levels)
+    if reference:
+        lines.append("<b>ระดับอ้างอิง:</b>")
+        for symbol, level in reference:
+            lines.append("- " + _escape(_level_line(symbol, level)))
     if calibration:
         lines.append(
             "Calibration: {}".format(
@@ -449,6 +602,9 @@ def _render_html(snapshot, calibration, news, narrative):
                 )
             )
         )
+    scorecard_text = _scorecard_text(scorecard)
+    if scorecard_text:
+        lines.append("Scorecard: " + _escape(scorecard_text))
     if news:
         lines.append("<b>ข่าวล่าสุด:</b>")
         for item in news:
@@ -468,7 +624,7 @@ def _render_html(snapshot, calibration, news, narrative):
     return "\n".join(lines)
 
 
-def _render_plain(snapshot, calibration, news, narrative):
+def _render_plain(snapshot, calibration, news, narrative, levels=None, scorecard=None):
     lines = ["AI Outlook รายวัน"]
     lines.append("แนวโน้มจากโมเดล: {}".format(_bias_text(snapshot.get("bias"))))
     if snapshot.get("top_bullish"):
@@ -483,6 +639,11 @@ def _render_plain(snapshot, calibration, news, narrative):
                 ", ".join("{} {:.0%}".format(row["symbol"], row["prob_win"]) for row in snapshot["top_bearish"])
             )
         )
+    reference = _reference_levels(snapshot, levels)
+    if reference:
+        lines.append("ระดับอ้างอิง:")
+        for symbol, level in reference:
+            lines.append("- " + _level_line(symbol, level))
     if calibration:
         lines.append(
             "Calibration: {}".format(
@@ -492,6 +653,9 @@ def _render_plain(snapshot, calibration, news, narrative):
                 )
             )
         )
+    scorecard_text = _scorecard_text(scorecard)
+    if scorecard_text:
+        lines.append("Scorecard: " + scorecard_text)
     if news:
         lines.append("ข่าวล่าสุด:")
         for item in news:
@@ -502,6 +666,136 @@ def _render_plain(snapshot, calibration, news, narrative):
         lines.append(str(narrative).strip())
     lines.append("ไม่ใช่สัญญาณเทรด ใช้เป็นข้อมูลประกอบเท่านั้น")
     return "\n".join(lines)
+
+
+def _load_outlook_history(path):
+    records = []
+    try:
+        raw = pathlib.Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return records
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict):
+            records.append(row)
+    return records
+
+
+def _save_outlook_history(path, records):
+    target = pathlib.Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(row, ensure_ascii=False) for row in records if isinstance(row, dict)]
+    target.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+
+
+def evaluate_outlook_history(records, prices_now, *, now, min_age_hours):
+    updated = 0
+    reference = now or datetime.datetime.now()
+    for record in records:
+        if not isinstance(record, dict) or record.get("evaluation"):
+            continue
+        generated = _parse_alert_time(record.get("generated_at"))
+        if generated is None:
+            continue
+        age_hours = (reference - generated).total_seconds() / 3600.0
+        if age_hours < float(min_age_hours):
+            continue
+        prices_then = record.get("prices") or {}
+        returns = []
+        up_count = 0
+        down_count = 0
+        for symbol, then_price in prices_then.items():
+            then_value = _safe_float(then_price)
+            now_value = _safe_float((prices_now or {}).get(symbol))
+            if not isinstance(then_value, float) or not isinstance(now_value, float) or then_value <= 0:
+                continue
+            change = (now_value - then_value) / then_value * 100.0
+            returns.append(change)
+            if change > 0:
+                up_count += 1
+            elif change < 0:
+                down_count += 1
+        if not returns:
+            continue
+        mean_return = sum(returns) / len(returns)
+        bias = str(record.get("bias") or "mixed")
+        correct = None
+        if bias == "up":
+            correct = mean_return > 0
+        elif bias == "down":
+            correct = mean_return < 0
+        record["evaluation"] = {
+            "evaluated_at": reference.strftime("%Y-%m-%d %H:%M:%S"),
+            "mean_return_pct": mean_return,
+            "up_count": up_count,
+            "down_count": down_count,
+            "symbols": len(returns),
+            "correct": correct,
+        }
+        updated += 1
+    return updated
+
+
+def build_scorecard(records):
+    evaluated = [
+        record
+        for record in records
+        if isinstance(record.get("evaluation"), dict) and record["evaluation"].get("correct") is not None
+    ]
+    total = len(evaluated)
+    hits = sum(1 for record in evaluated if record["evaluation"].get("correct"))
+    by_bias = {}
+    for record in evaluated:
+        bias = str(record.get("bias") or "mixed")
+        bucket = by_bias.setdefault(bias, {"n": 0, "hits": 0})
+        bucket["n"] += 1
+        if record["evaluation"].get("correct"):
+            bucket["hits"] += 1
+    return {
+        "evaluated": total,
+        "hits": hits,
+        "hit_rate_pct": (float(hits) / float(total) * 100.0) if total else None,
+        "by_bias": {
+            bias: {
+                "n": bucket["n"],
+                "hits": bucket["hits"],
+                "hit_rate_pct": (float(bucket["hits"]) / float(bucket["n"]) * 100.0) if bucket["n"] else None,
+            }
+            for bias, bucket in by_bias.items()
+        },
+    }
+
+
+def upsert_outlook_record(records, record):
+    date = str(record.get("date") or "")
+    for index, existing in enumerate(records):
+        if str(existing.get("date") or "") == date:
+            if existing.get("sent_at") and not record.get("sent_at"):
+                record["sent_at"] = existing["sent_at"]
+            if existing.get("evaluation") and not record.get("evaluation"):
+                record["evaluation"] = existing["evaluation"]
+            records[index] = record
+            return records
+    records.append(record)
+    return records
+
+
+def mark_outlook_sent(history_path, record_date, sent_at):
+    if history_path is None:
+        return False
+    records = _load_outlook_history(history_path)
+    for record in records:
+        if str(record.get("date") or "") == str(record_date):
+            record["sent_at"] = str(sent_at)
+            _save_outlook_history(history_path, records)
+            return True
+    return False
 
 
 def _cap_text(text, max_chars):
@@ -515,10 +809,21 @@ def _cap_text(text, max_chars):
     return truncated.rstrip() + "\n…"
 
 
-def build_daily_ai_outlook(*, config, candidates, alert_history, outcomes, now=None):
+def build_daily_ai_outlook(
+    *,
+    config,
+    candidates,
+    alert_history,
+    outcomes,
+    verify_payload=None,
+    history_path=None,
+    now=None,
+):
     if not bool(getattr(config, "DAILY_AI_OUTLOOK_ENABLE", True)):
         return None
-    snapshot = build_ai_snapshot(candidates, alert_history, now=now)
+    reference_now = now or datetime.datetime.now()
+    snapshot = build_ai_snapshot(candidates, alert_history, now=reference_now)
+    levels = extract_price_levels(candidates, verify_payload, alert_history, now=reference_now)
     min_samples = max(1, _safe_int(getattr(config, "DAILY_AI_CALIBRATION_MIN_SAMPLES", 5), 5))
     calibration = build_calibration(alert_history, outcomes, min_samples=min_samples)
     news = []
@@ -528,28 +833,67 @@ def build_daily_ai_outlook(*, config, candidates, alert_history, outcomes, now=N
         news = []
     narrative_result = None
     try:
-        narrative_result = generate_llm_narrative(config, snapshot, calibration, news)
+        narrative_result = generate_llm_narrative(config, snapshot, calibration, news, levels)
     except Exception:
         narrative_result = None
     narrative = (narrative_result or {}).get("text")
+
+    prices_now = {
+        symbol: float(level["price"])
+        for symbol, level in levels.items()
+        if _is_number(level.get("price"))
+    }
+    scorecard = None
+    already_sent = False
+    record_date = reference_now.strftime("%Y-%m-%d")
+    if history_path is not None and bool(getattr(config, "DAILY_AI_SCORECARD_ENABLE", True)):
+        try:
+            records = _load_outlook_history(history_path)
+            min_age = float(getattr(config, "DAILY_AI_SCORECARD_MIN_AGE_HOURS", 20.0) or 20.0)
+            evaluate_outlook_history(records, prices_now, now=reference_now, min_age_hours=min_age)
+            scorecard = build_scorecard(records)
+            record = {
+                "date": record_date,
+                "generated_at": reference_now.strftime("%Y-%m-%d %H:%M:%S"),
+                "bias": snapshot.get("bias"),
+                "buy_score": snapshot.get("buy_score"),
+                "sell_score": snapshot.get("sell_score"),
+                "prices": prices_now,
+                "top_bullish": [row["symbol"] for row in (snapshot.get("top_bullish") or [])],
+                "top_bearish": [row["symbol"] for row in (snapshot.get("top_bearish") or [])],
+            }
+            records = upsert_outlook_record(records, record)
+            already_sent = bool(record.get("sent_at"))
+            _save_outlook_history(history_path, records)
+        except Exception:
+            scorecard = None
+
     has_snapshot = bool(snapshot.get("rows"))
-    if not has_snapshot and not news and not narrative and not calibration:
+    if not has_snapshot and not news and not narrative and not calibration and not prices_now:
         return None
     max_chars = _safe_int(getattr(config, "DAILY_AI_OUTLOOK_MAX_CHARS", 1900), 1900)
-    message = _cap_text(_render_html(snapshot, calibration, news, narrative), max_chars)
-    plain = _cap_text(_render_plain(snapshot, calibration, news, narrative), max_chars)
+    message = _cap_text(_render_html(snapshot, calibration, news, narrative, levels, scorecard), max_chars)
+    plain = _cap_text(_render_plain(snapshot, calibration, news, narrative, levels, scorecard), max_chars)
     return {
         "message": message,
         "plain": plain,
         "payload": {
-            "generated_at": (now or datetime.datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
+            "generated_at": reference_now.strftime("%Y-%m-%d %H:%M:%S"),
+            "record_date": record_date,
+            "already_sent": already_sent,
             "bias": snapshot.get("bias"),
             "snapshot_rows": len(snapshot.get("rows") or []),
             "buy_score": snapshot.get("buy_score"),
             "sell_score": snapshot.get("sell_score"),
             "top_bullish": snapshot.get("top_bullish"),
             "top_bearish": snapshot.get("top_bearish"),
+            "levels": {
+                symbol: level
+                for symbol, level in levels.items()
+                if any(_is_number(level.get(key)) for key in ("entry", "stop", "target", "price"))
+            },
             "calibration": calibration,
+            "scorecard": scorecard,
             "news": news,
             "llm_narrative": narrative,
             "llm_used": bool(narrative),

@@ -38,20 +38,6 @@ def _read_json(path_text):
         return {}
 
 
-def _append_capped(base, section, *, limit):
-    base_text = str(base or "")
-    section_text = str(section or "")
-    if not section_text:
-        return base_text
-    if len(base_text) + len(section_text) + 2 <= limit:
-        return base_text + "\n\n" + section_text
-    allowed = max(0, limit - len(base_text) - 20)
-    trimmed = section_text[:allowed]
-    if "\n" in trimmed:
-        trimmed = trimmed.rsplit("\n", 1)[0]
-    return (base_text + "\n\n" + trimmed.rstrip() + "\n…").strip()
-
-
 def _load_summary_candidates(trad):
     latest_run = _read_json(trad._alert_run_report_file_path())
     if not isinstance(latest_run, dict):
@@ -146,32 +132,43 @@ def main(argv=None):
 
     outlook_payload = None
     outlook_path = None
-    if isinstance(daily_summary, dict) and bool(getattr(trad.config, "DAILY_AI_OUTLOOK_ENABLE", True)):
+    outlook_sent = False
+    outlook_skipped = False
+    outlook_history_path = Path(trad._alert_history_dir()) / "outlook_history.jsonl"
+    if bool(getattr(trad.config, "DAILY_AI_OUTLOOK_ENABLE", True)):
         try:
-            from alerts.daily_outlook import build_daily_ai_outlook
+            from alerts.daily_outlook import build_daily_ai_outlook, mark_outlook_sent
 
             alert_history = trad._read_telegram_alert_history(days=2)
             outcomes_payload = _read_json(trad._alert_outcomes_file_path())
             outcomes = outcomes_payload.get("outcomes") if isinstance(outcomes_payload, dict) else []
+            verify_payload = _read_json(Path(trad._alert_history_dir()) / "workflow_verify.json")
             outlook = build_daily_ai_outlook(
                 config=trad.config,
                 candidates=existing_candidates,
                 alert_history=alert_history,
                 outcomes=outcomes,
+                verify_payload=verify_payload,
+                history_path=outlook_history_path,
                 now=trad.get_thai_now(),
             )
         except Exception as exc:
             trad.logger.warning("Daily AI outlook failed: %s", exc)
             outlook = None
         if isinstance(outlook, dict):
-            base_html = str(daily_summary.get("message") or "")
-            base_plain = str(daily_summary.get("message_plain") or "")
-            daily_summary["message"] = _append_capped(base_html, outlook.get("message"), limit=4000)
-            if base_plain:
-                daily_summary["message_plain"] = _append_capped(base_plain, outlook.get("plain"), limit=4000)
             outlook_payload = outlook.get("payload") or {}
             outlook_path = Path(trad._alert_history_dir()) / "daily_ai_outlook.json"
             _write_json(str(outlook_path), outlook_payload)
+            if outlook_payload.get("already_sent"):
+                outlook_skipped = True
+            elif isinstance(outlook.get("message"), str) and outlook["message"].strip():
+                outlook_sent = bool(trad.send_telegram_alert(outlook["message"]))
+                if outlook_sent:
+                    mark_outlook_sent(
+                        outlook_history_path,
+                        outlook_payload.get("record_date"),
+                        trad.get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
+                    )
 
     recent_cache_keys = trad._load_recent_alert_cache_keys(
         trad.get_thai_now,
@@ -214,10 +211,14 @@ def main(argv=None):
         "quality_drop_counts": latest_run.get("quality_drop_counts") if isinstance(latest_run, dict) else {},
         "ai_outlook": {
             "enabled": bool(getattr(trad.config, "DAILY_AI_OUTLOOK_ENABLE", True)),
+            "sent": outlook_sent,
+            "skipped_already_sent": outlook_skipped,
             "bias": (outlook_payload or {}).get("bias"),
             "llm_used": bool((outlook_payload or {}).get("llm_used")),
+            "llm_finish_reason": (outlook_payload or {}).get("llm_finish_reason"),
             "news_count": len((outlook_payload or {}).get("news") or []),
             "calibration_buckets": len((outlook_payload or {}).get("calibration") or []),
+            "scorecard": (outlook_payload or {}).get("scorecard"),
         },
         "ai_outlook_path": str(outlook_path) if outlook_path else None,
     }

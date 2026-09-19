@@ -5,6 +5,7 @@ import json
 import os
 import pathlib
 import re
+import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -475,15 +476,32 @@ def _build_llm_prompt(snapshot, calibration, news, levels, config):
     return "\n".join(lines)
 
 
-def _post_gemini(url, api_key, body, timeout):
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read())
+def _post_gemini(url, api_key, body, timeout, retries=2):
+    last_error = None
+    for attempt in range(retries + 1):
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read())
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            if exc.code in (429, 500, 502, 503, 504) and attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+        except Exception as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+            raise
+    if last_error is not None:
+        raise last_error
 
 
 def generate_llm_narrative(config, snapshot, calibration, news, levels=None):

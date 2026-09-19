@@ -216,6 +216,8 @@ def main(argv=None):
             "bias": (outlook_payload or {}).get("bias"),
             "llm_used": bool((outlook_payload or {}).get("llm_used")),
             "llm_finish_reason": (outlook_payload or {}).get("llm_finish_reason"),
+            "llm_block_reason": (outlook_payload or {}).get("llm_block_reason"),
+            "llm_error": (outlook_payload or {}).get("llm_error"),
             "news_count": len((outlook_payload or {}).get("news") or []),
             "calibration_buckets": len((outlook_payload or {}).get("calibration") or []),
             "scorecard": (outlook_payload or {}).get("scorecard"),

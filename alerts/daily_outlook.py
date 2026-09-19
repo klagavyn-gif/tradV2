@@ -518,7 +518,13 @@ def generate_llm_narrative(config, snapshot, calibration, news, levels=None):
             raise
     candidates = payload.get("candidates") or []
     if not candidates:
-        return None
+        feedback = payload.get("promptFeedback") or {}
+        return {
+            "text": "",
+            "finish_reason": "",
+            "block_reason": str(feedback.get("blockReason") or ""),
+            "model": model,
+        }
     candidate = candidates[0]
     parts = (candidate.get("content") or {}).get("parts") or []
     text = "".join(str(part.get("text") or "") for part in parts).strip()
@@ -832,11 +838,14 @@ def build_daily_ai_outlook(
     except Exception:
         news = []
     narrative_result = None
+    llm_error = None
     try:
         narrative_result = generate_llm_narrative(config, snapshot, calibration, news, levels)
-    except Exception:
+    except Exception as exc:
         narrative_result = None
-    narrative = (narrative_result or {}).get("text")
+        llm_error = "{}: {}".format(type(exc).__name__, str(exc)[:200])
+        print("[daily-outlook] llm failed: {}".format(llm_error))
+    narrative = (narrative_result or {}).get("text") or None
 
     prices_now = {
         symbol: float(level["price"])
@@ -898,6 +907,8 @@ def build_daily_ai_outlook(
             "llm_narrative": narrative,
             "llm_used": bool(narrative),
             "llm_finish_reason": (narrative_result or {}).get("finish_reason"),
+            "llm_block_reason": (narrative_result or {}).get("block_reason"),
+            "llm_error": llm_error,
             "llm_model": (narrative_result or {}).get("model"),
         },
     }

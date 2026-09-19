@@ -738,7 +738,7 @@ DAILY_AI_OUTLOOK_MAX_CHARS = _env_int("DAILY_AI_OUTLOOK_MAX_CHARS", 1900)
 DAILY_AI_NEWS_ENABLE = _env_bool("DAILY_AI_NEWS_ENABLE", True)
 DAILY_AI_NEWS_SOURCES = _env_str(
     "DAILY_AI_NEWS_SOURCES",
-    "https://cointelegraph.com/rss,https://www.coindesk.com/arc/outboundfeeds/rss/,https://bitcoinmagazine.com/feed",
+    "https://cointelegraph.com/rss,https://www.theblock.co/rss.xml,https://decrypt.co/feed,https://bitcoinmagazine.com/feed",
 )
 DAILY_AI_NEWS_MAX_ITEMS = _env_int("DAILY_AI_NEWS_MAX_ITEMS", 5)
 DAILY_AI_NEWS_TIMEOUT_SECONDS = _env_float("DAILY_AI_NEWS_TIMEOUT_SECONDS", 8.0)

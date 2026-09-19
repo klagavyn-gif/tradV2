@@ -4,6 +4,7 @@ import html
 import json
 import os
 import re
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
@@ -354,11 +355,22 @@ def _build_llm_prompt(snapshot, calibration, news):
             lines.append("  [{}] {}".format(item.get("sentiment"), item.get("title")))
     lines.append("")
     lines.append(
-        "ให้สรุป 3-5 ข้อ เป็นภาษาไทย แต่ละข้อไม่เกิน 140 ตัวอักษร "
+        "ให้สรุป 3-4 ข้อ เป็นภาษาไทย แต่ละข้อไม่เกิน 120 ตัวอักษร "
         "บอกแนวโน้มที่อาจเกิดขึ้น ความเสี่ยงหลัก และสิ่งที่ต้องรอ confirmation "
         "ห้ามบอกให้ซื้อหรือขาย"
     )
     return "\n".join(lines)
+
+
+def _post_gemini(url, api_key, body, timeout):
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read())
 
 
 def generate_llm_narrative(config, snapshot, calibration, news):
@@ -371,7 +383,7 @@ def generate_llm_narrative(config, snapshot, calibration, news):
     if not api_key:
         return None
     model = str(getattr(config, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
-    max_tokens = max(100, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_OUTPUT_TOKENS", 700), 700))
+    max_tokens = max(100, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_OUTPUT_TOKENS", 1200), 1200))
     timeout = float(getattr(config, "DAILY_AI_LLM_TIMEOUT_SECONDS", 25.0) or 25.0)
     url = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent".format(model)
     body = {
@@ -379,20 +391,30 @@ def generate_llm_narrative(config, snapshot, calibration, news):
         "contents": [{"role": "user", "parts": [{"text": _build_llm_prompt(snapshot, calibration, news)}]}],
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": max_tokens},
     }
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        payload = json.loads(response.read())
+    thinking_level = str(getattr(config, "DAILY_AI_LLM_THINKING_LEVEL", "low") or "").strip().lower()
+    if thinking_level in ("low", "medium", "high"):
+        body["generationConfig"]["thinkingConfig"] = {"thinkingLevel": thinking_level}
+    try:
+        payload = _post_gemini(url, api_key, body, timeout)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 400 and "thinkingConfig" in body["generationConfig"]:
+            del body["generationConfig"]["thinkingConfig"]
+            payload = _post_gemini(url, api_key, body, timeout)
+        else:
+            raise
     candidates = payload.get("candidates") or []
     if not candidates:
         return None
-    parts = (candidates[0].get("content") or {}).get("parts") or []
+    candidate = candidates[0]
+    parts = (candidate.get("content") or {}).get("parts") or []
     text = "".join(str(part.get("text") or "") for part in parts).strip()
-    return text or None
+    if not text:
+        return None
+    return {
+        "text": text,
+        "finish_reason": str(candidate.get("finishReason") or ""),
+        "model": model,
+    }
 
 
 def _bias_text(bias):
@@ -504,11 +526,12 @@ def build_daily_ai_outlook(*, config, candidates, alert_history, outcomes, now=N
         news = fetch_news(config)
     except Exception:
         news = []
-    narrative = None
+    narrative_result = None
     try:
-        narrative = generate_llm_narrative(config, snapshot, calibration, news)
+        narrative_result = generate_llm_narrative(config, snapshot, calibration, news)
     except Exception:
-        narrative = None
+        narrative_result = None
+    narrative = (narrative_result or {}).get("text")
     has_snapshot = bool(snapshot.get("rows"))
     if not has_snapshot and not news and not narrative and not calibration:
         return None
@@ -530,5 +553,7 @@ def build_daily_ai_outlook(*, config, candidates, alert_history, outcomes, now=N
             "news": news,
             "llm_narrative": narrative,
             "llm_used": bool(narrative),
+            "llm_finish_reason": (narrative_result or {}).get("finish_reason"),
+            "llm_model": (narrative_result or {}).get("model"),
         },
     }

@@ -35,6 +35,14 @@ EXPECTED_URL_SUMMARY = (
     "https://api.github.com/repos/klagavyn-gif/tradV2"
     "/actions/workflows/daily-summary.yml/dispatches"
 )
+EXPECTED_URL_HEARTBEAT = (
+    "https://api.github.com/repos/klagavyn-gif/tradV2"
+    "/actions/workflows/heartbeat-check.yml/dispatches"
+)
+EXPECTED_URL_ENTRY_EDGE = (
+    "https://api.github.com/repos/klagavyn-gif/tradV2"
+    "/actions/workflows/entry-edge-report.yml/dispatches"
+)
 EXPECTED_INSTALLATION_URL = (
     "https://api.github.com/app/installations/789012/access_tokens"
 )
@@ -228,6 +236,53 @@ class DispatchRequestTests(unittest.TestCase):
         expected = dict(EXPECTED_INPUTS)
         expected["force"] = "true"
         self.assertEqual(decoded, {"ref": "main", "inputs": expected})
+
+    def test_heartbeat_request_has_no_inputs(self):
+        url, headers, body = app.build_dispatch_request(
+            "heartbeat", "secret-installation-token", environ=ENV
+        )
+        self.assertEqual(url, EXPECTED_URL_HEARTBEAT)
+        self.assertEqual(json.loads(body.decode("utf-8")), {"ref": "main"})
+
+    def test_entry_edge_request_inputs(self):
+        url, headers, body = app.build_dispatch_request(
+            "entry-edge-report", "secret-installation-token", environ=ENV
+        )
+        self.assertEqual(url, EXPECTED_URL_ENTRY_EDGE)
+        decoded = json.loads(body.decode("utf-8"))
+        self.assertEqual(decoded["ref"], "main")
+        self.assertEqual(
+            decoded["inputs"],
+            {
+                "days": "45",
+                "since": "",
+                "cost_bps": "30",
+                "target_settled": "100",
+                "notify": "true",
+            },
+        )
+
+    def test_entry_edge_request_env_overrides(self):
+        env = dict(ENV)
+        env["ENTRY_EDGE_DAYS"] = "30"
+        env["ENTRY_EDGE_SINCE"] = "2026-09-17"
+        env["ENTRY_EDGE_COST_BPS"] = "25"
+        env["ENTRY_EDGE_TARGET_SETTLED"] = "80"
+        env["ENTRY_EDGE_NOTIFY"] = "false"
+        _, _, body = app.build_dispatch_request(
+            "entry-edge-report", "secret-installation-token", environ=env
+        )
+        decoded = json.loads(body.decode("utf-8"))
+        self.assertEqual(
+            decoded["inputs"],
+            {
+                "days": "30",
+                "since": "2026-09-17",
+                "cost_bps": "25",
+                "target_settled": "80",
+                "notify": "false",
+            },
+        )
 
     def test_unsupported_workflow_raises(self):
         with self.assertRaises(app.DispatchError):

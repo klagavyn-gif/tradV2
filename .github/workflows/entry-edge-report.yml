@@ -1,0 +1,78 @@
+name: Entry Edge Report
+run-name: Entry edge report
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: Lookback window in days (0 = all)
+        required: false
+        default: "45"
+      since:
+        description: Only include alerts on/after this date (YYYY-MM-DD)
+        required: false
+        default: ""
+      cost_bps:
+        description: Round-trip cost in basis points
+        required: false
+        default: "30"
+      target_settled:
+        description: Settled entry sample target
+        required: false
+        default: "100"
+      notify:
+        description: Send the report summary to Telegram
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: entry-edge-report-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Restore Telegram alert history cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .data/telegram_alerts
+          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            telegram-alert-history-${{ github.ref_name }}-
+      - name: Build entry edge report
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.notify }}" = "true" ]; then
+            EXTRA_ARGS="--notify-telegram"
+          fi
+          python tools/entry_edge_report.py \
+            --days "${{ github.event.inputs.days || '45' }}" \
+            --since "${{ github.event.inputs.since || '' }}" \
+            --cost-bps "${{ github.event.inputs.cost_bps || '30' }}" \
+            --target-settled "${{ github.event.inputs.target_settled || '100' }}" \
+            $EXTRA_ARGS
+      - name: Upload entry edge report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: entry-edge-report
+          path: |
+            .data/telegram_alerts/entry_edge_report.md
+            .data/telegram_alerts/entry_edge_report.json
+          if-no-files-found: ignore
+          retention-days: 30

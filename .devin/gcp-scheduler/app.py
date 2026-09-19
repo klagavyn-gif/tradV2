@@ -13,6 +13,8 @@ import jwt
 WORKFLOWS = {
     "alerts": "main.yml",
     "daily-summary": "daily-summary.yml",
+    "heartbeat": "heartbeat-check.yml",
+    "entry-edge-report": "entry-edge-report.yml",
 }
 
 _DEFAULT_SYMBOLS = "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD"
@@ -206,16 +208,28 @@ def build_dispatch_request(workflow_key, installation_token, *, environ=None):
         quote(filename, safe=""),
     )
     headers = _api_headers(token)
-    inputs = {
-        "symbols": symbols,
-        "period": period,
-        "retry_attempt": "0",
-        "retry_source_run_id": "",
-        "retry_reason": "google_cloud_scheduler",
-    }
-    if key == "daily-summary":
-        inputs["force"] = "true"
-    body = {"ref": ref, "inputs": inputs}
+    inputs = None
+    if key in ("alerts", "daily-summary"):
+        inputs = {
+            "symbols": symbols,
+            "period": period,
+            "retry_attempt": "0",
+            "retry_source_run_id": "",
+            "retry_reason": "google_cloud_scheduler",
+        }
+        if key == "daily-summary":
+            inputs["force"] = "true"
+    elif key == "entry-edge-report":
+        inputs = {
+            "days": str(env.get("ENTRY_EDGE_DAYS") or "45").strip(),
+            "since": str(env.get("ENTRY_EDGE_SINCE") or "").strip(),
+            "cost_bps": str(env.get("ENTRY_EDGE_COST_BPS") or "30").strip(),
+            "target_settled": str(env.get("ENTRY_EDGE_TARGET_SETTLED") or "100").strip(),
+            "notify": str(env.get("ENTRY_EDGE_NOTIFY") or "true").strip(),
+        }
+    body = {"ref": ref}
+    if inputs is not None:
+        body["inputs"] = inputs
     return url, headers, json.dumps(body).encode("utf-8")
 
 

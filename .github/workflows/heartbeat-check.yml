@@ -1,0 +1,58 @@
+name: Alert Pipeline Heartbeat
+run-name: Alert pipeline heartbeat
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_age_minutes:
+        description: Override heartbeat max age (for testing)
+        required: false
+        default: ""
+      force_alert:
+        description: Force a heartbeat alert (for testing)
+        required: false
+        default: "false"
+  schedule:
+    # Backup trigger independent of Cloud Scheduler. GitHub scheduled runs can
+    # be delayed, but this monitor only needs to notice a stalled pipeline.
+    - cron: "7,37 * * * *"
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: alert-heartbeat-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      GH_TOKEN: ${{ github.token }}
+      HEARTBEAT_WORKFLOW: main.yml
+      HEARTBEAT_MAX_AGE_MINUTES: ${{ github.event.inputs.max_age_minutes || vars.HEARTBEAT_MAX_AGE_MINUTES || '25' }}
+      HEARTBEAT_REPEAT_HOURS: ${{ vars.HEARTBEAT_REPEAT_HOURS || '6' }}
+      HEARTBEAT_FORCE_ALERT: ${{ github.event.inputs.force_alert || 'false' }}
+      HEARTBEAT_STATE_PATH: .data/heartbeat/heartbeat_state.json
+    steps:
+      - uses: actions/checkout@v5
+      - name: Restore heartbeat state
+        uses: actions/cache/restore@v5
+        with:
+          path: .data/heartbeat
+          key: alert-heartbeat-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            alert-heartbeat-state-${{ github.ref_name }}-
+      - name: Check alert pipeline freshness
+        run: python tools/heartbeat_check.py
+      - name: Save heartbeat state
+        if: always()
+        uses: actions/cache/save@v5
+        with:
+          path: .data/heartbeat
+          key: alert-heartbeat-state-${{ github.ref_name }}-${{ github.run_id }}

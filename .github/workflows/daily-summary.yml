@@ -92,6 +92,19 @@ jobs:
       TELEGRAM_DAILY_SUMMARY_TOP_N: ${{ vars.TELEGRAM_DAILY_SUMMARY_TOP_N || '3' }}
       TELEGRAM_DAILY_SUMMARY_HISTORY_DAYS: ${{ vars.TELEGRAM_DAILY_SUMMARY_HISTORY_DAYS || '1.0' }}
       TELEGRAM_DAILY_SUMMARY_REALIZED_DAYS: ${{ vars.TELEGRAM_DAILY_SUMMARY_REALIZED_DAYS || '45.0' }}
+      DAILY_AI_OUTLOOK_ENABLE: ${{ vars.DAILY_AI_OUTLOOK_ENABLE || 'true' }}
+      DAILY_AI_OUTLOOK_MAX_CHARS: ${{ vars.DAILY_AI_OUTLOOK_MAX_CHARS || '1900' }}
+      DAILY_AI_NEWS_ENABLE: ${{ vars.DAILY_AI_NEWS_ENABLE || 'true' }}
+      DAILY_AI_NEWS_SOURCES: ${{ vars.DAILY_AI_NEWS_SOURCES || 'https://cointelegraph.com/rss,https://www.coindesk.com/arc/outboundfeeds/rss/,https://bitcoinmagazine.com/feed' }}
+      DAILY_AI_NEWS_MAX_ITEMS: ${{ vars.DAILY_AI_NEWS_MAX_ITEMS || '5' }}
+      DAILY_AI_NEWS_TIMEOUT_SECONDS: ${{ vars.DAILY_AI_NEWS_TIMEOUT_SECONDS || '8' }}
+      DAILY_AI_LLM_ENABLE: ${{ vars.DAILY_AI_LLM_ENABLE || 'true' }}
+      DAILY_AI_LLM_PROVIDER: ${{ vars.DAILY_AI_LLM_PROVIDER || 'gemini' }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.8-flash' }}
+      DAILY_AI_LLM_MAX_OUTPUT_TOKENS: ${{ vars.DAILY_AI_LLM_MAX_OUTPUT_TOKENS || '700' }}
+      DAILY_AI_LLM_TIMEOUT_SECONDS: ${{ vars.DAILY_AI_LLM_TIMEOUT_SECONDS || '25' }}
+      DAILY_AI_CALIBRATION_MIN_SAMPLES: ${{ vars.DAILY_AI_CALIBRATION_MIN_SAMPLES || '5' }}
       TELEGRAM_ALERT_AI_LIVE_ENABLE: ${{ vars.TELEGRAM_ALERT_AI_LIVE_ENABLE || 'true' }}
       TELEGRAM_ALERT_AI_MODEL_PATH: ${{ vars.TELEGRAM_ALERT_AI_MODEL_PATH || '.data/research/live/phase3_meta_model.joblib' }}
       TELEGRAM_ALERT_AI_MODEL_URL: ${{ secrets.TELEGRAM_ALERT_AI_MODEL_URL || vars.TELEGRAM_ALERT_AI_MODEL_URL || '' }}

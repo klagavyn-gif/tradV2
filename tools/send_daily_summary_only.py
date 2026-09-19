@@ -38,6 +38,20 @@ def _read_json(path_text):
         return {}
 
 
+def _append_capped(base, section, *, limit):
+    base_text = str(base or "")
+    section_text = str(section or "")
+    if not section_text:
+        return base_text
+    if len(base_text) + len(section_text) + 2 <= limit:
+        return base_text + "\n\n" + section_text
+    allowed = max(0, limit - len(base_text) - 20)
+    trimmed = section_text[:allowed]
+    if "\n" in trimmed:
+        trimmed = trimmed.rsplit("\n", 1)[0]
+    return (base_text + "\n\n" + trimmed.rstrip() + "\n…").strip()
+
+
 def _load_summary_candidates(trad):
     latest_run = _read_json(trad._alert_run_report_file_path())
     if not isinstance(latest_run, dict):
@@ -130,6 +144,35 @@ def main(argv=None):
         min_conf=dynamic_min_conf,
     )
 
+    outlook_payload = None
+    outlook_path = None
+    if isinstance(daily_summary, dict) and bool(getattr(trad.config, "DAILY_AI_OUTLOOK_ENABLE", True)):
+        try:
+            from alerts.daily_outlook import build_daily_ai_outlook
+
+            alert_history = trad._read_telegram_alert_history(days=2)
+            outcomes_payload = _read_json(trad._alert_outcomes_file_path())
+            outcomes = outcomes_payload.get("outcomes") if isinstance(outcomes_payload, dict) else []
+            outlook = build_daily_ai_outlook(
+                config=trad.config,
+                candidates=existing_candidates,
+                alert_history=alert_history,
+                outcomes=outcomes,
+                now=trad.get_thai_now(),
+            )
+        except Exception as exc:
+            trad.logger.warning("Daily AI outlook failed: %s", exc)
+            outlook = None
+        if isinstance(outlook, dict):
+            base_html = str(daily_summary.get("message") or "")
+            base_plain = str(daily_summary.get("message_plain") or "")
+            daily_summary["message"] = _append_capped(base_html, outlook.get("message"), limit=4000)
+            if base_plain:
+                daily_summary["message_plain"] = _append_capped(base_plain, outlook.get("plain"), limit=4000)
+            outlook_payload = outlook.get("payload") or {}
+            outlook_path = Path(trad._alert_history_dir()) / "daily_ai_outlook.json"
+            _write_json(str(outlook_path), outlook_payload)
+
     recent_cache_keys = trad._load_recent_alert_cache_keys(
         trad.get_thai_now,
         max_age_seconds=26 * 60 * 60,
@@ -169,6 +212,14 @@ def main(argv=None):
         "generated_at": trad.get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
         "candidate_count": len(existing_candidates or []),
         "quality_drop_counts": latest_run.get("quality_drop_counts") if isinstance(latest_run, dict) else {},
+        "ai_outlook": {
+            "enabled": bool(getattr(trad.config, "DAILY_AI_OUTLOOK_ENABLE", True)),
+            "bias": (outlook_payload or {}).get("bias"),
+            "llm_used": bool((outlook_payload or {}).get("llm_used")),
+            "news_count": len((outlook_payload or {}).get("news") or []),
+            "calibration_buckets": len((outlook_payload or {}).get("calibration") or []),
+        },
+        "ai_outlook_path": str(outlook_path) if outlook_path else None,
     }
     if args.verify_output:
         payload["verify_output_path"] = _write_json(args.verify_output, payload)

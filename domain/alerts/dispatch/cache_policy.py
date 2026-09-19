@@ -16,6 +16,33 @@ def build_daily_pick_cache_key(get_now, candidate):
     return f"DAILYBEST|{get_now().strftime('%Y%m%d')}|{candidate.get('symbol')}|{candidate.get('signal')}"
 
 
+def build_symbol_intent_key(candidate):
+    """Return a stable cooldown key for intent class + symbol + side.
+
+    The regular cache key embeds the signal timestamp, so a rolling signal
+    produces a new key every bar and bypasses the cooldown. This key ignores
+    the timestamp so the same symbol and side cannot be re-alerted inside the
+    symbol cooldown window. Intent classes are separated so a watch alert does
+    not block a later confirmed entry for the same symbol.
+    """
+    if not isinstance(candidate, dict):
+        return ""
+    symbol = str(candidate.get("symbol") or "").strip().upper()
+    if not symbol:
+        return ""
+    signal = str(candidate.get("signal") or "").strip().upper()
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+    if intent == "watch":
+        intent_class = "watch"
+    elif intent == "entry":
+        intent_class = "entry"
+    elif intent == "exit":
+        intent_class = "exit"
+    else:
+        intent_class = "other"
+    return f"{intent_class}|{symbol}|{signal}"
+
+
 def build_global_trade_alert_cache_key(get_now):
     return f"GLOBALTRADE|{get_now().strftime('%Y%m%d')}"
 

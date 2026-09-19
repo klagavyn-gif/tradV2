@@ -31,6 +31,7 @@ from application.services.report_service import (
     handle_telegram_alert_report_request as _app_handle_telegram_alert_report_request,
 )
 from application.services import service_support as _service_support
+from domain.alerts.dispatch.cache_policy import build_symbol_intent_key as _domain_build_symbol_intent_key
 from domain.alerts.trend_radar import build_trend_radar_candidates as _domain_build_trend_radar_candidates
 from domain.alerts.trend_state import build_trend_state_candidates as _domain_build_trend_state_candidates
 from domain.alerts.trend_1h import infer_1h_trend_snapshot
@@ -6121,6 +6122,7 @@ def _pipeline_module_helpers():
         "telegram_alert_cache": _TELEGRAM_ALERT_CACHE,
         "global_trade_counter": _GLOBAL_TRADE_COUNTER,
         "load_recent_alert_cache_keys": _load_recent_alert_cache_keys,
+        "load_recent_symbol_alert_keys": _load_recent_symbol_alert_keys,
         "record_telegram_alert_history": _record_telegram_alert_history,
         "record_shadow_alert_history": _record_shadow_alert_history,
         "track_alert_performance": _track_alert_performance,
@@ -6461,6 +6463,58 @@ def _load_recent_alert_cache_keys(get_now, max_age_seconds=12 * 3600):
                     continue
                 if cache_key not in result or ts > result[cache_key]:
                     result[cache_key] = ts
+    except Exception:
+        pass
+    return result
+
+
+def _load_recent_symbol_alert_keys(get_now, max_age_seconds=26 * 3600):
+    """Load {symbol_intent_key: latest_timestamp} for alerts sent recently.
+
+    The cache-key cooldown embeds the signal timestamp, so a rolling signal
+    produces a new key every bar and bypasses the cooldown. This key is
+    timestamp-free so the same symbol and side cannot be re-alerted inside the
+    symbol cooldown window, while still allowing a watch alert to be followed
+    by a confirmed entry."""
+    path = _alert_history_file_path()
+    result = {}
+    if not os.path.exists(path) or not callable(get_now):
+        return result
+    try:
+        now_dt = get_now()
+        if not isinstance(now_dt, datetime):
+            return result
+        cutoff = now_dt - timedelta(seconds=max_age_seconds)
+    except Exception:
+        return result
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = str(line or "").strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                symbol_key = _domain_build_symbol_intent_key(row)
+                if not symbol_key:
+                    continue
+                ts_text = str(row.get("timestamp") or "").strip()
+                ts = None
+                try:
+                    ts = datetime.strptime(ts_text, "%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    try:
+                        ts = datetime.strptime(ts_text, "%Y-%m-%d %H:%M")
+                    except Exception:
+                        continue
+                if ts < cutoff:
+                    continue
+                if symbol_key not in result or ts > result[symbol_key]:
+                    result[symbol_key] = ts
     except Exception:
         pass
     return result

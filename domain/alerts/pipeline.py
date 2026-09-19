@@ -285,6 +285,58 @@ def _filter_candidates_by_intent(candidates, *, include_exit=False, include_watc
     return filtered
 
 
+def _optional_float(value):
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
+
+
+def _watch_candidate_suppression_reason(candidate, *, config):
+    if not isinstance(candidate, dict):
+        return None
+    if str(candidate.get("alert_intent") or "").strip().lower() != "watch":
+        return None
+    buckets_text = str(getattr(config, "TELEGRAM_ALERT_WATCH_SUPPRESS_AI_BUCKETS", "low_conviction") or "")
+    suppress_buckets = {item.strip().lower() for item in buckets_text.split(",") if item.strip()}
+    ai_bucket = str(candidate.get("ai_dispatch_bucket") or "").strip().lower()
+    if ai_bucket and ai_bucket in suppress_buckets:
+        return "ai_bucket"
+    min_prob = coerce_float(getattr(config, "TELEGRAM_ALERT_WATCH_MIN_AI_PROB_WIN", 0.45), 0.45)
+    prob_win = _optional_float(candidate.get("ai_prob_win"))
+    if prob_win is not None and prob_win < min_prob:
+        return "ai_prob_win_below_min"
+    min_return = coerce_float(getattr(config, "TELEGRAM_ALERT_WATCH_MIN_AI_EXPECTED_RETURN_PCT", 0.0), 0.0)
+    expected_return = _optional_float(candidate.get("ai_expected_return_pct"))
+    if expected_return is not None and expected_return < min_return:
+        return "expected_return_below_min"
+    return None
+
+
+def _suppress_low_quality_watch_candidates(candidates, *, config, quality_drop_counts=None, prefix="primary"):
+    if not bool(getattr(config, "TELEGRAM_ALERT_WATCH_QUALITY_GATE_ENABLE", True)):
+        return list(candidates or [])
+    filtered = []
+    suppressed = 0
+    reason_counts = {}
+    for row in candidates or []:
+        reason = _watch_candidate_suppression_reason(row, config=config)
+        if reason is None:
+            filtered.append(row)
+            continue
+        suppressed += 1
+        reason_counts[reason] = int(reason_counts.get(reason, 0)) + 1
+    if isinstance(quality_drop_counts, dict) and suppressed > 0:
+        key = f"{prefix}_watch_quality_suppressed"
+        quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + suppressed
+        for reason, count in reason_counts.items():
+            detail_key = f"{prefix}_watch_quality_suppressed_{reason}"
+            quality_drop_counts[detail_key] = int(quality_drop_counts.get(detail_key, 0)) + int(count)
+    return filtered
+
+
 def _apply_short_trade_dispatch_policy(candidates, *, config, quality_drop_counts=None, prefix="primary"):
     if not bool(getattr(config, "TELEGRAM_ALERT_SHORT_TRADE_ENABLE", True)):
         return list(candidates or [])
@@ -344,6 +396,12 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
     recent_cache_keys = (
         load_recent_alert_cache_keys(get_now, max_age_seconds=26 * 60 * 60)
         if callable(load_recent_alert_cache_keys)
+        else {}
+    )
+    load_recent_symbol_alert_keys = helpers.get("load_recent_symbol_alert_keys")
+    recent_symbol_keys = (
+        load_recent_symbol_alert_keys(get_now, max_age_seconds=26 * 60 * 60)
+        if callable(load_recent_symbol_alert_keys)
         else {}
     )
     record_telegram_alert_history = helpers["record_telegram_alert_history"]
@@ -434,6 +492,12 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         quality_drop_counts=quality_drop_counts,
         prefix="primary",
     )
+    dispatch_candidates = _suppress_low_quality_watch_candidates(
+        dispatch_candidates,
+        config=config,
+        quality_drop_counts=quality_drop_counts,
+        prefix="primary",
+    )
     dispatch_candidates = _apply_short_trade_dispatch_policy(
         dispatch_candidates,
         config=config,
@@ -449,11 +513,20 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         limits=limits,
         global_trade_counter=global_trade_counter,
         recent_cache_keys=recent_cache_keys,
+        recent_symbol_keys=recent_symbol_keys,
+        symbol_cooldown_ttl=limits.get("symbol_cooldown_ttl", 0),
+        watch_symbol_cooldown_ttl=limits.get("watch_symbol_cooldown_ttl", 0),
     )
     sent = int(primary_dispatch["sent"])
     dropped_by_cache = int(primary_dispatch["dropped_by_cache"])
     dropped_by_symbol_cap = int(primary_dispatch["dropped_by_symbol_cap"])
     dropped_by_run_cap = int(primary_dispatch["dropped_by_run_cap"])
+    dropped_by_symbol_cooldown = int(primary_dispatch.get("dropped_by_symbol_cooldown") or 0)
+    if dropped_by_symbol_cooldown > 0:
+        dropped_by_cache += dropped_by_symbol_cooldown
+        quality_drop_counts["primary_symbol_cooldown_suppressed"] = (
+            int(quality_drop_counts.get("primary_symbol_cooldown_suppressed", 0)) + dropped_by_symbol_cooldown
+        )
     per_symbol_sent = dict(primary_dispatch["per_symbol_sent"])
     sent_candidates = list(primary_dispatch["sent_candidates"])
 
@@ -537,6 +610,9 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             limits=limits,
             global_trade_counter=global_trade_counter,
             recent_cache_keys=recent_cache_keys,
+            recent_symbol_keys=recent_symbol_keys,
+            symbol_cooldown_ttl=limits.get("symbol_cooldown_ttl", 0),
+            watch_symbol_cooldown_ttl=limits.get("watch_symbol_cooldown_ttl", 0),
         )
         trend_radar_sent = int(trend_radar_dispatch["sent"])
         per_symbol_sent = dict(trend_radar_dispatch["per_symbol_sent"])
@@ -564,6 +640,9 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
             limits=limits,
             global_trade_counter=global_trade_counter,
             recent_cache_keys=recent_cache_keys,
+            recent_symbol_keys=recent_symbol_keys,
+            symbol_cooldown_ttl=limits.get("symbol_cooldown_ttl", 0),
+            watch_symbol_cooldown_ttl=limits.get("watch_symbol_cooldown_ttl", 0),
         )
         trend_state_sent = int(trend_state_dispatch["sent"])
         per_symbol_sent = dict(trend_state_dispatch["per_symbol_sent"])
@@ -571,7 +650,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         sent += trend_state_sent
 
     logger.info(
-        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s trend_radar=%s trend_state=%s dropped(cache=%s symbol_cap=%s run_cap=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f budget=%s",
+        "Telegram alerts: sent=%s candidates=%s daily_pick=%s daily_summary=%s trend_radar=%s trend_state=%s dropped(cache=%s symbol_cap=%s run_cap=%s symbol_cooldown=%s quality=%s) min_conf=%.1f dynamic_min_conf=%.1f budget=%s",
         sent,
         len(candidates),
         daily_pick_sent,
@@ -581,6 +660,7 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         dropped_by_cache,
         dropped_by_symbol_cap,
         dropped_by_run_cap,
+        dropped_by_symbol_cooldown,
         json.dumps(quality_drop_counts, ensure_ascii=False),
         min_conf,
         dynamic_min_conf,

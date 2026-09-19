@@ -1,5 +1,6 @@
 from domain.alerts.dispatch.cache_policy import (
     build_daily_pick_cache_key,
+    build_symbol_intent_key,
     cache_contains,
     cache_mark_sent,
     mark_global_trade_alert_sent,
@@ -26,6 +27,49 @@ def _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_se
         return sent_at >= now - timedelta(seconds=int(cooldown_seconds))
     except Exception:
         return False
+
+
+def _symbol_cooldown_ttl(candidate, *, symbol_cooldown_ttl, watch_symbol_cooldown_ttl):
+    intent = str((candidate or {}).get("alert_intent") or "").strip().lower()
+    if intent == "watch":
+        try:
+            watch_ttl = int(watch_symbol_cooldown_ttl or 0)
+        except Exception:
+            watch_ttl = 0
+        if watch_ttl > 0:
+            return watch_ttl
+    try:
+        return int(symbol_cooldown_ttl or 0)
+    except Exception:
+        return 0
+
+
+def _symbol_recently_sent(recent_symbol_keys, candidate, *, get_now, symbol_cooldown_ttl, watch_symbol_cooldown_ttl):
+    symbol_key = build_symbol_intent_key(candidate)
+    if not symbol_key:
+        return False
+    ttl = _symbol_cooldown_ttl(
+        candidate,
+        symbol_cooldown_ttl=symbol_cooldown_ttl,
+        watch_symbol_cooldown_ttl=watch_symbol_cooldown_ttl,
+    )
+    if ttl <= 0:
+        return False
+    return _recently_sent_in_history(recent_symbol_keys, symbol_key, get_now, ttl)
+
+
+def _mark_symbol_sent(recent_symbol_keys, candidate, *, get_now):
+    if not isinstance(recent_symbol_keys, dict):
+        return
+    symbol_key = build_symbol_intent_key(candidate)
+    if not symbol_key:
+        return
+    try:
+        now = get_now()
+    except Exception:
+        return
+    if isinstance(now, datetime):
+        recent_symbol_keys[symbol_key] = now
 
 
 def _parse_candidate_datetime(value):
@@ -78,12 +122,16 @@ def dispatch_primary_candidates(
     limits,
     global_trade_counter=None,
     recent_cache_keys=None,
+    recent_symbol_keys=None,
+    symbol_cooldown_ttl=0,
+    watch_symbol_cooldown_ttl=0,
 ):
     sent = 0
     dropped_by_cache = 0
     dropped_by_symbol_cap = 0
     dropped_by_run_cap = 0
     dropped_by_daily_cap = 0
+    dropped_by_symbol_cooldown = 0
     per_symbol_sent = {}
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
@@ -111,6 +159,15 @@ def dispatch_primary_candidates(
         if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, limits["cooldown_ttl"]):
             dropped_by_cache += 1
             continue
+        if _symbol_recently_sent(
+            recent_symbol_keys,
+            candidate,
+            get_now=get_now,
+            symbol_cooldown_ttl=symbol_cooldown_ttl,
+            watch_symbol_cooldown_ttl=watch_symbol_cooldown_ttl,
+        ):
+            dropped_by_symbol_cooldown += 1
+            continue
         message = candidate.get("message")
         if not isinstance(message, str) or not message.strip():
             continue
@@ -124,6 +181,7 @@ def dispatch_primary_candidates(
                 )
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
             sent += 1
+            _mark_symbol_sent(recent_symbol_keys, candidate, get_now=get_now)
             _mark_candidate_sent(candidate, get_now=get_now)
             sent_candidates.append(candidate)
             record_telegram_alert_history(
@@ -141,6 +199,7 @@ def dispatch_primary_candidates(
         "dropped_by_symbol_cap": dropped_by_symbol_cap,
         "dropped_by_run_cap": dropped_by_run_cap,
         "dropped_by_daily_cap": dropped_by_daily_cap,
+        "dropped_by_symbol_cooldown": dropped_by_symbol_cooldown,
     }
 
 
@@ -251,12 +310,16 @@ def dispatch_trend_state_candidates(
     limits=None,
     global_trade_counter=None,
     recent_cache_keys=None,
+    recent_symbol_keys=None,
+    symbol_cooldown_ttl=0,
+    watch_symbol_cooldown_ttl=0,
 ):
     sent = 0
     dropped_by_cache = 0
     dropped_by_symbol_cap = 0
     dropped_by_run_cap = 0
     dropped_by_daily_cap = 0
+    dropped_by_symbol_cooldown = 0
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
     counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
@@ -283,6 +346,15 @@ def dispatch_trend_state_candidates(
         if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_ttl):
             dropped_by_cache += 1
             continue
+        if _symbol_recently_sent(
+            recent_symbol_keys,
+            candidate,
+            get_now=get_now,
+            symbol_cooldown_ttl=symbol_cooldown_ttl,
+            watch_symbol_cooldown_ttl=watch_symbol_cooldown_ttl,
+        ):
+            dropped_by_symbol_cooldown += 1
+            continue
         message = candidate.get("message")
         if not isinstance(message, str) or not message.strip():
             continue
@@ -298,6 +370,7 @@ def dispatch_trend_state_candidates(
         if symbol:
             per_symbol_sent[symbol] = int(per_symbol_sent.get(symbol, 0)) + 1
         sent += 1
+        _mark_symbol_sent(recent_symbol_keys, candidate, get_now=get_now)
         _mark_candidate_sent(candidate, get_now=get_now)
         sent_candidates.append(candidate)
         record_telegram_alert_history(
@@ -315,6 +388,7 @@ def dispatch_trend_state_candidates(
         "dropped_by_symbol_cap": dropped_by_symbol_cap,
         "dropped_by_run_cap": dropped_by_run_cap,
         "dropped_by_daily_cap": dropped_by_daily_cap,
+        "dropped_by_symbol_cooldown": dropped_by_symbol_cooldown,
     }
 
 
@@ -335,12 +409,16 @@ def dispatch_trend_radar_candidates(
     limits=None,
     global_trade_counter=None,
     recent_cache_keys=None,
+    recent_symbol_keys=None,
+    symbol_cooldown_ttl=0,
+    watch_symbol_cooldown_ttl=0,
 ):
     sent = 0
     dropped_by_cache = 0
     dropped_by_symbol_cap = 0
     dropped_by_run_cap = 0
     dropped_by_daily_cap = 0
+    dropped_by_symbol_cooldown = 0
     sent_candidates = []
     max_trade_remaining, global_trade_ttl = _resolve_trade_budget(limits)
     counter = global_trade_counter if global_trade_counter is not None else telegram_alert_cache
@@ -369,6 +447,15 @@ def dispatch_trend_radar_candidates(
         if _recently_sent_in_history(recent_cache_keys, cache_key, get_now, cooldown_ttl):
             dropped_by_cache += 1
             continue
+        if _symbol_recently_sent(
+            recent_symbol_keys,
+            candidate,
+            get_now=get_now,
+            symbol_cooldown_ttl=symbol_cooldown_ttl,
+            watch_symbol_cooldown_ttl=watch_symbol_cooldown_ttl,
+        ):
+            dropped_by_symbol_cooldown += 1
+            continue
         message = candidate.get("message")
         if not isinstance(message, str) or not message.strip():
             continue
@@ -384,6 +471,7 @@ def dispatch_trend_radar_candidates(
         if symbol:
             per_symbol_sent[symbol] = existing_symbol_alerts + 1
         sent += 1
+        _mark_symbol_sent(recent_symbol_keys, candidate, get_now=get_now)
         _mark_candidate_sent(candidate, get_now=get_now)
         sent_candidates.append(candidate)
         record_telegram_alert_history(
@@ -401,4 +489,5 @@ def dispatch_trend_radar_candidates(
         "dropped_by_symbol_cap": dropped_by_symbol_cap,
         "dropped_by_run_cap": dropped_by_run_cap,
         "dropped_by_daily_cap": dropped_by_daily_cap,
+        "dropped_by_symbol_cooldown": dropped_by_symbol_cooldown,
     }

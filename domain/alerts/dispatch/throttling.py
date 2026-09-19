@@ -25,6 +25,14 @@ def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram
     max_per_run = coerce_int(getattr(config, "TELEGRAM_ALERT_MAX_PER_RUN", 5), 5)
     max_per_symbol = coerce_int(getattr(config, "TELEGRAM_ALERT_MAX_PER_SYMBOL", 1), 1)
     cooldown_minutes = coerce_int(getattr(config, "TELEGRAM_ALERT_COOLDOWN_MINUTES", 30), 30)
+    symbol_cooldown_enabled = bool(getattr(config, "TELEGRAM_ALERT_SYMBOL_COOLDOWN_ENABLE", True))
+    symbol_cooldown_minutes = coerce_int(getattr(config, "TELEGRAM_ALERT_SYMBOL_COOLDOWN_MINUTES", 90), 90)
+    watch_symbol_cooldown_minutes = coerce_int(
+        getattr(config, "TELEGRAM_ALERT_WATCH_SYMBOL_COOLDOWN_MINUTES", 240),
+        240,
+    )
+    symbol_cooldown_ttl = max(60, int(symbol_cooldown_minutes * 60)) if symbol_cooldown_enabled else 0
+    watch_symbol_cooldown_ttl = max(60, int(watch_symbol_cooldown_minutes * 60)) if symbol_cooldown_enabled else 0
     alert_budget = (runtime_context or {}).get("alert_budget") or {}
     if isinstance(alert_budget, dict):
         try:
@@ -65,6 +73,11 @@ def resolve_dispatch_settings(config, runtime_context, *, get_now=None, telegram
         "max_per_symbol": max_per_symbol,
         "cooldown_minutes": cooldown_minutes,
         "cooldown_ttl": max(60, int(cooldown_minutes * 60)),
+        "symbol_cooldown_enabled": symbol_cooldown_enabled,
+        "symbol_cooldown_minutes": symbol_cooldown_minutes,
+        "watch_symbol_cooldown_minutes": watch_symbol_cooldown_minutes,
+        "symbol_cooldown_ttl": symbol_cooldown_ttl,
+        "watch_symbol_cooldown_ttl": watch_symbol_cooldown_ttl,
         "alert_budget": alert_budget if isinstance(alert_budget, dict) else {},
         "max_trade_alerts_remaining": max_trade_alerts_remaining,
         "global_trade_alert_ttl": global_trade_alert_ttl,

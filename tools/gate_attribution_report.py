@@ -18,6 +18,7 @@ DEFAULT_JSON = PROJECT_ROOT / ".data" / "telegram_alerts" / "gate_attribution_re
 
 OVER_FILTER_MARGIN_R = 0.5
 STALE_CONFOUND_BARS = 4.0
+DEFAULT_ENTRY_WIN_RATE_FLOOR = 57.0
 DATA_GATE_TOKENS = ("missing", "not_available", "no_actionable", "no_primary_plan", "insufficient")
 
 
@@ -345,7 +346,7 @@ def _matched_passed_metrics(profile, passed):
     )
 
 
-def build_gate_rows(aggregated, baseline, passed, *, min_blocked):
+def build_gate_rows(aggregated, baseline, passed, *, min_blocked, win_rate_floor=DEFAULT_ENTRY_WIN_RATE_FLOOR):
     unique_rejects = aggregated.get("unique_rejects") or {}
     volume = aggregated.get("volume") or Counter()
     rows = []
@@ -380,6 +381,8 @@ def build_gate_rows(aggregated, baseline, passed, *, min_blocked):
             profile["flag"] = "data_gate"
         elif not isinstance(delta, float):
             profile["flag"] = "insufficient_metrics"
+        elif isinstance(profile.get("avg_backtest_win_rate_pct"), float) and profile["avg_backtest_win_rate_pct"] < float(win_rate_floor):
+            profile["flag"] = "low_win_rate_blocked"
         elif delta > OVER_FILTER_MARGIN_R:
             profile["flag"] = (
                 "stale_confounded"
@@ -411,6 +414,7 @@ def _render_markdown(payload):
         ),
         "- cost_bps: {}".format(request.get("cost_bps")),
         "- min_blocked: {}".format(request.get("min_blocked")),
+        "- entry_win_rate_floor: {}".format(request.get("entry_win_rate_floor")),
         "",
         "## Baseline (entry only, settled, net of cost)",
         "- settled: {}".format(baseline.get("settled_entries")),
@@ -426,17 +430,18 @@ def _render_markdown(payload):
         "- avg bars since signal: {}".format(_fmt((payload.get("passed") or {}).get("avg_bars_since_signal"), 2)),
         "",
         "## Gates",
-        "| gate | unique blocked | raw drops | share | avg conf | bt expRR | matched expRR | delta vs passed | blocked bars | delta bars | regret proxy (R) | flag |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| gate | unique blocked | raw drops | share | avg conf | bt WR | bt expRR | matched expRR | delta vs passed | blocked bars | delta bars | regret proxy (R) | flag |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         lines.append(
-            "| {reason} | {n} | {raw} | {share} | {conf} | {exp} | {matched} | {delta} | {bars} | {dbars} | {regret} | {flag} |".format(
+            "| {reason} | {n} | {raw} | {share} | {conf} | {wr} | {exp} | {matched} | {delta} | {bars} | {dbars} | {regret} | {flag} |".format(
                 reason=str(row.get("reason") or ""),
                 n=int(row.get("n") or 0),
                 raw=int(row.get("raw_drops") or 0),
                 share=_fmt(row.get("share_pct"), 1, "%"),
                 conf=_fmt(row.get("avg_confidence"), 1),
+                wr=_fmt(row.get("avg_backtest_win_rate_pct"), 1, "%"),
                 exp=_fmt(row.get("avg_backtest_expectancy_rr"), 3),
                 matched=_fmt(row.get("matched_passed_expectancy_rr"), 3),
                 delta=_fmt(row.get("delta_vs_passed_r"), 3),
@@ -453,6 +458,7 @@ def _render_markdown(payload):
     lines.append("- `delta vs passed` = expRR ของ candidate ที่ถูกบล็อก ลบ matched passed (บวก = บล็อกของที่ดีกว่าที่ส่ง)")
     lines.append("- `delta bars` = ความเก่าของสัญญาณที่ถูกบล็อก ลบของที่ผ่าน (บวกมาก = ที่ถูกบล็อกเก่ากว่า)")
     lines.append("- `stale_confounded` = delta เป็นบวกแต่ที่ถูกบล็อกเก่ากว่ามาก จึงยังสรุปว่า gate กรองเกินไม่ได้")
+    lines.append("- `low_win_rate_blocked` = ที่ถูกบล็อกมี backtest WR ต่ำกว่า floor จึงถือว่าบล็อกถูกต้อง")
     lines.append("- `regret proxy` = unique blocked x delta (บวก = อาจเสียโอกาส, ลบ = อาจช่วยประหยัด)")
     lines.append("- `data_gate` = gate ที่บล็อกเพราะข้อมูลไม่พอ ไม่ใช่ตัดสินคุณภาพ")
     lines.append("- ค่านี้เป็น **proxy** จาก backtest metrics ไม่ใช่ counterfactual outcome จริง")
@@ -538,6 +544,12 @@ def build_parser():
     parser.add_argument("--window-days", type=float, default=45.0)
     parser.add_argument("--cost-bps", type=float, default=30.0)
     parser.add_argument("--min-blocked", type=int, default=20)
+    parser.add_argument(
+        "--entry-win-rate-floor",
+        type=float,
+        default=DEFAULT_ENTRY_WIN_RATE_FLOOR,
+        help="Entry win-rate floor; gates blocking candidates below it are justified",
+    )
     parser.add_argument("--notify-telegram", action="store_true")
     parser.add_argument("--output-path", default=str(DEFAULT_MARKDOWN))
     parser.add_argument("--json-output-path", default=str(DEFAULT_JSON))
@@ -560,7 +572,13 @@ def main(argv=None):
     baseline = build_baseline(outcomes, cost_bps=args.cost_bps)
     aggregated = aggregate_gates(run_reports, window_days=args.window_days, now=now)
     passed = aggregate_passed(run_reports, window_days=args.window_days, now=now)
-    gates = build_gate_rows(aggregated, baseline, passed, min_blocked=args.min_blocked)
+    gates = build_gate_rows(
+        aggregated,
+        baseline,
+        passed,
+        min_blocked=args.min_blocked,
+        win_rate_floor=args.entry_win_rate_floor,
+    )
 
     payload = {
         "generated_at": now.strftime("%Y-%m-%d %H:%M:%S"),
@@ -571,6 +589,7 @@ def main(argv=None):
             "window_days": float(args.window_days) if args.window_days and args.window_days > 0 else None,
             "cost_bps": float(args.cost_bps),
             "min_blocked": int(args.min_blocked),
+            "entry_win_rate_floor": float(args.entry_win_rate_floor),
         },
         "baseline": baseline,
         "passed": {

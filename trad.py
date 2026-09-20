@@ -3358,6 +3358,14 @@ def _all_weather_plan_candidates(item, regime):
         gate_ok, gate_reason, edge = _evaluate_entry_quality_gate(plan, direction)
         aw_gate_relaxed = False
         aw_score_penalty = 0.0
+        bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
+        win_rate = edge.get("win_rate_pct")
+        expectancy = edge.get("expectancy_rr")
+        trades = edge.get("trades")
+        metrics_bonus = _all_weather_metrics_bonus(win_rate, expectancy, trades)
+        freshness_bonus = _all_weather_freshness_bonus(bars_since)
+        regime_weight = _all_weather_regime_weight(label, regime)
+        base_score = float(confidence) + metrics_bonus + freshness_bonus + ((float(regime_weight) - 1.0) * 16.0)
         if not gate_ok:
             relax_cdc_trades = bool(getattr(config, "ALL_WEATHER_15M_CDC_RELAX_TRADES_BELOW_MIN", True))
             relax_min_conf = getattr(config, "ALL_WEATHER_15M_CDC_RELAX_MIN_CONFIDENCE", 82.0)
@@ -3386,26 +3394,20 @@ def _all_weather_plan_candidates(item, regime):
                         "aw_gate_reason": str(gate_reason or "filtered"),
                         "aw_gate_relaxed": False,
                         "aw_score_penalty": 0.0,
-                        "win_rate_pct": float(edge.get("win_rate_pct")) if isinstance(edge.get("win_rate_pct"), (int, float)) else None,
-                        "expectancy_rr": float(edge.get("expectancy_rr")) if isinstance(edge.get("expectancy_rr"), (int, float)) else None,
-                        "trades": float(edge.get("trades")) if isinstance(edge.get("trades"), (int, float)) else None,
-                        "bars_since_signal": float(_pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"]))
-                        if isinstance(_pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"]), (int, float))
-                        else None,
+                        "win_rate_pct": float(win_rate) if isinstance(win_rate, (int, float)) else None,
+                        "expectancy_rr": float(expectancy) if isinstance(expectancy, (int, float)) else None,
+                        "trades": float(trades) if isinstance(trades, (int, float)) else None,
+                        "bars_since_signal": float(bars_since) if isinstance(bars_since, (int, float)) else None,
+                        "regime_weight": float(regime_weight),
+                        "metrics_bonus": float(metrics_bonus),
+                        "freshness_bonus": float(freshness_bonus),
+                        "score": float(base_score),
                     }
                 )
                 continue
             aw_gate_relaxed = True
             aw_score_penalty = float(relax_penalty)
-        bars_since = _pick_plan_value(plan, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
-        win_rate = edge.get("win_rate_pct")
-        expectancy = edge.get("expectancy_rr")
-        trades = edge.get("trades")
-        metrics_bonus = _all_weather_metrics_bonus(win_rate, expectancy, trades)
-        freshness_bonus = _all_weather_freshness_bonus(bars_since)
-        regime_weight = _all_weather_regime_weight(label, regime)
-        score = float(confidence) + metrics_bonus + freshness_bonus + ((float(regime_weight) - 1.0) * 16.0)
-        score -= float(aw_score_penalty)
+        score = float(base_score) - float(aw_score_penalty)
         candidates.append(
             {
                 "label": label,

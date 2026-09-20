@@ -102,7 +102,7 @@ def build_parser():
     )
     parser.add_argument(
         "--research-strategy-supplements",
-        default="PA15",
+        default="PA15,AW15",
         help="Optional comma-separated research-only strategy supplements to add to Phase 1 dataset without changing live alert behavior",
     )
     parser.add_argument(
@@ -469,10 +469,127 @@ def _research_entry_intent(*, trad, candidate):
     return "watch", f"research_stretched_entry:d_pct={distance_pct:.4f},d_r={distance_r:.4f}" if distance_r is not None else f"research_stretched_entry:d_pct={distance_pct:.4f}"
 
 
+def _aw15_plan_levels(plan, signal=None):
+    if not isinstance(plan, dict):
+        return None, None, None
+    entry_price = None
+    for key in ("entry_price", "current_price", "price"):
+        parsed = _safe_float(plan.get(key), None)
+        if parsed is not None:
+            entry_price = parsed
+            break
+    stop_loss = _safe_float(plan.get("stop_loss"), None)
+    take_profit = None
+    for key in ("take_profit", "take_profit_2", "exit_price"):
+        parsed = _safe_float(plan.get(key), None)
+        if parsed is not None:
+            take_profit = parsed
+            break
+    level_tp = None
+    levels = plan.get("exit_levels")
+    if isinstance(levels, list) and levels and isinstance(levels[0], dict):
+        level_tp = _safe_float(levels[0].get("target_price"), None)
+    # All-Weather sub-plans (e.g. CDCVixFix) carry their targets in exit_levels,
+    # so fall back to the first target when take_profit is missing or sits on
+    # the wrong side of entry.
+    signal = str(signal or plan.get("signal") or "").strip().upper()
+    if entry_price is not None and take_profit is not None:
+        wrong_side = (signal == "BUY" and take_profit <= entry_price) or (
+            signal == "SELL" and take_profit >= entry_price
+        )
+        if wrong_side:
+            take_profit = None
+    if take_profit is None:
+        take_profit = level_tp
+    return entry_price, stop_loss, take_profit
+
+
+def _build_aw15_research_candidates(*, trad, results, existing_keys, min_confidence, min_score):
+    """Capture All-Weather sub-plan candidates for research even when the live
+    gates would drop them, so the entry AI can learn the AW15 strategy."""
+    supplements = []
+    for item in results or []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        symbol = str(item.get("symbol") or "").strip().upper()
+        if not symbol:
+            continue
+        try:
+            regime = str((trad._all_weather_market_regime(item) or {}).get("regime") or "RANGE")
+        except Exception:
+            regime = "RANGE"
+        try:
+            candidates, rejected = trad._all_weather_plan_candidates(item, regime)
+        except Exception:
+            continue
+        best = None
+        for row in list(candidates or []) + list(rejected or []):
+            if not isinstance(row, dict):
+                continue
+            plan = row.get("plan")
+            if not isinstance(plan, dict):
+                continue
+            signal = str(row.get("signal") or "").strip().upper()
+            if signal not in {"BUY", "SELL"}:
+                continue
+            confidence = _safe_float(row.get("confidence"), None)
+            score = _safe_float(row.get("score"), None)
+            if confidence is None or confidence < float(min_confidence):
+                continue
+            if score is None or score < float(min_score):
+                continue
+            entry_price, stop_loss, take_profit = _aw15_plan_levels(plan, signal)
+            if entry_price is None or stop_loss is None or take_profit is None:
+                continue
+            if signal == "BUY" and not (stop_loss < entry_price < take_profit):
+                continue
+            if signal == "SELL" and not (take_profit < entry_price < stop_loss):
+                continue
+            if best is None or float(score) > float(best[0]):
+                best = (score, row, plan, signal, confidence, entry_price, stop_loss, take_profit)
+        if best is None:
+            continue
+        score, row, plan, signal, confidence, entry_price, stop_loss, take_profit = best
+        label = str(row.get("label") or "").strip().upper() or "UNKNOWN"
+        context = str(plan.get("last_signal_time") or plan.get("bars_since_cross") or label)
+        cache_key = "AW15RESEARCH|{symbol}|{signal}|{label}|{context}".format(
+            symbol=symbol, signal=signal, label=label, context=context
+        )
+        dedupe_key = ("AW15", symbol, signal, cache_key)
+        if dedupe_key in existing_keys:
+            continue
+        plan_copy = dict(plan)
+        plan_copy["signal"] = signal
+        plan_copy["alert"] = True
+        plan_copy["confidence"] = float(confidence)
+        plan_copy["entry_price"] = entry_price
+        plan_copy["stop_loss"] = stop_loss
+        plan_copy["take_profit"] = take_profit
+        candidate = {
+            "symbol": symbol,
+            "strategy": "AW15",
+            "signal": signal,
+            "score": float(score),
+            "confidence": float(confidence),
+            "plan": plan_copy,
+            "item": item,
+            "message": None,
+            "cache_key": cache_key,
+            "research_candidate": True,
+            "research_source": "phase1_relaxed_aw15",
+        }
+        intent, intent_reason = _research_entry_intent(trad=trad, candidate=candidate)
+        candidate["alert_intent"] = intent
+        candidate["alert_intent_reason"] = intent_reason
+        supplements.append(candidate)
+        existing_keys.add(dedupe_key)
+    return supplements
+
+
 def build_research_supplement_candidates(*, trad, results, existing_candidates, supplement_strategies, pa_min_confidence, pa_min_score):
     supplements = []
     enabled = {str(value or "").strip().upper() for value in (supplement_strategies or []) if str(value or "").strip()}
-    if "PA15" not in enabled:
+    if not enabled:
         return supplements
     existing_keys = {
         (
@@ -484,61 +601,72 @@ def build_research_supplement_candidates(*, trad, results, existing_candidates, 
         for row in (existing_candidates or [])
         if isinstance(row, dict)
     }
-    for item in results or []:
-        if not isinstance(item, dict) or item.get("error"):
-            continue
-        symbol = str(item.get("symbol") or "").strip().upper()
-        plan = item.get("price_action_15m")
-        if not symbol or not isinstance(plan, dict):
-            continue
-        signal = str(plan.get("research_signal") or "").strip().upper()
-        confidence = _safe_float(plan.get("research_confidence"), None)
-        score = _safe_float(plan.get("research_score"), None)
-        entry_price = _safe_float(plan.get("entry_price"), None)
-        stop_loss = _safe_float(plan.get("stop_loss"), None)
-        take_profit = _safe_float(plan.get("take_profit"), None)
-        if signal not in {"BUY", "SELL"}:
-            continue
-        if confidence is None or confidence < float(pa_min_confidence):
-            continue
-        if score is None or score < float(pa_min_score):
-            continue
-        if entry_price is None or stop_loss is None or take_profit is None:
-            continue
-        plan_copy = dict(plan)
-        plan_copy["signal"] = signal
-        plan_copy["alert"] = True
-        plan_copy["confidence"] = float(confidence)
-        plan_copy["score"] = float(score)
-        if not plan_copy.get("detected_pattern") and plan_copy.get("research_detected_pattern"):
-            plan_copy["detected_pattern"] = plan_copy.get("research_detected_pattern")
-        cache_key = "PA15RESEARCH|{symbol}|{signal}|{context}".format(
-            symbol=symbol,
-            signal=signal,
-            context=str(plan.get("last_signal_time") or plan.get("research_detected_pattern") or plan.get("market_structure") or "na"),
+    if "PA15" in enabled:
+        for item in results or []:
+            if not isinstance(item, dict) or item.get("error"):
+                continue
+            symbol = str(item.get("symbol") or "").strip().upper()
+            plan = item.get("price_action_15m")
+            if not symbol or not isinstance(plan, dict):
+                continue
+            signal = str(plan.get("research_signal") or "").strip().upper()
+            confidence = _safe_float(plan.get("research_confidence"), None)
+            score = _safe_float(plan.get("research_score"), None)
+            entry_price = _safe_float(plan.get("entry_price"), None)
+            stop_loss = _safe_float(plan.get("stop_loss"), None)
+            take_profit = _safe_float(plan.get("take_profit"), None)
+            if signal not in {"BUY", "SELL"}:
+                continue
+            if confidence is None or confidence < float(pa_min_confidence):
+                continue
+            if score is None or score < float(pa_min_score):
+                continue
+            if entry_price is None or stop_loss is None or take_profit is None:
+                continue
+            plan_copy = dict(plan)
+            plan_copy["signal"] = signal
+            plan_copy["alert"] = True
+            plan_copy["confidence"] = float(confidence)
+            plan_copy["score"] = float(score)
+            if not plan_copy.get("detected_pattern") and plan_copy.get("research_detected_pattern"):
+                plan_copy["detected_pattern"] = plan_copy.get("research_detected_pattern")
+            cache_key = "PA15RESEARCH|{symbol}|{signal}|{context}".format(
+                symbol=symbol,
+                signal=signal,
+                context=str(plan.get("last_signal_time") or plan.get("research_detected_pattern") or plan.get("market_structure") or "na"),
+            )
+            dedupe_key = ("PA15", symbol, signal, cache_key)
+            if dedupe_key in existing_keys:
+                continue
+            candidate = {
+                "symbol": symbol,
+                "strategy": "PA15",
+                "signal": signal,
+                "score": float(score),
+                "confidence": float(confidence),
+                "plan": plan_copy,
+                "item": item,
+                "source_count": int(plan.get("proxy_source_count") or 0),
+                "message": None,
+                "cache_key": cache_key,
+                "research_candidate": True,
+                "research_source": "phase1_relaxed_pa15",
+            }
+            intent, intent_reason = _research_entry_intent(trad=trad, candidate=candidate)
+            candidate["alert_intent"] = intent
+            candidate["alert_intent_reason"] = intent_reason
+            supplements.append(candidate)
+            existing_keys.add(dedupe_key)
+    if "AW15" in enabled:
+        supplements.extend(
+            _build_aw15_research_candidates(
+                trad=trad,
+                results=results,
+                existing_keys=existing_keys,
+                min_confidence=pa_min_confidence,
+                min_score=pa_min_score,
+            )
         )
-        dedupe_key = ("PA15", symbol, signal, cache_key)
-        if dedupe_key in existing_keys:
-            continue
-        candidate = {
-            "symbol": symbol,
-            "strategy": "PA15",
-            "signal": signal,
-            "score": float(score),
-            "confidence": float(confidence),
-            "plan": plan_copy,
-            "item": item,
-            "source_count": int(plan.get("proxy_source_count") or 0),
-            "message": None,
-            "cache_key": cache_key,
-            "research_candidate": True,
-            "research_source": "phase1_relaxed_pa15",
-        }
-        intent, intent_reason = _research_entry_intent(trad=trad, candidate=candidate)
-        candidate["alert_intent"] = intent
-        candidate["alert_intent_reason"] = intent_reason
-        supplements.append(candidate)
-        existing_keys.add(dedupe_key)
     return supplements
 
 

@@ -953,6 +953,10 @@ TELEGRAM_ALERT_SYMBOL_QUALITY_PROFILES = {
 }
 
 ALL_WEATHER_15M_ENABLED = _env_bool("ALL_WEATHER_15M_ENABLED", True)
+# EMA Cross is excluded from the All-Weather pool by default: with optimizer
+# lengths disabled its default 12/26 backtest lost on every tracked symbol, so
+# it only produced reject noise. Re-enable only if EMA Cross optimization runs.
+ALL_WEATHER_15M_EMACROSS_ENABLE = _env_bool("ALL_WEATHER_15M_EMACROSS_ENABLE", False)
 ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE = _env_float("ALL_WEATHER_15M_MIN_ALERT_CONFIDENCE", 67.0)
 ALL_WEATHER_15M_MIN_VALID_TRADES = _env_int("ALL_WEATHER_15M_MIN_VALID_TRADES", 4)
 ALL_WEATHER_15M_MIN_VALID_WIN_RATE = _env_float("ALL_WEATHER_15M_MIN_VALID_WIN_RATE", 54.0)

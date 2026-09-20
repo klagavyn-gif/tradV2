@@ -3337,12 +3337,13 @@ def _all_weather_metrics_bonus(win_rate, expectancy, trades):
 def _all_weather_plan_candidates(item, regime):
     plans = [
         ("ActionZone", item.get("actionzone_15m")),
-        ("EMACross", item.get("ema_cross_15m")),
         ("CDCVixFix", item.get("cdc_vixfix_15m")),
         ("ShortTerm", item.get("short_term_15m")),
         ("Sniper", item.get("sniper_15m")),
         ("Quantum", item.get("quantum_15m")),
     ]
+    if bool(getattr(config, "ALL_WEATHER_15M_EMACROSS_ENABLE", False)):
+        plans.insert(1, ("EMACross", item.get("ema_cross_15m")))
     candidates = []
     rejected = []
     for label, plan in plans:

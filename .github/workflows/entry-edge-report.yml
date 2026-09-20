@@ -66,7 +66,18 @@ jobs:
             --cost-bps "${{ github.event.inputs.cost_bps || '30' }}" \
             --target-settled "${{ github.event.inputs.target_settled || '100' }}" \
             $EXTRA_ARGS
-      - name: Upload entry edge report
+      - name: Build gate attribution report
+        run: |
+          EXTRA_ARGS=""
+          if [ "${{ github.event.inputs.notify }}" = "true" ]; then
+            EXTRA_ARGS="--notify-telegram"
+          fi
+          python tools/gate_attribution_report.py \
+            --window-days "${{ github.event.inputs.days || '45' }}" \
+            --cost-bps "${{ github.event.inputs.cost_bps || '30' }}" \
+            --min-blocked 20 \
+            $EXTRA_ARGS
+      - name: Upload research reports
         if: always()
         uses: actions/upload-artifact@v6
         with:
@@ -74,5 +85,7 @@ jobs:
           path: |
             .data/telegram_alerts/entry_edge_report.md
             .data/telegram_alerts/entry_edge_report.json
+            .data/telegram_alerts/gate_attribution_report.md
+            .data/telegram_alerts/gate_attribution_report.json
           if-no-files-found: ignore
           retention-days: 30

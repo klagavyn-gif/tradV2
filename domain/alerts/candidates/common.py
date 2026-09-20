@@ -2347,6 +2347,15 @@ def record_candidate_reject(
             or plan_dict.get("price"),
             None,
         ),
+        "stop_loss": _safe_float(plan_dict.get("stop_loss"), None),
+        "take_profit": _safe_float(
+            plan_dict.get("take_profit")
+            or plan_dict.get("take_profit_2")
+            or plan_dict.get("exit_price"),
+            None,
+        ),
+        "risk_reward": _safe_float(plan_dict.get("risk_reward"), None),
+        "forecast_direction": str(plan_dict.get("forecast_direction") or "").strip().upper() or None,
         "last_signal_time": str(plan_dict.get("last_signal_time") or "").strip() or None,
     }
     if isinstance(extra, dict):

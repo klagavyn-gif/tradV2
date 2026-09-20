@@ -108,6 +108,56 @@ def _suppress_stale_entry_candidates(candidates, *, config, quality_drop_counts=
     return filtered
 
 
+def _candidate_forecast_direction(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+    item = candidate.get("item") if isinstance(candidate.get("item"), dict) else {}
+    price_forecast = item.get("price_forecast") if isinstance(item.get("price_forecast"), dict) else {}
+    for value in (
+        candidate.get("forecast_direction"),
+        plan.get("forecast_direction"),
+        price_forecast.get("direction"),
+    ):
+        text = str(value or "").strip().upper()
+        if text:
+            return text
+    return None
+
+
+def _suppress_direction_misaligned_candidates(candidates, *, config, quality_drop_counts=None, prefix="primary"):
+    """Drop entry candidates whose technical forecast contradicts the trade
+    direction. Backtesting showed forecast-aligned entries win ~50% vs ~33% for
+    misaligned ones, so contradictory entries are a net drag."""
+    if not bool(getattr(config, "TELEGRAM_ALERT_DIRECTION_ALIGNMENT_ENABLE", True)):
+        return list(candidates or [])
+    filtered = []
+    dropped = 0
+    for row in candidates or []:
+        if not isinstance(row, dict):
+            filtered.append(row)
+            continue
+        if str(row.get("alert_intent") or "").strip().lower() != "entry":
+            filtered.append(row)
+            continue
+        signal = str(row.get("signal") or "").strip().upper()
+        if signal not in ("BUY", "SELL"):
+            filtered.append(row)
+            continue
+        forecast = _candidate_forecast_direction(row)
+        if forecast not in ("BUY", "SELL"):
+            filtered.append(row)
+            continue
+        if forecast != signal:
+            dropped += 1
+            continue
+        filtered.append(row)
+    if isinstance(quality_drop_counts, dict) and dropped > 0:
+        key = f"{prefix}_direction_misaligned_suppressed"
+        quality_drop_counts[key] = int(quality_drop_counts.get(key, 0)) + int(dropped)
+    return filtered
+
+
 def _primary_candidate_sort_key(candidate, *, config):
     if not isinstance(candidate, dict):
         return (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
@@ -477,6 +527,11 @@ def notify_telegram_from_results(results, *, config, helpers, get_now, logger, r
         quality_drop_counts=quality_drop_counts,
     )
     candidates = _suppress_stale_entry_candidates(
+        candidates,
+        config=config,
+        quality_drop_counts=quality_drop_counts,
+    )
+    candidates = _suppress_direction_misaligned_candidates(
         candidates,
         config=config,
         quality_drop_counts=quality_drop_counts,

@@ -9631,6 +9631,20 @@ class EMACross15m:
             best_bt = None
             if isinstance(opt_meta, dict) and isinstance(opt_meta.get("best"), dict):
                 best_bt = opt_meta.get("best")
+            if not isinstance(best_bt, dict):
+                # Optimization is disabled or produced nothing, so the optimizer
+                # never supplied edge metrics and the entry quality gate would
+                # reject every EMA Cross setup as missing_edge_metrics. Run one
+                # backtest with the resolved lengths so the gate has real stats.
+                try:
+                    best_bt = _backtest_ema_cross_15m(
+                        df,
+                        best_fast_len,
+                        best_slow_len,
+                        tp_mult=getattr(config, "EMA_CROSS_15M_TP_MULT", 5.0),
+                    )
+                except Exception:
+                    best_bt = None
             total_trades = best_bt.get("trades") if isinstance(best_bt, dict) else None
             hist_win_rate_pct = best_bt.get("win_rate_pct") if isinstance(best_bt, dict) else None
             hist_avg_rr = best_bt.get("avg_rr") if isinstance(best_bt, dict) else None

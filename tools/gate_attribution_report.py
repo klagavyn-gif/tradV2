@@ -17,6 +17,7 @@ DEFAULT_MARKDOWN = PROJECT_ROOT / ".data" / "telegram_alerts" / "gate_attributio
 DEFAULT_JSON = PROJECT_ROOT / ".data" / "telegram_alerts" / "gate_attribution_report.json"
 
 OVER_FILTER_MARGIN_R = 0.5
+STALE_CONFOUND_BARS = 4.0
 DATA_GATE_TOKENS = ("missing", "not_available", "no_actionable", "no_primary_plan", "insufficient")
 
 
@@ -196,8 +197,8 @@ def aggregate_passed(run_reports, *, window_days, now):
     cutoff = None
     if isinstance(window_days, (int, float)) and window_days > 0:
         cutoff = now - timedelta(days=float(window_days))
-    overall = {"expectancies": [], "confidences": [], "win_rates": []}
-    by_key = defaultdict(lambda: {"expectancies": [], "confidences": [], "win_rates": []})
+    overall = {"expectancies": [], "confidences": [], "win_rates": [], "bars": []}
+    by_key = defaultdict(lambda: {"expectancies": [], "confidences": [], "win_rates": [], "bars": []})
     seen = set()
     for report in run_reports or []:
         if not isinstance(report, dict):
@@ -234,16 +235,27 @@ def aggregate_passed(run_reports, *, window_days, now):
                 if isinstance(win_rate, float):
                     overall["win_rates"].append(win_rate)
                     bucket["win_rates"].append(win_rate)
+                bars = _safe_float(row.get("profile_runtime_bars_since_signal"))
+                if not isinstance(bars, float):
+                    stamp = _parse_time(row.get("signal_timestamp"))
+                    generated = _parse_time(row.get("analysis_generated_at"))
+                    if stamp is not None and generated is not None:
+                        bars = (generated - stamp).total_seconds() / (15.0 * 60.0)
+                if isinstance(bars, float) and bars >= 0:
+                    overall["bars"].append(bars)
+                    bucket["bars"].append(bars)
     return {
         "n": len(seen),
         "avg_backtest_expectancy_rr": _mean(overall["expectancies"]),
         "avg_confidence": _mean(overall["confidences"]),
         "avg_backtest_win_rate_pct": _mean(overall["win_rates"]),
+        "avg_bars_since_signal": _mean(overall["bars"]),
         "by_strategy_signal": {
             key: {
                 "n": len(bucket["expectancies"]),
                 "avg_backtest_expectancy_rr": _mean(bucket["expectancies"]),
                 "avg_confidence": _mean(bucket["confidences"]),
+                "avg_bars_since_signal": _mean(bucket["bars"]),
             }
             for key, bucket in by_key.items()
         },
@@ -305,21 +317,32 @@ def _is_data_gate(reason):
     return any(token in text for token in DATA_GATE_TOKENS)
 
 
-def _matched_passed_expectancy(profile, passed):
+def _matched_passed_metrics(profile, passed):
     by_key = (passed or {}).get("by_strategy_signal") or {}
     mix = profile.get("strategy_signal") or {}
-    total_weight = 0
-    weighted = 0.0
+    exp_weighted = 0.0
+    exp_weight = 0
+    bars_weighted = 0.0
+    bars_weight = 0
     for key, count in mix.items():
         bucket = by_key.get(key)
-        value = bucket.get("avg_backtest_expectancy_rr") if isinstance(bucket, dict) else None
-        if isinstance(value, float) and count > 0:
-            weighted += value * float(count)
-            total_weight += int(count)
-    if total_weight > 0:
-        return weighted / float(total_weight), total_weight
-    fallback = (passed or {}).get("avg_backtest_expectancy_rr")
-    return (fallback if isinstance(fallback, float) else None), 0
+        if not isinstance(bucket, dict) or count <= 0:
+            continue
+        expectancy = bucket.get("avg_backtest_expectancy_rr")
+        if isinstance(expectancy, float):
+            exp_weighted += expectancy * float(count)
+            exp_weight += int(count)
+        bars = bucket.get("avg_bars_since_signal")
+        if isinstance(bars, float):
+            bars_weighted += bars * float(count)
+            bars_weight += int(count)
+    matched_exp = (exp_weighted / float(exp_weight)) if exp_weight else (passed or {}).get("avg_backtest_expectancy_rr")
+    matched_bars = (bars_weighted / float(bars_weight)) if bars_weight else (passed or {}).get("avg_bars_since_signal")
+    return (
+        matched_exp if isinstance(matched_exp, float) else None,
+        matched_bars if isinstance(matched_bars, float) else None,
+        exp_weight,
+    )
 
 
 def build_gate_rows(aggregated, baseline, passed, *, min_blocked):
@@ -334,16 +357,22 @@ def build_gate_rows(aggregated, baseline, passed, *, min_blocked):
         profile["raw_drops"] = int(volume.get(reason, 0))
         profile["share_pct"] = (float(profile["n"]) / float(total_unique) * 100.0) if total_unique else None
         expectancy = profile.get("avg_backtest_expectancy_rr")
-        matched, matched_weight = _matched_passed_expectancy(profile, passed)
+        matched, matched_bars, matched_weight = _matched_passed_metrics(profile, passed)
+        blocked_bars = profile.get("avg_bars_since_signal")
         profile["matched_passed_expectancy_rr"] = matched
+        profile["matched_passed_bars_since_signal"] = matched_bars
         profile["matched_passed_weight"] = matched_weight
         profile["delta_vs_passed_r"] = (
             expectancy - matched if isinstance(expectancy, float) and isinstance(matched, float) else None
+        )
+        profile["delta_bars_vs_passed"] = (
+            blocked_bars - matched_bars if isinstance(blocked_bars, float) and isinstance(matched_bars, float) else None
         )
         profile["delta_vs_baseline_r"] = (
             expectancy - baseline_net_rr if isinstance(expectancy, float) and isinstance(baseline_net_rr, float) else None
         )
         delta = profile["delta_vs_passed_r"]
+        delta_bars = profile["delta_bars_vs_passed"]
         profile["regret_proxy_r"] = float(profile["n"]) * delta if isinstance(delta, float) else None
         if profile["n"] < int(min_blocked):
             profile["flag"] = "insufficient_data"
@@ -352,7 +381,11 @@ def build_gate_rows(aggregated, baseline, passed, *, min_blocked):
         elif not isinstance(delta, float):
             profile["flag"] = "insufficient_metrics"
         elif delta > OVER_FILTER_MARGIN_R:
-            profile["flag"] = "over_filtering_suspect"
+            profile["flag"] = (
+                "stale_confounded"
+                if isinstance(delta_bars, float) and delta_bars > STALE_CONFOUND_BARS
+                else "over_filtering_suspect"
+            )
         elif delta < -OVER_FILTER_MARGIN_R:
             profile["flag"] = "likely_justified"
         else:
@@ -390,14 +423,15 @@ def _render_markdown(payload):
         "- unique passed candidates: {}".format((payload.get("passed") or {}).get("n")),
         "- avg backtest expectancy: {}".format(_fmt((payload.get("passed") or {}).get("avg_backtest_expectancy_rr"), 3)),
         "- avg confidence: {}".format(_fmt((payload.get("passed") or {}).get("avg_confidence"), 1)),
+        "- avg bars since signal: {}".format(_fmt((payload.get("passed") or {}).get("avg_bars_since_signal"), 2)),
         "",
         "## Gates",
-        "| gate | unique blocked | raw drops | share | avg conf | bt expRR | matched passed expRR | delta vs passed | regret proxy (R) | flag |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| gate | unique blocked | raw drops | share | avg conf | bt expRR | matched expRR | delta vs passed | blocked bars | delta bars | regret proxy (R) | flag |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for row in rows:
         lines.append(
-            "| {reason} | {n} | {raw} | {share} | {conf} | {exp} | {matched} | {delta} | {regret} | {flag} |".format(
+            "| {reason} | {n} | {raw} | {share} | {conf} | {exp} | {matched} | {delta} | {bars} | {dbars} | {regret} | {flag} |".format(
                 reason=str(row.get("reason") or ""),
                 n=int(row.get("n") or 0),
                 raw=int(row.get("raw_drops") or 0),
@@ -406,6 +440,8 @@ def _render_markdown(payload):
                 exp=_fmt(row.get("avg_backtest_expectancy_rr"), 3),
                 matched=_fmt(row.get("matched_passed_expectancy_rr"), 3),
                 delta=_fmt(row.get("delta_vs_passed_r"), 3),
+                bars=_fmt(row.get("avg_bars_since_signal"), 1),
+                dbars=_fmt(row.get("delta_bars_vs_passed"), 1),
                 regret=_fmt(row.get("regret_proxy_r"), 1),
                 flag=str(row.get("flag") or ""),
             )
@@ -413,8 +449,10 @@ def _render_markdown(payload):
     lines.append("")
     lines.append("## Notes")
     lines.append("- `unique blocked` นับสัญญาณไม่ซ้ำ (symbol+strategy+reason+signal+signal_time)")
-    lines.append("- `matched passed expRR` = backtest expectancy เฉลี่ยของ candidate ที่ผ่าน เฉพาะ strategy+signal เดียวกัน")
+    lines.append("- `matched expRR` = backtest expectancy เฉลี่ยของ candidate ที่ผ่าน เฉพาะ strategy+signal เดียวกัน")
     lines.append("- `delta vs passed` = expRR ของ candidate ที่ถูกบล็อก ลบ matched passed (บวก = บล็อกของที่ดีกว่าที่ส่ง)")
+    lines.append("- `delta bars` = ความเก่าของสัญญาณที่ถูกบล็อก ลบของที่ผ่าน (บวกมาก = ที่ถูกบล็อกเก่ากว่า)")
+    lines.append("- `stale_confounded` = delta เป็นบวกแต่ที่ถูกบล็อกเก่ากว่ามาก จึงยังสรุปว่า gate กรองเกินไม่ได้")
     lines.append("- `regret proxy` = unique blocked x delta (บวก = อาจเสียโอกาส, ลบ = อาจช่วยประหยัด)")
     lines.append("- `data_gate` = gate ที่บล็อกเพราะข้อมูลไม่พอ ไม่ใช่ตัดสินคุณภาพ")
     lines.append("- ค่านี้เป็น **proxy** จาก backtest metrics ไม่ใช่ counterfactual outcome จริง")
@@ -462,6 +500,9 @@ def _telegram_summary(payload):
             )
     else:
         lines.append("ไม่มี gate ที่เข้าข่ายกรองเกินจากข้อมูลตอนนี้")
+    stale = [row for row in rows if row.get("flag") == "stale_confounded"]
+    if stale:
+        lines.append("ติด staleness (ยังสรุปไม่ได้): {}".format(len(stale)))
     lines.append("เป็น proxy จาก backtest ไม่ใช่ outcome จริง")
     return "\n".join(lines)
 
@@ -537,6 +578,7 @@ def main(argv=None):
             "avg_backtest_expectancy_rr": passed.get("avg_backtest_expectancy_rr"),
             "avg_confidence": passed.get("avg_confidence"),
             "avg_backtest_win_rate_pct": passed.get("avg_backtest_win_rate_pct"),
+            "avg_bars_since_signal": passed.get("avg_bars_since_signal"),
         },
         "aggregated": {
             "runs_used": aggregated.get("runs_used"),

@@ -9,6 +9,7 @@ import urllib.request
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +20,65 @@ DEFAULT_JSON_PATH = PROJECT_ROOT / ".data" / "telegram_alerts" / "entry_edge_rep
 Z_95 = 1.959963984540054
 BOOTSTRAP_ITERATIONS = 2000
 BOOTSTRAP_SEED = 20260919
+
+BENCHMARK_SYMBOLS = (
+    "BTC-USD", "ETH-USD", "DOGE-USD", "ADA-USD", "XRP-USD", "BNB-USD",
+    "SOL-USD", "TRX-USD", "NEAR-USD", "LINK-USD", "PAXG-USD",
+)
+_BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
+
+
+def _to_binance_symbol(symbol):
+    base = str(symbol or "").split("-", 1)[0].strip().upper()
+    return f"{base}USDT" if base else ""
+
+
+def _fetch_binance_klines(binance_symbol, interval, start_ms, end_ms):
+    params = urlencode({
+        "symbol": binance_symbol,
+        "interval": interval,
+        "startTime": int(start_ms),
+        "endTime": int(end_ms),
+        "limit": 1000,
+    })
+    url = f"{_BINANCE_KLINES_URL}?{params}"
+    request = urllib.request.Request(url, headers={"User-Agent": "tradV2-entry-edge/1.0"})
+    with urllib.request.urlopen(request, timeout=15) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return data if isinstance(data, list) else []
+
+
+def _buyhold_return(binance_symbol, start_ms, end_ms, interval="1d"):
+    rows = _fetch_binance_klines(binance_symbol, interval, start_ms, end_ms)
+    closes = [float(row[4]) for row in rows if isinstance(row, list) and len(row) >= 5]
+    if len(closes) < 2:
+        return None
+    return (closes[-1] / closes[0] - 1.0) * 100.0
+
+
+def _benchmark(start_dt, end_dt):
+    start_ms = int(start_dt.timestamp() * 1000.0)
+    end_ms = int(end_dt.timestamp() * 1000.0)
+    by_symbol = {}
+    for symbol in BENCHMARK_SYMBOLS:
+        binance_symbol = _to_binance_symbol(symbol)
+        if not binance_symbol:
+            continue
+        try:
+            ret = _buyhold_return(binance_symbol, start_ms, end_ms)
+        except Exception:
+            ret = None
+        if ret is not None:
+            by_symbol[symbol] = round(ret, 2)
+    basket_values = list(by_symbol.values())
+    return {
+        "start": start_dt.strftime("%Y-%m-%d"),
+        "end": end_dt.strftime("%Y-%m-%d"),
+        "available": bool(by_symbol),
+        "btc_buyhold_pct": by_symbol.get("BTC-USD"),
+        "basket_buyhold_pct": round(sum(basket_values) / len(basket_values), 2) if basket_values else None,
+        "by_symbol": by_symbol,
+    }
 
 
 def _safe_float(value):
@@ -283,6 +343,15 @@ def _render_markdown(payload):
     else:
         lines.append("- no data")
     lines.append("")
+    benchmark = payload.get("benchmark") or {}
+    lines.append("## Benchmark (buy-and-hold over the same span)")
+    if benchmark.get("available"):
+        lines.append("- span: {} -> {}".format(benchmark.get("start"), benchmark.get("end")))
+        lines.append("- BTC buy-and-hold: {}".format(_fmt(benchmark.get("btc_buyhold_pct"), 2, "%")))
+        lines.append("- basket (11 symbols) buy-and-hold: {}".format(_fmt(benchmark.get("basket_buyhold_pct"), 2, "%")))
+    else:
+        lines.append("- unavailable")
+    lines.append("")
     lines.append(_render_table("By Strategy", payload.get("by_strategy") or []))
     lines.append("")
     lines.append(_render_table("By Signal", payload.get("by_signal") or []))
@@ -341,6 +410,12 @@ def _telegram_summary(payload):
             _fmt_ci(overall.get("net_avg_rr_ci95")),
         ),
     ]
+    benchmark = payload.get("benchmark") or {}
+    if benchmark.get("available"):
+        lines.append("benchmark: BTC {} | basket {}".format(
+            _fmt(benchmark.get("btc_buyhold_pct"), 1, "%"),
+            _fmt(benchmark.get("basket_buyhold_pct"), 1, "%"),
+        ))
     by_strategy = payload.get("by_strategy") or []
     if by_strategy:
         lines.append("by strategy:")
@@ -410,6 +485,22 @@ def main(argv=None):
     target = max(1, int(args.target_settled))
     progress_pct = min(100.0, float(overall.get("settled") or 0) / float(target) * 100.0)
 
+    start_ts = []
+    end_ts = []
+    for row in settled:
+        start = _parse_timestamp(row.get("timestamp"))
+        end = _parse_timestamp(row.get("settled_at")) or _parse_timestamp(row.get("timestamp"))
+        if start:
+            start_ts.append(start)
+        if end:
+            end_ts.append(end)
+    benchmark = {"available": False}
+    if start_ts and end_ts:
+        try:
+            benchmark = _benchmark(min(start_ts), max(end_ts))
+        except Exception as exc:
+            benchmark = {"available": False, "error": str(exc)}
+
     report = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "artifact_type": "entry_edge_report",
@@ -429,6 +520,7 @@ def main(argv=None):
             "reached_target": bool(overall.get("settled") or 0) >= target,
         },
         "overall": overall,
+        "benchmark": benchmark,
         "exit_reasons": _exit_reason_counts(settled),
         "by_strategy": _group_stats(settled, lambda row: str(row.get("strategy") or "UNKNOWN").upper(), cost_pct),
         "by_signal": _group_stats(settled, lambda row: str(row.get("signal") or "UNKNOWN").upper(), cost_pct),

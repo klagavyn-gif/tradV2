@@ -75,11 +75,12 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
 - baseline (42 วัน, 164 entry, หลังหักต้นทุน): **net expectancy +0.468%/trade, PF 1.48**
   แต่ 95% ของ trade อยู่ในเดือนสิงหาคม → ยังพิสูจน์ไม่ได้
 - เครื่องมือติดตาม: `tools/entry_edge_report.py` (อ่าน realized_outcomes.json + หักต้นทุน
-  cost_bps + 95% CI + แบ่งตาม strategy/signal/symbol/เดือน + ส่ง Telegram)
+  cost_bps + 95% CI + แบ่งตาม strategy/signal/symbol/เดือน + **benchmark BTC/basket buy-and-hold**
+  + ส่ง Telegram)
   → auto-report นี้มีอยู่แล้วแบบ **รายสัปดาห์** (Cloud Scheduler `tradv2-entry-edge-weekly`
     จันทร์ 09:10 → `entry-edge-report.yml` → `--notify-telegram`) ไม่ต้องตั้ง job ใหม่
-- ช่องว่างเดียวที่ยังขาด: **benchmark เทียบ buy-and-hold (BTC/basket)** ยังไม่มีใน
-  entry_edge_report.py (ต้อง fetch market data ใน workflow) — ยังไม่ทำ
+- benchmark ใช้ Binance public klines (ไม่ต้อง auth) เทียบ buy-and-hold BTC + basket 11 เหรียญ
+  ในช่วงเดียวกับ entry outcomes
 
 เกณฑ์ "ทำกำไรจริง" (ต้องครบหลัง 6-12 เดือน):
 ```

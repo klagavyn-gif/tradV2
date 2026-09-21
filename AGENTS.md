@@ -29,9 +29,13 @@ metadata (`strategy_not_in_model`) — เพิ่ม AW15 ใน config เฉ
 เดิม (`ALL_WEATHER_15M_*`) ต่อไป ไม่ควรยัด ML เข้า AW15 จนกว่าจะสะสม entry จริงได้มากพอ
 (ถ้าจะทำต่อ ดูแนวทาง B: ลด threshold แบบ shadow เพื่อเก็บ AW15 ที่ผ่าน gate ระยะยาว)
 
-## 2. CDCVIX15 ถูก gate ทิ้งหมดในโค้ดปัจจุบัน (realized proxy)
+## 2. CDCVIX15 ใช้ realized proxy แทน backtest (historical replay ได้ CDCVIX15=0)
 
-สถานะ: **เปิดค้าง — ยังไม่ได้ตัดสินใจแก้**
+สถานะ: **เปิดค้าง — แต่แก้ความเข้าใจเดิม: live ยัง dispatch CDCVIX15 อยู่ (552 alerts/45d)**
+
+ข้อแก้ไขสำคัญ: ข้อสรุปเก่าว่า "CDCVIX15 ถูก gate ทิ้งหมด" มาจากข้อมูล stale + historical
+replay เท่านั้น ข้อมูลสด (artifact 20 ก.ย.) ชี้ว่า live ยังส่ง CDCVIX15 อยู่ ดังนั้น
+"ถูก gate ทิ้งหมด" ไม่จริงสำหรับ live — เป็นจริงเฉพาะ historical replay ของ dataset builder
 
 สิ่งที่พบ: `_extract_signal_edge_metrics()` ใน `trad.py` เมื่อ CDCVIX15 plan ไม่มี backtest
 metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVIX15")` ซึ่งอ่านค่า realized
@@ -47,6 +51,40 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
 ซึ่งไม่ถูกต้องสำหรับ historical replay — ถ้าจะสืบต่อ ให้ดูว่า fallback นี้เป็น regression
 ที่ควรแก้ หรือตั้งใจให้ CDCVIX15 หยุด dispatch จาก realized performance ที่แย่
 
+## 3. H1/H4 trend-following ไม่มี edge ที่ robust (สรุปแล้ว)
+
+สถานะ: **ตัดสินใจแล้ว (A+D) — หยุดหาสัญญาณใหม่ กลับไป validate M15**
+
+ผล Phase 1 (backtest H4 465 วัน, หักต้นทุน 0.30%/รอบ, no lookahead):
+- Donchian 20: total -18.4% (ไม่มี edge)
+- EMA 50/200: total +20.6% แต่ครึ่งแรกเท่าทุน (+0.01%), ครึ่งหลัง +20.6% → ไม่ robust
+- Trend breakout: -0.2% (เท่าทุน)
+- ADX chop filter: ทำให้แย่ลง (ยิ่งกรองยิ่งลดกำไร)
+
+เครื่องมือ: `tools/backtest_h1h4_trend.py`
+
+ข้อสรุป: simple H4 trend-following บน 11 alts ไม่มี edge ที่ยั่งยืน สอดคล้องกับผล M15
+(ไม่มี "edge สำเร็จรูป" ในตลาดนี้ด้วยสัญญาณ retail) — ไม่ควรลอง SMC/FVG/pattern ใหม่ซ้ำ
+
+## 4. แผน validate M15 (พิสูจน์ว่าทำกำไรจริงใน 6-12 เดือน)
+
+สถานะ: **กำลังทำ (A+D)**
+
+สิ่งที่ต้องรู้:
+- realized `pnl_pct` เดิมเป็น **gross** (ยังไม่หัก fee/slippage) → ต้องหักต้นทุน ~0.30%/รอบ
+- baseline (42 วัน, 164 entry, หลังหักต้นทุน): **net expectancy +0.468%/trade, PF 1.48**
+  แต่ 95% ของ trade อยู่ในเดือนสิงหาคม → ยังพิสูจน์ไม่ได้
+- เครื่องมือติดตาม: `tools/m15_performance_report.py` (อ่าน realized_outcomes.json +
+  หักต้นทุน + เทียบ benchmark + รายเดือน)
+
+เกณฑ์ "ทำกำไรจริง" (ต้องครบหลัง 6-12 เดือน):
+```
+[ ] net expectancy/trade > 0 หลังหักต้นทุน 0.30%
+[ ] profit factor ≥ 1.5 (เฉลี่ยทุกเดือน ไม่ใช่แค่เดือนเดียว)
+[ ] win rate สม่ำเสมอ (ยอมรับ 40-50% แต่ไม่ใช่กำไรกระจุกเดือนเดียว)
+[ ] ชนะ benchmark (BTC + equal-weight basket) ในช่วงเดียวกัน
+```
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -54,3 +92,5 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
 - โมเดล entry AI live ถูก fetch ผ่าน secret `TELEGRAM_ALERT_ENTRY_AI_MODEL_URL`
   และ cache key `TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION` — การ promote ต้อง upload
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
+- วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
+  (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json

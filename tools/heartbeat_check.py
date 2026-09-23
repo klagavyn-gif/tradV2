@@ -120,6 +120,17 @@ def main():
     now_text = now.strftime("%Y-%m-%d %H:%M:%S")
     runs = recent_runs(workflow)
     problem, detail = evaluate_freshness(runs, now=now, max_age_minutes=max_age_minutes)
+    if problem:
+        # Guard against a transient stale run list: the GitHub API occasionally
+        # returns an old run as "latest" even while fresh runs exist, which
+        # produces a false "pipeline stale" alert. Re-query once and trust a
+        # healthy second result before alerting.
+        time.sleep(2)
+        runs2 = recent_runs(workflow)
+        problem2, detail2 = evaluate_freshness(runs2, now=now, max_age_minutes=max_age_minutes)
+        if not problem2:
+            problem = False
+            detail = "{} (recheck ปกติ กัน false positive)".format(detail2)
     if force_alert:
         problem = True
         detail = "forced heartbeat alert for testing ({})".format(detail)

@@ -109,14 +109,22 @@ def execute_binance_auto_trade_pipeline(
                 logger.info("Auto-traded on Binance: %s %s @ %s", exec_res["symbol"], exec_res["signal"], exec_res["entry_price"])
                 if callable(send_telegram_alert):
                     env_badge = "🧪 [Testnet]" if testnet else "⚡ [Real Money]"
+                    margin_used = exec_res['notional'] / max(1, leverage)
+                    try:
+                        usdt_bal = client.get_usdt_balance()
+                        bal_str = f"\n💰 <b>เงินคงเหลือในพอร์ต:</b> {usdt_bal['available']:,.2f} USDT (รวม {usdt_bal['total']:,.2f} USDT)"
+                    except Exception:
+                        bal_str = ""
                     msg = (
                         f"🤖 <b>{env_badge} เปิดออเดอร์ Binance Futures สำเร็จ!</b>\n"
                         f"────────────────\n"
                         f"<b>เหรียญ:</b> {exec_res['symbol']} | <b>ฝั่ง:</b> {exec_res['signal']}\n"
-                        f"<b>จำนวน:</b> {exec_res['quantity']} (มูลค่า ~{exec_res['notional']:.2f} USDT)\n"
+                        f"<b>จำนวน:</b> {exec_res['quantity']} (มูลค่าสัญญา ~{exec_res['notional']:.2f} USDT)\n"
+                        f"<b>Margin ที่ใช้:</b> ~{margin_used:.2f} USDT ({leverage}x {margin_type})\n"
                         f"<b>ราคาเข้า:</b> {exec_res['entry_price']:,}\n"
                         f"<b>Stop Loss:</b> {exec_res['stop_loss']:,} (ตั้งคำสั่ง STOP_MARKET แล้ว)\n"
-                        f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา (0.8R)"
+                        f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
+                        f"{bal_str}"
                     )
                     try:
                         send_telegram_alert(msg)

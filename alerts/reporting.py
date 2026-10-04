@@ -1252,6 +1252,29 @@ def _build_trade_close_message(outcome, *, get_now):
         lines.append(f"<b>RR:</b> {rr:+.2f}R")
     if isinstance(pnl, (int, float)):
         lines.append(f"<b>PnL:</b> {pnl:+.2f}%")
+        try:
+            import config
+            if getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False):
+                notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0))
+                lev = int(getattr(config, "BINANCE_FUTURES_LEVERAGE", 20))
+                margin = notional / max(1, lev)
+                dollar_pnl = (pnl / 100.0) * notional
+                roi_pct = pnl * lev
+                lines.append(f"<b>กำไร/ขาดทุนโดยประมาณ:</b> {dollar_pnl:+.2f} USDT ({roi_pct:+.1f}% บน Margin {margin:.0f} USDT)")
+                api_key = getattr(config, "BINANCE_FUTURES_API_KEY", "")
+                api_secret = getattr(config, "BINANCE_FUTURES_API_SECRET", "")
+                if api_key and api_secret:
+                    from infrastructure.binance import BinanceFuturesClient
+                    _c = BinanceFuturesClient(
+                        api_key=api_key,
+                        api_secret=api_secret,
+                        testnet=getattr(config, "BINANCE_FUTURES_TESTNET", True),
+                    )
+                    _bal = _c.get_usdt_balance()
+                    if _bal.get("total", 0) > 0:
+                        lines.append(f"💰 <b>เงินคงเหลือในพอร์ต:</b> {_bal['available']:,.2f} USDT (รวม {_bal['total']:,.2f} USDT)")
+        except Exception:
+            pass
     if isinstance(bars_to_outcome, (int, float)) and isinstance(window_bars, int):
         lines.append(f"<b>แท่งที่เข้าไป:</b> {int(bars_to_outcome)}/{window_bars}")
     lines.append(f"<b>สาเหตุปิด:</b> {html.escape(exit_reason)}")

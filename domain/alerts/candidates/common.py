@@ -911,9 +911,27 @@ def _append_dispatch_readiness_lines(message, candidate, *, config):
     if not isinstance(message, str) or not message.strip() or not isinstance(candidate, dict):
         return message
     status = _candidate_dispatch_status(candidate, config=config)
-    candidate["dispatch_status_label"] = str(status.get("label") or "").strip() or None
-    candidate["dispatch_status_reason_group"] = str(status.get("reason_group") or "").strip() or None
-    candidate["dispatch_status_reason_detail"] = str(status.get("reason_detail") or "").strip() or None
+    label = str(status.get("label") or "").strip() or None
+    reason_group = str(status.get("reason_group") or "").strip() or None
+    reason_detail = str(status.get("reason_detail") or "").strip() or None
+    candidate["dispatch_status_label"] = label
+    candidate["dispatch_status_reason_group"] = reason_group
+    candidate["dispatch_status_reason_detail"] = reason_detail
+
+    if label == "ห้ามเข้า":
+        if "ปิดรอบ" in str(reason_group or "") or "exit" in str(reason_group or "").lower():
+            candidate["alert_intent"] = "exit"
+            candidate["alert_intent_reason"] = f"dispatch_exit:{reason_group}"
+        else:
+            candidate["alert_intent"] = "avoid"
+            candidate["alert_intent_reason"] = f"dispatch_avoid:{reason_group}"
+    elif label == "รอ":
+        candidate["alert_intent"] = "watch"
+        candidate["alert_intent_reason"] = f"dispatch_watch:{reason_group}"
+    elif label == "เข้าได้":
+        if str(candidate.get("alert_intent") or "").strip().lower() != "exit":
+            candidate["alert_intent"] = "entry"
+            candidate["alert_intent_reason"] = f"dispatch_entry:{reason_group}"
 
     if "<b>🧭 หมวดเหตุผล:</b>" not in message:
         label = str(status.get("label") or "").strip()

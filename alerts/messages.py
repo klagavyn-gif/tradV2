@@ -485,6 +485,7 @@ def _append_levels_lines(
         risk_parts.append("RR " + " / ".join(rr_bits))
     if risk_parts:
         lines.append("<b>📏 ความเสี่ยง:</b> " + " | ".join(html_escape(part) for part in risk_parts))
+    lines.append("<b>🛡️ แผนกันทุน:</b> กำไร ≥ +1.2R ขยับ SL มาที่ Entry | กำไร ≥ +2.0R ใช้ Trailing Stop 0.8R")
     level_source = str(guidance.get("level_source") or "").strip().lower()
     if level_source == "actual":
         lines.append("<b>🧭 ระดับราคา:</b> actual plan")

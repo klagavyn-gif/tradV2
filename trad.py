@@ -6551,6 +6551,21 @@ def _alert_realized_report_days():
     return int(getattr(config, "TELEGRAM_ALERT_REALIZED_REPORT_DAYS", 45) or 45)
 
 
+def _alert_realized_breakeven_r():
+    val = getattr(config, "TELEGRAM_ALERT_REALIZED_BREAKEVEN_R", 1.2)
+    return float(val) if val is not None else 1.2
+
+
+def _alert_realized_trailing_r():
+    val = getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_R", 2.0)
+    return float(val) if val is not None else 2.0
+
+
+def _alert_realized_trailing_distance_r():
+    val = getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_DISTANCE_R", 0.8)
+    return float(val) if val is not None else 0.8
+
+
 def _alert_realized_export_outcomes():
     return bool(getattr(config, "TELEGRAM_ALERT_REALIZED_EXPORT_OUTCOMES", True))
 
@@ -6986,6 +7001,9 @@ def _reporting_module_helpers():
         "entry_ai_model_path": lambda: getattr(config, "TELEGRAM_ALERT_ENTRY_AI_MODEL_PATH", ""),
         "entry_ai_live_enabled": lambda: bool(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE", True)),
         "entry_ai_allowlist_text": lambda: str(getattr(config, "TELEGRAM_ALERT_ENTRY_AI_STRATEGY_PROMOTION_ALLOWLIST", "") or "").strip(),
+        "alert_realized_breakeven_r": _alert_realized_breakeven_r,
+        "alert_realized_trailing_r": _alert_realized_trailing_r,
+        "alert_realized_trailing_distance_r": _alert_realized_trailing_distance_r,
     }
 
 

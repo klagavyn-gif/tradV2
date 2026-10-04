@@ -558,11 +558,29 @@ def _directional_excursions(bars, *, signal, entry_price):
     return _safe_float(mfe), _safe_float(mae)
 
 
+def _match_tz_to_index(index, dt_val):
+    ts = pd.Timestamp(dt_val)
+    idx_tz = getattr(index, "tz", None)
+    ts_tz = getattr(ts, "tz", None)
+    if idx_tz is not None and ts_tz is None:
+        try:
+            return ts.tz_localize(idx_tz)
+        except Exception:
+            return ts
+    if idx_tz is None and ts_tz is not None:
+        try:
+            return ts.tz_convert(ts_tz).tz_localize(None)
+        except Exception:
+            return ts
+    return ts
+
+
 def _close_at_or_before(price_df, alert_time):
     if price_df is None or getattr(price_df, "empty", True) or not isinstance(alert_time, datetime):
         return None
     try:
-        before = price_df.loc[price_df.index <= pd.Timestamp(alert_time)]
+        match_ts = _match_tz_to_index(price_df.index, alert_time)
+        before = price_df.loc[price_df.index <= match_ts]
         if before is None or getattr(before, "empty", True):
             return None
         return _safe_float(before.iloc[-1].get("Close"))
@@ -596,15 +614,25 @@ def infer_alert_intent(row):
     """Infer an alert's intent for historical rows that predate alert_intent.
 
     Priority (highest first):
-      1. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
-      2. existing alert_intent     -> keep   (entry/exit/watch already classified)
-      3. watch-only strategy       -> watch
-      4. tier_action               -> entry/watch
-      5. plan_reason entry phrases -> entry
-      6. default                   -> watch  (conservative, avoid overclaiming)
+      1. dispatch_status_label     -> exit/avoid/watch if user was told not to enter
+      2. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
+      3. existing alert_intent     -> keep   (entry/exit/watch already classified)
+      4. watch-only strategy       -> watch
+      5. tier_action               -> entry/watch
+      6. plan_reason entry phrases -> entry
+      7. default                   -> watch  (conservative, avoid overclaiming)
     """
     if not isinstance(row, dict):
         return "watch", "invalid_row"
+    dispatch_status = str(row.get("dispatch_status_label") or "").strip()
+    dispatch_reason = str(row.get("dispatch_status_reason_group") or "").strip()
+    if dispatch_status == "ห้ามเข้า":
+        if "ปิดรอบ" in dispatch_reason or "exit" in dispatch_reason.lower():
+            return "exit", f"dispatch_status_{dispatch_reason}"
+        return "avoid", f"dispatch_status_{dispatch_reason}"
+    if dispatch_status == "รอ":
+        return "watch", f"dispatch_status_{dispatch_reason}"
+
     existing = str(row.get("alert_intent") or "").strip().lower()
     existing_reason = str(row.get("alert_intent_reason") or "").strip()
     plan_reason = str(row.get("plan_reason") or "").strip().lower()
@@ -613,21 +641,32 @@ def infer_alert_intent(row):
 
     if any(phrase in plan_reason for phrase in _EXIT_PLAN_REASON_PHRASES):
         return "exit", "plan_reason_exit"
-    if existing in ("entry", "exit", "watch"):
+    if existing in ("entry", "exit", "watch", "avoid"):
+        if existing == "entry" and tier_action and ("รอ" in tier_action or "ดูทิศทาง" in tier_action or "ห้ามเข้า" in tier_action):
+            return "watch", "tier_action_override_watch"
         return existing, existing_reason or "existing_intent"
     if strategy in _WATCH_ONLY_STRATEGIES:
         return "watch", "strategy_watch_only"
     if tier_action:
         if "เข้าได้" in tier_action or "เข้าเมื่อ" in tier_action:
             return "entry", "tier_action_entry"
-        if "รอ" in tier_action or "ดูทิศทาง" in tier_action:
+        if "รอ" in tier_action or "ดูทิศทาง" in tier_action or "ห้ามเข้า" in tier_action:
             return "watch", "tier_action_watch"
     if any(phrase in plan_reason for phrase in _ENTRY_PLAN_REASON_PHRASES):
         return "entry", "plan_reason_entry"
     return "watch", "default_watch"
 
 
-def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars):
+def _resolve_directional_alert_outcome(
+    entry,
+    *,
+    price_df,
+    now_dt,
+    max_hold_bars,
+    be_r=1.2,
+    ts_r=2.0,
+    trail_dist_r=0.8,
+):
     signal = str((entry or {}).get("signal") or "").strip().upper()
     alert_time = _alert_timestamp_value((entry or {}).get("timestamp"))
     alert_id = _alert_id_value(entry)
@@ -654,6 +693,9 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
         "entry_price": entry_price,
         "stop_loss": stop_loss,
         "take_profit": take_profit,
+        "active_stop_loss": stop_loss,
+        "trailing_stop_activated": False,
+        "breakeven_activated": False,
         "outcome_status": "unsupported",
         "outcome_result": None,
         "exit_reason": None,
@@ -712,7 +754,7 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
 
     # Evaluate strictly AFTER the alert bar so the entry bar's own high/low
     # cannot be used for stop/tp triggers or excursions (no same-bar lookahead).
-    future = price_df.loc[price_df.index > pd.Timestamp(alert_time)]
+    future = price_df.loc[price_df.index > _match_tz_to_index(price_df.index, alert_time)]
     if future.empty:
         outcome["outcome_status"] = "open"
         outcome["exit_reason"] = "no_future_bars"
@@ -724,6 +766,11 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
     outcome["maturity_progress_pct"] = round(min(100.0, (float(bars_observed) / float(window_bars)) * 100.0), 2)
 
     risk = abs(float(entry_price) - float(stop_loss))
+    active_sl = float(stop_loss)
+    be_active = False
+    ts_active = False
+    peak_price = float(entry_price)
+    trough_price = float(entry_price)
     settled_row = None
     settled_price = None
     settled_result = None
@@ -735,31 +782,91 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
         if high is None or low is None:
             continue
         if signal == "BUY":
-            stop_hit = low <= float(stop_loss)
+            if high > peak_price:
+                peak_price = high
+            gain_r = (peak_price - float(entry_price)) / risk if risk > 0 else 0.0
+
+            if ts_r is not None and ts_r > 0 and gain_r >= ts_r:
+                ts_active = True
+                trail_dist = (trail_dist_r if trail_dist_r is not None and trail_dist_r > 0 else 1.0) * risk
+                new_sl = peak_price - trail_dist
+                if new_sl > active_sl:
+                    active_sl = new_sl
+            elif be_r is not None and be_r > 0 and gain_r >= be_r:
+                be_active = True
+                if float(entry_price) > active_sl:
+                    active_sl = float(entry_price)
+
+            stop_hit = low <= active_sl
             tp_hit = isinstance(take_profit, (int, float)) and high >= float(take_profit)
             if stop_hit and tp_hit:
-                settled_price = float(stop_loss)
-                settled_result = "loss"
-                settled_reason = "same_bar_stop_and_target"
+                settled_price = active_sl
+                if ts_active and active_sl > float(entry_price):
+                    settled_result = "win"
+                    settled_reason = "trailing_stop_hit"
+                elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
+                    settled_result = "flat"
+                    settled_reason = "breakeven_stop_hit"
+                else:
+                    settled_price = float(stop_loss)
+                    settled_result = "loss"
+                    settled_reason = "same_bar_stop_and_target"
             elif stop_hit:
-                settled_price = float(stop_loss)
-                settled_result = "loss"
-                settled_reason = "stop_loss_hit"
+                settled_price = active_sl
+                if ts_active and active_sl > float(entry_price):
+                    settled_result = "win"
+                    settled_reason = "trailing_stop_hit"
+                elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
+                    settled_result = "flat"
+                    settled_reason = "breakeven_stop_hit"
+                else:
+                    settled_result = "loss"
+                    settled_reason = "stop_loss_hit"
             elif tp_hit:
                 settled_price = float(take_profit)
                 settled_result = "win"
                 settled_reason = "take_profit_hit"
         else:
-            stop_hit = high >= float(stop_loss)
+            if low < trough_price:
+                trough_price = low
+            gain_r = (float(entry_price) - trough_price) / risk if risk > 0 else 0.0
+
+            if ts_r is not None and ts_r > 0 and gain_r >= ts_r:
+                ts_active = True
+                trail_dist = (trail_dist_r if trail_dist_r is not None and trail_dist_r > 0 else 1.0) * risk
+                new_sl = trough_price + trail_dist
+                if new_sl < active_sl:
+                    active_sl = new_sl
+            elif be_r is not None and be_r > 0 and gain_r >= be_r:
+                be_active = True
+                if float(entry_price) < active_sl:
+                    active_sl = float(entry_price)
+
+            stop_hit = high >= active_sl
             tp_hit = isinstance(take_profit, (int, float)) and low <= float(take_profit)
             if stop_hit and tp_hit:
-                settled_price = float(stop_loss)
-                settled_result = "loss"
-                settled_reason = "same_bar_stop_and_target"
+                settled_price = active_sl
+                if ts_active and active_sl < float(entry_price):
+                    settled_result = "win"
+                    settled_reason = "trailing_stop_hit"
+                elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
+                    settled_result = "flat"
+                    settled_reason = "breakeven_stop_hit"
+                else:
+                    settled_price = float(stop_loss)
+                    settled_result = "loss"
+                    settled_reason = "same_bar_stop_and_target"
             elif stop_hit:
-                settled_price = float(stop_loss)
-                settled_result = "loss"
-                settled_reason = "stop_loss_hit"
+                settled_price = active_sl
+                if ts_active and active_sl < float(entry_price):
+                    settled_result = "win"
+                    settled_reason = "trailing_stop_hit"
+                elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
+                    settled_result = "flat"
+                    settled_reason = "breakeven_stop_hit"
+                else:
+                    settled_result = "loss"
+                    settled_reason = "stop_loss_hit"
             elif tp_hit:
                 settled_price = float(take_profit)
                 settled_result = "win"
@@ -768,6 +875,10 @@ def _resolve_directional_alert_outcome(entry, *, price_df, now_dt, max_hold_bars
             settled_row = row
             settled_bars = idx
             break
+
+    outcome["active_stop_loss"] = active_sl
+    outcome["trailing_stop_activated"] = ts_active
+    outcome["breakeven_activated"] = be_active
 
     # Compute MFE/MAE only up to the actual exit bar (or the full window on a
     # time-exit), so bars after the trade already closed do not inflate them.
@@ -853,6 +964,9 @@ def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
     max_hold_bars = _safe_int(helpers["alert_realized_max_hold_bars"](), 64)
     if max_hold_bars is None or max_hold_bars < 1:
         max_hold_bars = 64
+    be_r = _safe_float(helpers.get("alert_realized_breakeven_r", lambda: 1.2)()) if callable(helpers.get("alert_realized_breakeven_r")) else 1.2
+    ts_r = _safe_float(helpers.get("alert_realized_trailing_r", lambda: 2.0)()) if callable(helpers.get("alert_realized_trailing_r")) else 2.0
+    trail_dist_r = _safe_float(helpers.get("alert_realized_trailing_distance_r", lambda: 0.8)()) if callable(helpers.get("alert_realized_trailing_distance_r")) else 0.8
     for symbol, rows in by_symbol.items():
         history_df = _load_symbol_realized_history(symbol, rows, helpers=helpers, now_dt=now_dt)
         for entry in rows:
@@ -862,6 +976,9 @@ def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
                     price_df=history_df,
                     now_dt=now_dt,
                     max_hold_bars=max_hold_bars,
+                    be_r=be_r,
+                    ts_r=ts_r,
+                    trail_dist_r=trail_dist_r,
                 )
             )
     return directional, outcomes
@@ -1067,14 +1184,20 @@ def _trade_close_outcome_icon(result):
         return "✅"
     if result == "loss":
         return "❌"
+    if result == "flat":
+        return "🛡️"
     return "⏱️"
 
 
 def _trade_close_exit_reason_label(exit_reason):
     text = str(exit_reason or "").strip().lower()
-    if text in ("take_profit", "tp"):
+    if text in ("take_profit", "tp", "take_profit_hit"):
         return "กระทบเป้า (TP)"
-    if text in ("stop_loss", "sl"):
+    if text in ("trailing_stop", "trailing_stop_hit"):
+        return "ล็อคกำไร (Trailing Stop)"
+    if text in ("breakeven_stop", "breakeven_stop_hit", "breakeven"):
+        return "กันทุน (Breakeven)"
+    if text in ("stop_loss", "sl", "stop_loss_hit"):
         return "กระทบหยุดขาดทุน (SL)"
     if text in ("time_exit", "time_stop", "time_stop_exit"):
         return "หมดเวลา Hold Plan"
@@ -1096,7 +1219,7 @@ def _build_trade_close_message(outcome, *, get_now):
     signal = str(outcome.get("signal") or "").strip().upper() or "—"
     result = str(outcome.get("outcome_result") or "").strip().lower()
     icon = _trade_close_outcome_icon(result)
-    result_label = {"win": "ชนะ", "loss": "แพ้", "flat": "เสมอ"}.get(result, result or "—")
+    result_label = {"win": "ชนะ", "loss": "แพ้", "flat": "เสมอ (กันทุน)"}.get(result, result or "—")
     strategy = str(outcome.get("strategy") or "—").strip().upper()
     entry_price = outcome.get("entry_price")
     exit_price = outcome.get("exit_price")

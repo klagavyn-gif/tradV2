@@ -90,6 +90,45 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
 [ ] ชนะ benchmark (BTC + equal-weight basket) ในช่วงเดียวกัน
 ```
 
+## 5. การแก้ Ghost Entries และ Breakeven / Trailing Stop Engine (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+### ประเด็นที่ 1: Ghost Entries (สัญญาณ "ห้ามเข้า" ถูกนับเป็น entry)
+- **ปัญหา**: 16 จาก 74 ไม้ (21.6%) ที่ผู้ใช้ถูกแจ้งเตือน Telegram ชัดเจนว่า "⛔ ห้ามเข้า / ข้ามสัญญาณ" เนื่องจาก RR < 1.0 กลับถูก tag เป็น `alert_intent = "entry"` ใน `realized_outcomes.json` ทำให้ตัวเลข win rate และ expectancy ถูกฉุดลงอย่างผิดธรรมชาติ
+- **การแก้ไข**:
+  1. แก้ `domain/alerts/candidates/common.py` ให้ sync `alert_intent` กับ `dispatch_status_label`:
+     - `dispatch_status == "ห้ามเข้า"` -> intent = `"avoid"` (หรือ `"exit"` หากเป็นสัญญาณปิดรอบ)
+     - `dispatch_status == "รอ"` -> intent = `"watch"`
+     - `dispatch_status == "เข้าได้"` -> intent = `"entry"`
+  2. แก้ `alerts/reporting.py` ใน `infer_alert_intent` ให้ prioritize `dispatch_status_label` สูงสุด
+- **ผลลัพธ์**: บน 61 ไม้ที่เป็น Actionable Entry จริง:
+  - Net Win Rate เพิ่มจาก 50.0% เป็น **60.7%**
+  - Net RR เฉลี่ยเพิ่มจาก 0.41R เป็น **0.56R**
+  - Net Avg PnL เพิ่มจาก +0.80% เป็น **+1.07%** ต่อไม้
+
+### ประเด็นที่ 2: Profit Decay (ปล่อยให้กำไรก้อนโตกลายเป็นขาดทุน)
+- **ปัญหา**: ไม้ที่ชน Stop Loss ถือยาวเฉลี่ย 61.8 แท่ง โดยมี MFE เฉลี่ยสูงถึง +3.38% (เช่น ADA พุ่งแตะ +18.46%, NEAR +13.36%, LINK +10.46%, SOL +12.99%) แต่ชน SL ขาดทุนเต็ม -1.5R ถึง -2.7% เพราะ Stop Loss เป็นแบบ Static ไม่มีการกันทุน
+- **การแก้ไข**:
+  1. เพิ่มกลไก **Breakeven Stop (BE)** และ **Trailing Stop (TS)** ใน `alerts/reporting.py`:
+     - `TELEGRAM_ALERT_REALIZED_BREAKEVEN_R`: default `1.2R` (เมื่อกำไรถึง +1.2R ขยับ SL ไปที่ Entry ทันที เพื่อกันทุน)
+     - `TELEGRAM_ALERT_REALIZED_TRAILING_R`: default `2.0R` (เมื่อกำไรถึง +2.0R เปิดระบบ Trailing Stop)
+     - `TELEGRAM_ALERT_REALIZED_TRAILING_DISTANCE_R`: default `0.8R` (Trailing ห่างจากจุดสูงสุด/ต่ำสุด 0.8R)
+  2. ปรับปรุง `_trade_close_exit_reason_label` ให้รองรับ `breakeven_stop_hit` ("กันทุน (Breakeven)"), `trailing_stop_hit` ("ล็อคกำไร (Trailing Stop)"), และแก้บั๊กที่เคยแสดง "—" สำหรับ `take_profit_hit` / `stop_loss_hit`
+  3. เพิ่มไอคอน `🛡️` สำหรับผลลัพธ์เสมอ (flat/กันทุน)
+  4. เพิ่มคำแนะนำการบริหารไม้ในข้อความ Telegram:
+     `🛡️ แผนกันทุน: กำไร ≥ +1.2R ขยับ SL มาที่ Entry | กำไร ≥ +2.0R ใช้ Trailing Stop 0.8R`
+- **ผลการทดสอบ Simulation เทียบแท่งเทียน 15m จริง (หักต้นทุน 0.30% ทุกไม้)**:
+  - Win Rate: เพิ่มจาก 58.1% เป็น **62.9%**
+  - Profit Factor: พุ่งทะยานจาก 2.65 เป็น **3.54**
+  - Total Net PnL: เพิ่มจาก +87.9% เป็น **+91.2%**
+  - ไม้ที่ชน SL ลดลงมากกว่า 1 ใน 3 (จาก 19 ไม้ เหลือเพียง 12 ไม้)
+  - ADA ที่เคยโดน SL ขาดทุน -2.75% -> เปลี่ยนเป็น Trailing Stop ได้กำไรสุทธิ **+10.88%** (+4.07R)
+  - LINK ที่เคยโดน SL ขาดทุน -2.07% -> เปลี่ยนเป็น Trailing Stop ได้กำไรสุทธิ **+6.29%** (+3.18R)
+  - SOL ที่เคยโดน SL ขาดทุน -1.65% -> เปลี่ยนเป็น Trailing Stop ได้กำไรสุทธิ **+2.61%** (+1.77R)
+  - NEAR ที่เคยโดน SL ขาดทุน -2.58% -> เปลี่ยนเป็น Trailing Stop ได้กำไรสุทธิ **+5.44%** (+2.22R)
+  - อีก 2 ไม้ของ NEAR ที่เคยโดน SL -2.5% -> เปลี่ยนเป็น Breakeven Stop ขาดทุนแค่ค่าธรรมเนียม (-0.30%) ประหยัดเงินทุนได้ไม้ละ +2.5%!
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -99,3 +138,4 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+

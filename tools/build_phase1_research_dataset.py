@@ -19,9 +19,9 @@ WATCHLIST = [
     "BNB-USD",
     "SOL-USD",
     "TRX-USD",
-    "NEAR-USD",
-    "LINK-USD",
     "PAXG-USD",
+    "ONDO-USD",
+    "SUI-USD",
 ]
 
 PERIOD_MAP = {

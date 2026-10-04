@@ -176,6 +176,21 @@ BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+
   - State file: จัดเก็บและบันทึกอัตโนมัติที่ `.data/telegram_alerts/risk_state.json` (ซิงค์ข้าม GitHub Actions runs ได้)
 - เครื่องมือตรวจสอบ: `python tools/test_binance_futures.py --risk-status`
 
+## 8. การปรับปรุง Symbol Universe สู่ RWA & Clean Trend Leaders (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+การปรับปรุงตระกร้าเหรียญเทรด 11 ตัว (M15 Futures Universe):
+- **ตัดออก**:
+  - `NEAR-USD`: Win Rate ต่ำสุด 30.0%, Net PnL -13.91% เกิด False Break / Whipsaw บ่อย
+  - `LINK-USD`: Win Rate 14.3%, Net PnL -6.50% ไซด์เวย์บีบแคบจนชน Stop Loss
+- **เพิ่มเข้ามา**:
+  - `ONDO-USD` (ONDOUSDT): ผู้นำหมวด Real World Assets (RWA) ค้ำประกันด้วยพันธบัตรรัฐบาลสหรัฐ BUIDL ของ BlackRock วิ่งตาม Macro และข่าวสารสถาบันโลกจริง สเปรดแคบมาก
+  - `SUI-USD` (SUIUSDT): ผู้นำโมเมนตัม Layer-1 วิ่งเป็นเทรนด์คลีนบน M15 ไม่ค่อยมีไส้เทียนหลอก สอดคล้องกับกลยุทธ์ CDC ActionZone + VIXFix
+- **Universe ใหม่ 11 เหรียญ**:
+  `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
+- อัปเดตครอบคลุม: `.github/workflows/main.yml`, `daily-summary.yml`, `retry-hosted-runner-failures.yml`, `config.py`, และชุด tools วิเคราะห์ทั้งหมด
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

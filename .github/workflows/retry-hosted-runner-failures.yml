@@ -81,7 +81,7 @@ jobs:
               return;
             }
 
-            const defaultSymbols = "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD";
+            const defaultSymbols = "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD";
             const inputs = {
               symbols: defaultSymbols,
               period: "15m",

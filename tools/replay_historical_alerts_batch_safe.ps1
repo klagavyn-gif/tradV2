@@ -18,9 +18,9 @@ $watchlist = @(
     "BNB-USD",
     "SOL-USD",
     "TRX-USD",
-    "NEAR-USD",
-    "LINK-USD",
-    "PAXG-USD"
+    "PAXG-USD",
+    "ONDO-USD",
+    "SUI-USD"
 )
 
 function Write-Utf8NoBom {

@@ -20,7 +20,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 WATCHLIST = [
     "BTC-USD", "ETH-USD", "DOGE-USD", "ADA-USD", "XRP-USD", "BNB-USD",
-    "SOL-USD", "TRX-USD", "NEAR-USD", "LINK-USD", "PAXG-USD",
+    "SOL-USD", "TRX-USD", "PAXG-USD", "ONDO-USD", "SUI-USD",
 ]
 
 COST_PER_SIDE = 0.0015  # 0.15% per side = 0.30% round trip

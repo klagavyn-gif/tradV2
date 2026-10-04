@@ -23,7 +23,7 @@ BOOTSTRAP_SEED = 20260919
 
 BENCHMARK_SYMBOLS = (
     "BTC-USD", "ETH-USD", "DOGE-USD", "ADA-USD", "XRP-USD", "BNB-USD",
-    "SOL-USD", "TRX-USD", "NEAR-USD", "LINK-USD", "PAXG-USD",
+    "SOL-USD", "TRX-USD", "PAXG-USD", "ONDO-USD", "SUI-USD",
 )
 _BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
 

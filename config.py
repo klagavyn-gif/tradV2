@@ -764,7 +764,7 @@ TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES = _env_int("TELEGRAM_DAILY_BEST
 TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR = _env_float("TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR", 0.0)
 TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST = _env_csv_set(
     "TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST",
-    "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,NEAR-USD,LINK-USD,PAXG-USD",
+    "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD",
 )
 TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE = _env_bool("TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE", True)
 TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE = _env_float("TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE", 68.0)
@@ -964,22 +964,22 @@ TELEGRAM_ALERT_SYMBOL_QUALITY_PROFILES = {
         "min_trades": 10,
         "min_robustness_score": 55.0,
     },
-    "NEAR-USD": {
-        "buy_min_confidence": 71.0,
-        "sell_min_confidence": 72.0,
-        "min_score": 80.0,
+    "ONDO-USD": {
+        "buy_min_confidence": 72.0,
+        "sell_min_confidence": 73.0,
+        "min_score": 82.0,
         "buy_min_win_rate_pct": 58.0,
         "sell_min_win_rate_pct": 60.0,
         "buy_min_expectancy_rr": 0.05,
         "sell_min_expectancy_rr": 0.05,
         "min_trades": 10,
     },
-    "LINK-USD": {
-        "buy_min_confidence": 75.0,
-        "sell_min_confidence": 76.0,
-        "min_score": 85.0,
-        "buy_min_win_rate_pct": 60.0,
-        "sell_min_win_rate_pct": 62.0,
+    "SUI-USD": {
+        "buy_min_confidence": 73.0,
+        "sell_min_confidence": 74.0,
+        "min_score": 83.0,
+        "buy_min_win_rate_pct": 59.0,
+        "sell_min_win_rate_pct": 61.0,
         "buy_min_expectancy_rr": 0.06,
         "sell_min_expectancy_rr": 0.06,
         "min_trades": 10,
@@ -1265,24 +1265,24 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,
     },
-    "NEAR-USD": {
+    "ONDO-USD": {
+        "require_pattern": False,
+        "require_ema200_alignment": True,
+        "vix_spike_lookback_bars": 2,
+        "stoch_oversold": 25.0,
+        "forecast_min_score": 60.0,
+        "daily_best_min_red_to_green_score": 85.0,
+        "daily_best_require_reclaim": True,
+        "take_profit_pct": 0.2,
+        "max_hold_bars": 24,
+    },
+    "SUI-USD": {
         "require_pattern": False,
         "require_ema200_alignment": True,
         "vix_spike_lookback_bars": 2,
         "stoch_oversold": 30.0,
         "forecast_min_score": 60.0,
-        "daily_best_min_red_to_green_score": 80.0,
-        "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
-        "max_hold_bars": 24,
-    },
-    "LINK-USD": {
-        "require_pattern": False,
-        "require_ema200_alignment": False,
-        "vix_spike_lookback_bars": 2,
-        "stoch_oversold": 25.0,
-        "forecast_min_score": 60.0,
-        "daily_best_min_red_to_green_score": 86.0,
+        "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
         "take_profit_pct": 0.2,
         "max_hold_bars": 24,

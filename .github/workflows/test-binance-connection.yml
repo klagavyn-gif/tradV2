@@ -1,0 +1,76 @@
+name: Test Binance Futures Connection
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Network to test'
+        required: true
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - testnet
+          - live
+
+jobs:
+  test_connection:
+    name: Verify Binance Futures API
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Dependencies
+        run: |
+          pip install requests python-dotenv
+
+      - name: Test Connection (Auto / Testnet / Live)
+        env:
+          BINANCE_FUTURES_API_KEY: ${{ secrets.BINANCE_FUTURES_API_KEY }}
+          BINANCE_FUTURES_API_SECRET: ${{ secrets.BINANCE_FUTURES_API_SECRET }}
+        run: |
+          python - << 'PY'
+          import os
+          import sys
+          import subprocess
+
+          mode = "${{ github.event.inputs.mode }}"
+          print(f"Testing Binance Futures API Connection (Mode: {mode})...")
+
+          key = os.environ.get("BINANCE_FUTURES_API_KEY", "")
+          secret = os.environ.get("BINANCE_FUTURES_API_SECRET", "")
+          if not key or not secret:
+              print("❌ ERROR: Secrets BINANCE_FUTURES_API_KEY or BINANCE_FUTURES_API_SECRET are empty!")
+              sys.exit(1)
+
+          masked_key = key[:6] + "..." + key[-4:] if len(key) > 10 else "***"
+          print(f"Key configured: {masked_key}")
+
+          # Run diagnostic
+          if mode == "live":
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions"]
+          elif mode == "testnet":
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance", "--positions"]
+          else:
+              # auto: try testnet first, if fails try live
+              print("\n--- [1/2] Trying Testnet endpoint ---")
+              res = subprocess.run([sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance"], capture_output=True, text=True)
+              print(res.stdout)
+              if "[PASS] Total USDT" in res.stdout:
+                  print("✅ SUCCESS: Successfully connected to Binance Testnet!")
+                  sys.exit(0)
+              print("\n--- [2/2] Trying Live endpoint ---")
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions"]
+
+          res = subprocess.run(cmd, text=True)
+          if res.returncode != 0:
+              sys.exit(res.returncode)
+          PY

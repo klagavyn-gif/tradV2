@@ -22,7 +22,8 @@ from infrastructure.binance import BinanceFuturesClient, BinanceFuturesOrderMana
 
 def main():
     parser = argparse.ArgumentParser(description="Binance USDT-M Futures Diagnostic Tool")
-    parser.add_argument("--testnet", action="store_true", default=None, help="Use Testnet (default: reads config)")
+    parser.add_argument("--testnet", action="store_true", default=False, help="Use Testnet")
+    parser.add_argument("--live", action="store_true", default=False, help="Use Live account")
     parser.add_argument("--api-key", default=None, help="Binance API Key (default: reads config/env)")
     parser.add_argument("--api-secret", default=None, help="Binance API Secret (default: reads config/env)")
     parser.add_argument("--ping", action="store_true", help="Ping Binance Futures server")
@@ -33,7 +34,13 @@ def main():
 
     args = parser.parse_args()
 
-    testnet = args.testnet if args.testnet is not None else getattr(config, "BINANCE_FUTURES_TESTNET", True)
+    if args.live:
+        testnet = False
+    elif args.testnet:
+        testnet = True
+    else:
+        testnet = getattr(config, "BINANCE_FUTURES_TESTNET", True)
+
     api_key = args.api_key or getattr(config, "BINANCE_FUTURES_API_KEY", "") or os.environ.get("BINANCE_FUTURES_API_KEY", "")
     api_secret = args.api_secret or getattr(config, "BINANCE_FUTURES_API_SECRET", "") or os.environ.get("BINANCE_FUTURES_API_SECRET", "")
 
@@ -76,10 +83,22 @@ def main():
             print("   BINANCE_FUTURES_API_SECRET=your_secret")
         else:
             print("\n Checking Account Balance...")
-            usdt = client.get_usdt_balance()
-            print(f"   Total USDT:     {usdt['total']:,.2f} USDT")
-            print(f"   Available USDT: {usdt['available']:,.2f} USDT")
-            print(f"   Unrealized PnL: {usdt['crossUnPnl']:+,.2f} USDT")
+            res = client._request("GET", "/fapi/v2/balance", signed=True)
+            if not res.get("success"):
+                code = res.get("code")
+                msg = res.get("msg")
+                print(f"   [FAIL] Authentication failed! Code: {code}, Message: {msg}")
+                if code == -2015:
+                    print("   [HINT] Code -2015 means Invalid API-key, IP restriction, or wrong network (Testnet vs Live).")
+                    if testnet:
+                        print("   [HINT] Currently testing in TESTNET mode. If your key is for LIVE Binance.com, add --live")
+                    else:
+                        print("   [HINT] Currently testing in LIVE mode. If your key is for TESTNET, add --testnet")
+            else:
+                usdt = client.get_usdt_balance()
+                print(f"   [PASS] Total USDT:     {usdt['total']:,.2f} USDT")
+                print(f"   [PASS] Available USDT: {usdt['available']:,.2f} USDT")
+                print(f"          Unrealized PnL: {usdt['crossUnPnl']:+,.2f} USDT")
 
     # 4. Positions Check
     if args.positions:

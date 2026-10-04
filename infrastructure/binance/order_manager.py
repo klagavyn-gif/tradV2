@@ -55,13 +55,14 @@ class BinanceFuturesOrderManager:
     def __init__(
         self,
         client: BinanceFuturesClient,
-        trade_notional_usdt: float = 10.0,
+        trade_notional_usdt: float = 400.0,
         max_positions: int = 2,
-        leverage: int = 1,
+        leverage: int = 20,
         margin_type: str = "ISOLATED",
         breakeven_r: float = 1.2,
         trailing_r: float = 2.0,
         trailing_dist_r: float = 0.8,
+        risk_manager: Optional[Any] = None,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -71,12 +72,24 @@ class BinanceFuturesOrderManager:
         self.breakeven_r = float(breakeven_r)
         self.trailing_r = float(trailing_r)
         self.trailing_dist_r = float(trailing_dist_r)
+        self.risk_manager = risk_manager
 
     def execute_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """
         Execute an entry candidate on Binance Futures with Stop Loss and Trailing Stop.
-        Performs pre-flight checks: balance, existing positions, max concurrent positions.
+        Performs pre-flight checks: circuit breaker, balance, existing positions, max concurrent positions.
         """
+        # 0. Risk Pre-flight: Check Circuit Breaker
+        if self.risk_manager:
+            is_blocked, cb_reason, cb_until = self.risk_manager.check_circuit_breaker()
+            if is_blocked:
+                return {
+                    "success": False,
+                    "reason": "circuit_breaker_active",
+                    "circuit_breaker_reason": cb_reason,
+                    "circuit_breaker_until": cb_until,
+                }
+
         raw_symbol = str(candidate.get("symbol") or "").strip()
         signal = str(candidate.get("signal") or "").strip().upper()
         entry_price = float(candidate.get("entry_price") or 0.0)
@@ -116,8 +129,29 @@ class BinanceFuturesOrderManager:
         min_qty = filters["minQty"]
         min_notional = filters["minNotional"]
 
+        # Calculate sizing via RiskManager (Dynamic Equity / Streak Throttle)
+        sizing_info = None
+        if self.risk_manager:
+            usdt_bal = self.client.get_usdt_balance()
+            total_equity = float(usdt_bal.get("total", 0.0))
+            sizing_info = self.risk_manager.calculate_trade_sizing(
+                candidate=candidate,
+                total_equity=total_equity,
+                leverage=self.leverage,
+                fallback_notional=self.trade_notional_usdt,
+            )
+            target_notional = sizing_info["final_notional"]
+        else:
+            target_notional = self.trade_notional_usdt
+            sizing_info = {
+                "final_notional": target_notional,
+                "final_margin": target_notional / max(1, self.leverage),
+                "multiplier": 1.0,
+                "multiplier_reason": "normal",
+            }
+
         # Scale order notional to meet symbol's min_notional requirement
-        order_notional = max(self.trade_notional_usdt, min_notional)
+        order_notional = max(target_notional, min_notional)
         raw_quantity = order_notional / entry_price
         quantity = round_to_step(raw_quantity, step_size)
 
@@ -212,6 +246,7 @@ class BinanceFuturesOrderManager:
             "entry_price": exec_price,
             "stop_loss": clean_sl_price,
             "notional": quantity * exec_price,
+            "sizing_info": sizing_info,
             "entry_order": entry_data,
             "sl_order": sl_res.get("data") if sl_res else None,
             "ts_order": ts_res.get("data") if ts_res else None,

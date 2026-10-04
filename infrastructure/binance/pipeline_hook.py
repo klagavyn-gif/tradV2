@@ -39,6 +39,7 @@ def execute_binance_auto_trade_pipeline(
 
     from .client import BinanceFuturesClient
     from .order_manager import BinanceFuturesOrderManager
+    from .risk_manager import BinanceFuturesRiskManager
 
     client = BinanceFuturesClient(
         api_key=api_key,
@@ -46,13 +47,42 @@ def execute_binance_auto_trade_pipeline(
         testnet=testnet,
     )
 
-    trade_notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 10.0))
+    trade_notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0))
     max_positions = int(getattr(config, "BINANCE_FUTURES_MAX_POSITIONS", 2))
-    leverage = int(getattr(config, "BINANCE_FUTURES_LEVERAGE", 1))
+    leverage = int(getattr(config, "BINANCE_FUTURES_LEVERAGE", 20))
     margin_type = str(getattr(config, "BINANCE_FUTURES_MARGIN_TYPE", "ISOLATED"))
     be_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_BREAKEVEN_R", 1.2))
     ts_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_R", 2.0))
     trail_dist_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_DISTANCE_R", 0.8))
+
+    risk_mgr = BinanceFuturesRiskManager(
+        dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
+        equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 0.40),
+        min_notional_usdt=getattr(config, "BINANCE_FUTURES_MIN_TRADE_NOTIONAL_USDT", 20.0),
+        max_notional_usdt=getattr(config, "BINANCE_FUTURES_MAX_TRADE_NOTIONAL_USDT", 1500.0),
+        loss_streak_throttle=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_THROTTLE", 2),
+        loss_streak_max=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_MAX", 3),
+        circuit_breaker_hours=getattr(config, "BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS", 6.0),
+        daily_max_loss_pct=getattr(config, "BINANCE_FUTURES_DAILY_MAX_LOSS_PCT", 4.0),
+        win_streak_scale_enable=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE", True),
+        win_streak_scale_mult=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_MULT", 1.25),
+    )
+
+    # Sync settled outcomes into risk manager
+    try:
+        import json
+        outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
+        if os.path.exists(outcomes_path):
+            with open(outcomes_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            if isinstance(payload, dict) and "outcomes" in payload:
+                risk_mgr.update_from_settled_outcomes(
+                    payload["outcomes"],
+                    leverage=leverage,
+                    notional_per_trade=trade_notional,
+                )
+    except Exception as e:
+        logger.warning("Could not sync outcomes to RiskManager: %s", e)
 
     order_mgr = BinanceFuturesOrderManager(
         client=client,
@@ -63,6 +93,7 @@ def execute_binance_auto_trade_pipeline(
         breakeven_r=be_r,
         trailing_r=ts_r,
         trailing_dist_r=trail_dist_r,
+        risk_manager=risk_mgr,
     )
 
     results = {
@@ -70,6 +101,7 @@ def execute_binance_auto_trade_pipeline(
         "testnet": testnet,
         "be_updates": [],
         "executed_entries": [],
+        "cb_alerted": False,
     }
 
     # 1. Sync Breakeven Stops on any existing open positions
@@ -110,6 +142,16 @@ def execute_binance_auto_trade_pipeline(
                 if callable(send_telegram_alert):
                     env_badge = "🧪 [Testnet]" if testnet else "⚡ [Real Money]"
                     margin_used = exec_res['notional'] / max(1, leverage)
+                    sizing_info = exec_res.get("sizing_info") or {}
+                    sizing_note = ""
+                    mult_reason = str(sizing_info.get("multiplier_reason") or "")
+                    if mult_reason.startswith("loss_streak_throttle"):
+                        streak = sizing_info.get("loss_streak", 2)
+                        sizing_note = f"\n⚠️ <b>[Risk Throttle]</b> ลดขนาดไม้ลง 50% เนื่องจากผลแพ้ {streak} ไม้ล่าสุด"
+                    elif mult_reason.startswith("win_streak_scale"):
+                        streak = sizing_info.get("win_streak", 2)
+                        sizing_note = f"\n🔥 <b>[Trend Momentum]</b> ขยายขนาดไม้ 1.25x เนื่องจากชนะต่อเนื่อง {streak} ไม้"
+
                     try:
                         usdt_bal = client.get_usdt_balance()
                         bal_str = f"\n💰 <b>เงินคงเหลือในพอร์ต:</b> {usdt_bal['available']:,.2f} USDT (รวม {usdt_bal['total']:,.2f} USDT)"
@@ -124,6 +166,7 @@ def execute_binance_auto_trade_pipeline(
                         f"<b>ราคาเข้า:</b> {exec_res['entry_price']:,}\n"
                         f"<b>Stop Loss:</b> {exec_res['stop_loss']:,} (ตั้งคำสั่ง STOP_MARKET แล้ว)\n"
                         f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
+                        f"{sizing_note}"
                         f"{bal_str}"
                     )
                     try:
@@ -131,7 +174,24 @@ def execute_binance_auto_trade_pipeline(
                     except Exception:
                         pass
             else:
-                logger.warning("Auto-trade skipped/failed for %s: %s", c.get("symbol"), exec_res.get("reason"))
+                reason = exec_res.get("reason")
+                if reason == "circuit_breaker_active":
+                    cb_reason = exec_res.get("circuit_breaker_reason") or "drawdown_protection"
+                    cb_until = exec_res.get("circuit_breaker_until") or "ชั่วคราว"
+                    if callable(send_telegram_alert) and not results.get("cb_alerted"):
+                        msg = (
+                            f"🚨 <b>[Risk Control] บอทอยู่ในโหมด Circuit Breaker พักการเทรด!</b>\n"
+                            f"────────────────\n"
+                            f"<b>สาเหตุ:</b> {cb_reason}\n"
+                            f"<b>สถานะ:</b> หยุดเปิดไม้ชั่วคราวเพื่อปกป้องเงินทุน (พักจนถึง {cb_until})\n"
+                            f"<b>คำแนะนำ:</b> รอให้สภาวะตลาดหลุดพ้นช่วงสับขาหลอก ระบบจะกลับมาเทรดอัตโนมัติ"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                            results["cb_alerted"] = True
+                        except Exception:
+                            pass
+                logger.warning("Auto-trade skipped/failed for %s: %s", c.get("symbol"), reason)
         except Exception as e:
             logger.exception("Exception executing auto-trade candidate: %s", e)
 

@@ -151,7 +151,30 @@ BINANCE_FUTURES_TRADE_NOTIONAL_USDT = 400.0     # ขนาดมูลค่า
 BINANCE_FUTURES_MAX_POSITIONS = 2               # ถือพร้อมกันไม่เกิน 2 ไม้
 BINANCE_FUTURES_LEVERAGE = 20                   # Leverage 20x (Isolated Margin)
 BINANCE_FUTURES_MARGIN_TYPE = "ISOLATED"        # Isolated Margin แยกความเสี่ยงรายไม้
+
+# Dynamic Risk Management & Circuit Breaker
+BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED = True   # เปิดระบบคำนวณขนาดไม้ตาม % พอร์ตจริง
+BINANCE_FUTURES_EQUITY_RISK_PCT = 0.40          # 0.40% ของ Equity เป็น Margin (ที่ 20x = ~20 USDT บน 5,000 USDT)
+BINANCE_FUTURES_LOSS_STREAK_THROTTLE = 2        # แพ้ติดกัน 2 ไม้ -> ลดขนาดไม้ลง 50%
+BINANCE_FUTURES_LOSS_STREAK_MAX = 3             # แพ้ติดกัน 3 ไม้ -> Circuit Breaker พักเทรด 6 ชม.
+BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS = 6.0     # เวลาพัก Circuit Breaker
+BINANCE_FUTURES_DAILY_MAX_LOSS_PCT = 4.0        # ขาดทุนรายวันเกิน 4% -> หยุดเทรดพักจนหมดวัน UTC
+BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+ ไม้ -> สเกลขนาดไม้ 1.25x
 ```
+
+## 7. ระบบ Dynamic Risk Sizing & Circuit Breaker (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ (Verified with Unit Tests)**
+
+โครงสร้างโมดูล (`infrastructure/binance/risk_manager.py`):
+- `BinanceFuturesRiskManager`:
+  - **Dynamic Equity Sizing**: ปรับขนาดไม้ตามมูลค่าเงินในกระเป๋าจริง (เมื่อพอร์ตโต ไม้จะโตขึ้นแบบ Compound, เมื่อพอร์ตลด ไม้จะเล็กลงแบบ Anti-ruin)
+  - **Loss Streak Throttle**: หากแพ้ติดกัน 2 ไม้ (`consecutive_losses >= 2`) ระบบจะลดขนาดไม้ลง **50%** อัตโนมัติ ป้องกันการ Drawdown ซ้ำซ้อนในช่วงตลาด Sideway / Chop
+  - **Loss Streak Circuit Breaker**: หากแพ้ติดกัน 3 ไม้ (`consecutive_losses >= 3`) ระบบจะเข้าสู่โหมด **Circuit Breaker พักการเทรด 6 ชั่วโมง** และแจ้งเตือน Telegram ทันที
+  - **Daily Max Drawdown**: หากผลขาดทุนสะสมในวันนั้นเกิน **4.0%** ของพอร์ต ระบบจะหยุดพักการเทรดอัตโนมัติจนจบวัน UTC
+  - **Controlled Win Streak Scaling**: หากชนะติดกัน 2 ไม้ขึ้นไป และสัญญาณมี AI Conviction สูง ระบบจะขยายขนาดไม้ **1.25x** เพื่อเก็บเกี่ยวกำไรจากแนวโน้มใหญ่
+  - State file: จัดเก็บและบันทึกอัตโนมัติที่ `.data/telegram_alerts/risk_state.json` (ซิงค์ข้าม GitHub Actions runs ได้)
+- เครื่องมือตรวจสอบ: `python tools/test_binance_futures.py --risk-status`
 
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local

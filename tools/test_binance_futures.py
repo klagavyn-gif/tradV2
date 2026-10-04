@@ -13,6 +13,9 @@ import sys
 import argparse
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 # Add workspace root to sys.path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -30,6 +33,7 @@ def main():
     parser.add_argument("--balance", action="store_true", help="Check account USDT balance")
     parser.add_argument("--positions", action="store_true", help="List active open positions")
     parser.add_argument("--symbol-info", default=None, help="Inspect precision and minNotional for symbol (e.g. ADA-USD or BTCUSDT)")
+    parser.add_argument("--risk-status", action="store_true", help="Display current risk management & circuit breaker status")
     parser.add_argument("--dry-run", action="store_true", help="Simulate sizing and pre-flight checks for a test candidate")
 
     args = parser.parse_args()
@@ -112,17 +116,55 @@ def main():
             for p in positions:
                 print(f"   {p['symbol']}: {p['side']} {p['positionAmt']} @ {p['entryPrice']} (Mark: {p['markPrice']}, PnL: {p['unRealizedProfit']:+.2f} USDT)")
 
-    # 5. Dry-Run Candidate Sizing
+    # 5. Risk Status Check
+    if args.risk_status or not (args.ping or args.symbol_info or args.dry_run or args.positions or args.balance):
+        from infrastructure.binance import BinanceFuturesRiskManager
+        rm = BinanceFuturesRiskManager(
+            dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
+            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 0.40),
+            loss_streak_throttle=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_THROTTLE", 2),
+            loss_streak_max=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_MAX", 3),
+            circuit_breaker_hours=getattr(config, "BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS", 6.0),
+            daily_max_loss_pct=getattr(config, "BINANCE_FUTURES_DAILY_MAX_LOSS_PCT", 4.0),
+            win_streak_scale_enable=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE", True),
+            win_streak_scale_mult=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_MULT", 1.25),
+        )
+        state = rm.load_state()
+        is_blocked, cb_reason, cb_until = rm.check_circuit_breaker()
+        print("\n Risk Manager & Circuit Breaker Status:")
+        print(f"   Circuit Breaker:    {'🚨 ACTIVE (Trading Paused!)' if is_blocked else '✅ Clear (Normal Trading)'}")
+        if is_blocked:
+            print(f"   Paused Reason:      {cb_reason}")
+            print(f"   Paused Until:       {cb_until}")
+        print(f"   Consecutive Losses: {state.get('consecutive_losses', 0)} (Throttle at {rm.loss_streak_throttle}, Pause at {rm.loss_streak_max})")
+        print(f"   Consecutive Wins:   {state.get('consecutive_wins', 0)}")
+        print(f"   Today's Losses:     {state.get('daily_loss_pct', 0.0):.2f}% (Limit: {rm.daily_max_loss_pct}%)")
+        print(f"   Today's PnL (Est):  {state.get('daily_pnl_usdt', 0.0):+.2f} USDT")
+        print(f"   Today's Trades:     {state.get('daily_trades_count', 0)}")
+
+    # 6. Dry-Run Candidate Sizing
     if args.dry_run:
+        from infrastructure.binance import BinanceFuturesRiskManager
         print("\n Dry-Run Order Manager Simulation...")
+        rm = BinanceFuturesRiskManager(
+            dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
+            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 0.40),
+            loss_streak_throttle=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_THROTTLE", 2),
+            loss_streak_max=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_MAX", 3),
+            circuit_breaker_hours=getattr(config, "BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS", 6.0),
+            daily_max_loss_pct=getattr(config, "BINANCE_FUTURES_DAILY_MAX_LOSS_PCT", 4.0),
+            win_streak_scale_enable=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE", True),
+            win_streak_scale_mult=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_MULT", 1.25),
+        )
         order_mgr = BinanceFuturesOrderManager(
             client=client,
-            trade_notional_usdt=getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 10.0),
+            trade_notional_usdt=getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0),
             max_positions=getattr(config, "BINANCE_FUTURES_MAX_POSITIONS", 2),
-            leverage=getattr(config, "BINANCE_FUTURES_LEVERAGE", 1),
+            leverage=getattr(config, "BINANCE_FUTURES_LEVERAGE", 20),
             breakeven_r=getattr(config, "TELEGRAM_ALERT_REALIZED_BREAKEVEN_R", 1.2),
             trailing_r=getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_R", 2.0),
             trailing_dist_r=getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_DISTANCE_R", 0.8),
+            risk_manager=rm,
         )
         sample_candidate = {
             "symbol": "ADA-USD",
@@ -135,14 +177,22 @@ def main():
         sym = normalize_futures_symbol(sample_candidate["symbol"])
         f = client.get_symbol_filters(sym)
         if f:
-            notional = max(order_mgr.trade_notional_usdt, f["minNotional"])
+            total_equity = 5000.0  # reference balance
+            sizing = rm.calculate_trade_sizing(
+                candidate=sample_candidate,
+                total_equity=total_equity,
+                leverage=order_mgr.leverage,
+                fallback_notional=order_mgr.trade_notional_usdt,
+            )
+            notional = max(sizing["final_notional"], f["minNotional"])
             from infrastructure.binance.order_manager import round_to_step, round_to_tick
             qty = round_to_step(notional / sample_candidate["entry_price"], f["stepSize"])
             risk = abs(sample_candidate["entry_price"] - sample_candidate["stop_loss"])
             be_trigger = sample_candidate["entry_price"] + (order_mgr.breakeven_r * risk)
             ts_trigger = sample_candidate["entry_price"] + (order_mgr.trailing_r * risk)
             callback_pct = round(min(5.0, max(0.1, (order_mgr.trailing_dist_r * risk / sample_candidate["entry_price"]) * 100.0)), 1)
-            print(f"   Target Notional: {notional} USDT")
+            print(f"   Target Notional: {notional} USDT (Margin: ~{sizing['final_margin']} USDT @ {order_mgr.leverage}x)")
+            print(f"   Sizing Mode:     {sizing['sizing_mode']} (Multiplier: {sizing['multiplier']}x, Reason: {sizing['multiplier_reason']})")
             print(f"   Order Quantity:  {qty} {f['baseAsset']}")
             print(f"   Initial SL:      {round_to_tick(sample_candidate['stop_loss'], f['tickSize'])}")
             print(f"   BE Trigger (+{order_mgr.breakeven_r}R): {round_to_tick(be_trigger, f['tickSize'])} (Move SL to Entry)")

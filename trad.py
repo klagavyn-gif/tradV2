@@ -98,6 +98,7 @@ from alerts.reporting import (
     sync_alert_history_csv_locked as _alerts_reporting_sync_alert_history_csv_locked,
     write_verify_output as _alerts_reporting_write_verify_output,
 )
+from infrastructure.binance import execute_binance_auto_trade_pipeline as _execute_binance_auto_trade_pipeline
 from data_layer.yahoo import (
     build_source_health_snapshot as _data_build_source_health_snapshot,
     chart_interval as _data_chart_interval,
@@ -6223,7 +6224,7 @@ def _build_daily_summary_message(results, existing_candidates=None, min_conf=Non
 
 
 def _notify_telegram_from_results(results, runtime_context=None):
-    return _alerts_pipeline_notify_telegram_from_results(
+    sent = _alerts_pipeline_notify_telegram_from_results(
         results,
         config=config,
         helpers=_pipeline_module_helpers(),
@@ -6231,6 +6232,26 @@ def _notify_telegram_from_results(results, runtime_context=None):
         logger=logger,
         runtime_context=runtime_context,
     )
+    if bool(getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False)):
+        try:
+            recent_sent = _read_telegram_alert_history(days=1)
+            now_dt = get_thai_now()
+            cutoff = now_dt - timedelta(minutes=16)
+            fresh_entries = []
+            for row in (recent_sent or []):
+                ts = _alert_timestamp_value(row.get("timestamp"))
+                if ts and ts >= cutoff:
+                    fresh_entries.append(row)
+            _execute_binance_auto_trade_pipeline(
+                fresh_entries,
+                config=config,
+                helpers=_reporting_module_helpers(),
+                get_now=get_thai_now,
+                send_telegram_alert=send_telegram_alert,
+            )
+        except Exception as e:
+            logger.exception("Binance Futures auto-trade execution error: %s", e)
+    return sent
 
 
 def _track_alert_performance(candidates, sent_count):

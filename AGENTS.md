@@ -129,6 +129,30 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
   - NEAR ที่เคยโดน SL ขาดทุน -2.58% -> เปลี่ยนเป็น Trailing Stop ได้กำไรสุทธิ **+5.44%** (+2.22R)
   - อีก 2 ไม้ของ NEAR ที่เคยโดน SL -2.5% -> เปลี่ยนเป็น Breakeven Stop ขาดทุนแค่ค่าธรรมเนียม (-0.30%) ประหยัดเงินทุนได้ไม้ละ +2.5%!
 
+## 6. ระบบ Binance USDT-M Futures Auto-Trading Connector (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ (Ready for Testnet & Live)**
+
+โครงสร้างโมดูล (`infrastructure/binance/`):
+- `client.py`: `BinanceFuturesClient` รองรับทั้ง Testnet (`testnet.binancefuture.com`) และ Live (`fapi.binance.com`), ทำ HMAC-SHA256 request signing อัตโนมัติ, ตรวจสอบ Balance, Positions, Orders, ExchangeInfo
+- `order_manager.py`: `BinanceFuturesOrderManager` ป้องกันความเสี่ยงรอบด้าน:
+  - คำนวณ Lot Size และปัดเศษตาม `stepSize` และ `tickSize` ของแต่ละเหรียญ
+  - Scale ขนาดไม้ให้ไม่ต่ำกว่า `minNotional` (เช่น ADA 5 USDT, BTC 50 USDT)
+  - วางคำสั่ง Entry (`MARKET`), Stop Loss (`STOP_MARKET` แบบ `closePosition=True`), และ Trailing Stop (`TRAILING_STOP_MARKET` แบบ `reduceOnly=True` คำนวณจากระยะ 0.8R)
+  - ฟังก์ชัน `sync_breakeven_stops()` ตรวจจับไม้ที่กำไรแตะ +1.2R แล้วเลื่อน Stop Loss ไปที่ Entry บนกระดานเทรดจริงอัตโนมัติ
+- `pipeline_hook.py`: เชื่อมต่อเข้ากับ `_notify_telegram_from_results` ใน `trad.py` โดยรันเฉพาะเมื่อ `BINANCE_FUTURES_AUTO_TRADE_ENABLED = True` และเลือกเฉพาะไม้ที่ `dispatch_status_label == "เข้าได้"`
+- เครื่องมือทดสอบ: `tools/test_binance_futures.py` (`--ping`, `--balance`, `--positions`, `--dry-run`, `--symbol-info`)
+
+การตั้งค่า (`config.py`):
+```python
+BINANCE_FUTURES_AUTO_TRADE_ENABLED = False       # ค่าเริ่มต้นปิดไว้เพื่อความปลอดภัย
+BINANCE_FUTURES_TESTNET = True                   # ค่าเริ่มต้นใช้ Testnet เงินจำลอง
+BINANCE_FUTURES_TRADE_NOTIONAL_USDT = 10.0      # ขนาดไม้ทดสอบเริ่มต้น 10 USDT
+BINANCE_FUTURES_MAX_POSITIONS = 2                # ถือพร้อมกันไม่เกิน 2 ไม้
+BINANCE_FUTURES_LEVERAGE = 1                     # Leverage 1x (ความเสี่ยงเทียบเท่า Spot)
+BINANCE_FUTURES_MARGIN_TYPE = "ISOLATED"         # Isolated Margin แยกความเสี่ยงรายไม้
+```
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -138,4 +162,5 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+
 

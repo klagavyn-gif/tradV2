@@ -147,10 +147,10 @@ metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVI
 ```python
 BINANCE_FUTURES_AUTO_TRADE_ENABLED = False       # ค่าเริ่มต้นปิดไว้เพื่อความปลอดภัย
 BINANCE_FUTURES_TESTNET = True                   # ค่าเริ่มต้นใช้ Testnet เงินจำลอง
-BINANCE_FUTURES_TRADE_NOTIONAL_USDT = 10.0      # ขนาดไม้ทดสอบเริ่มต้น 10 USDT
-BINANCE_FUTURES_MAX_POSITIONS = 2                # ถือพร้อมกันไม่เกิน 2 ไม้
-BINANCE_FUTURES_LEVERAGE = 1                     # Leverage 1x (ความเสี่ยงเทียบเท่า Spot)
-BINANCE_FUTURES_MARGIN_TYPE = "ISOLATED"         # Isolated Margin แยกความเสี่ยงรายไม้
+BINANCE_FUTURES_TRADE_NOTIONAL_USDT = 400.0     # ขนาดมูลค่าสัญญาต่อไม้ 400 USDT (วาง Margin 20 USDT ที่ 20x)
+BINANCE_FUTURES_MAX_POSITIONS = 2               # ถือพร้อมกันไม่เกิน 2 ไม้
+BINANCE_FUTURES_LEVERAGE = 20                   # Leverage 20x (Isolated Margin)
+BINANCE_FUTURES_MARGIN_TYPE = "ISOLATED"        # Isolated Margin แยกความเสี่ยงรายไม้
 ```
 
 ## ข้อควรรู้ทั่วไป

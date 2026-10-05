@@ -443,6 +443,17 @@ def resolve_disk_history_fallback(
     return sliced_disk, meta
 
 
+def to_yahoo_ticker(symbol, config=None):
+    s = str(symbol or "").strip().upper()
+    overrides = getattr(config, "YAHOO_TICKER_OVERRIDES", {}) if config else {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    default_map = {
+        "SUI-USD": "SUI20947-USD",
+    }
+    return overrides.get(s, default_map.get(s, s))
+
+
 def fetch_yahoo_chart_history(
     symbol,
     period,
@@ -461,7 +472,8 @@ def fetch_yahoo_chart_history(
     if not sym:
         return None
     session = get_thread_curl_session_fn()
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+    query_ticker = to_yahoo_ticker(sym, config=config)
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{query_ticker}"
     params = {
         "range": str(period or "1mo"),
         "interval": chart_interval(interval),
@@ -610,7 +622,8 @@ def get_yf_history(
         try:
             fetch_started = time.perf_counter()
             session = get_thread_curl_session_fn()
-            ticker = yf.Ticker(sym, session=session)
+            query_ticker = to_yahoo_ticker(sym, config=config)
+            ticker = yf.Ticker(query_ticker, session=session)
             if interval:
                 df = ticker.history(period=remote_period, interval=interval, auto_adjust=auto_adjust)
             else:
@@ -646,7 +659,7 @@ def get_yf_history(
                     dl_kwargs["interval"] = interval
                 download_started = time.perf_counter()
                 try:
-                    df = yf.download(sym, **dl_kwargs)
+                    df = yf.download(query_ticker, **dl_kwargs)
                     if isinstance(df, pd.DataFrame) and not df.empty:
                         record_source_health_event_fn(
                             "yfinance_download",

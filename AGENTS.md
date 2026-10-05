@@ -191,6 +191,22 @@ BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+
   `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
 - อัปเดตครอบคลุม: `.github/workflows/main.yml`, `daily-summary.yml`, `retry-hosted-runner-failures.yml`, `config.py`, และชุด tools วิเคราะห์ทั้งหมด
 
+## 9. ระบบ Binance Futures Derivatives Alpha Filter (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ (Verified with Live API)**
+
+โครงสร้างโมดูล (`infrastructure/binance/derivatives_filter.py`):
+- `BinanceDerivativesFilter`:
+  - **Funding Rate Alpha Gate**: สกัดฟองสบู่ฝั่ง Long และ Short Squeeze แบบเรียลไทม์
+    - หากสัญญาณ `BUY` แต่ `Funding Rate >= +0.04%` (0.0004) -> **Veto BUY ทันที** ป้องกันการโดนกวาด Long Liquidation Flush
+    - หากสัญญาณ `SELL` แต่ `Funding Rate <= -0.03%` (-0.0003) -> **Veto SELL ทันที** ป้องกันการโดนลาก Short Squeeze
+  - **Open Interest (OI) 1h Momentum**: แยกแยะระหว่างเทรนด์เงินจริงกับเบรกหลอก (Fakeout)
+    - $\Delta OI_{1h} \ge +1.0\%$: สัญญาณยืนยันโดยเงินทุนสถาบันไหลเข้า (Institutional Capital Inflow) เพิ่ม Confidence +2.0%
+    - $\Delta OI_{1h} \le -2.0\%$: สัญญาณเตือนเบรกหลอก (Short Covering Trap) ลด Confidence -4.0%
+    - $\Delta OI_{1h} \le -3.5\%$: **Veto BUY ทันที** ป้องกันการเข้าซื้อจังหวะ Liquidation Cascade
+  - **Live Diagnostic Tool**: `python tools/test_binance_futures.py --derivatives` แสดงตารางวิเคราะห์ชีพจรอนุพันธ์ 11 เหรียญแบบเรียลไทม์
+  - **Auto-Trade Integration**: เชื่อมต่อเข้ากับ `infrastructure/binance/pipeline_hook.py` โดยประเมินสัญญาณก่อนส่งคำสั่ง และแสดง `Derivatives Pulse` badge ในใบเสร็จ Telegram
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

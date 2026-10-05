@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--positions", action="store_true", help="List active open positions")
     parser.add_argument("--symbol-info", default=None, help="Inspect precision and minNotional for symbol (e.g. ADA-USD or BTCUSDT)")
     parser.add_argument("--risk-status", action="store_true", help="Display current risk management & circuit breaker status")
+    parser.add_argument("--derivatives", action="store_true", help="Display live Funding Rate and Open Interest momentum for all 11 symbols")
     parser.add_argument("--dry-run", action="store_true", help="Simulate sizing and pre-flight checks for a test candidate")
 
     args = parser.parse_args()
@@ -141,6 +142,48 @@ def main():
         print(f"   Today's Losses:     {state.get('daily_loss_pct', 0.0):.2f}% (Limit: {rm.daily_max_loss_pct}%)")
         print(f"   Today's PnL (Est):  {state.get('daily_pnl_usdt', 0.0):+.2f} USDT")
         print(f"   Today's Trades:     {state.get('daily_trades_count', 0)}")
+
+    # 5.5 Derivatives Alpha Filter (Funding Rate & Open Interest)
+    if args.derivatives:
+        from infrastructure.binance.derivatives_filter import BinanceDerivativesFilter
+        print("\n Binance Derivatives Alpha Pulse (Funding Rate & 1h Open Interest)...")
+        print("-" * 75)
+        print(f" {'SYMBOL':<10} | {'FUNDING RATE (8h)':<18} | {'OI 1h DELTA':<14} | {'POSITIONING':<14} | {'STATUS'}")
+        print("-" * 75)
+        filter_inst = BinanceDerivativesFilter()
+        symbols = [s.strip() for s in getattr(config, "SYMBOLS", "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD").split(",") if s.strip()]
+        for s in symbols:
+            eval_buy = filter_inst.evaluate_candidate(
+                {"symbol": s, "signal": "BUY"},
+                max_long_funding=getattr(config, "BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004),
+                min_short_funding=getattr(config, "BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003),
+                oi_lookback_bars=getattr(config, "BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4),
+            )
+            eval_sell = filter_inst.evaluate_candidate(
+                {"symbol": s, "signal": "SELL"},
+                max_long_funding=getattr(config, "BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004),
+                min_short_funding=getattr(config, "BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003),
+                oi_lookback_bars=getattr(config, "BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4),
+            )
+            fr_str = f"{eval_buy['funding_rate_pct']:+.4f}%" if eval_buy['funding_rate'] is not None else "N/A"
+            oi_delta_str = f"{eval_buy['oi_delta_pct']:+.2f}%" if eval_buy['oi_available'] else "N/A"
+
+            trend = eval_buy.get("oi_trend", "NEUTRAL")
+            if trend == "EXPANDING":
+                pos_str = "🔥 Inflow"
+            elif trend == "CONTRACTING":
+                pos_str = "⚠️ Contraction"
+            else:
+                pos_str = "⚖️ Neutral"
+
+            veto_status = "✅ Pass"
+            if not eval_buy["approved"]:
+                veto_status = "⛔ Veto BUY (Crowded Long)"
+            elif not eval_sell["approved"]:
+                veto_status = "⛔ Veto SELL (Crowded Short)"
+
+            print(f" {s:<10} | {fr_str:<18} | {oi_delta_str:<14} | {pos_str:<14} | {veto_status}")
+        print("-" * 75)
 
     # 6. Dry-Run Candidate Sizing
     if args.dry_run:

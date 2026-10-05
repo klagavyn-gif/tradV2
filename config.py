@@ -1324,3 +1324,14 @@ SHORT_TERM_15M_BETA_BETA = _env_float("SHORT_TERM_15M_BETA_BETA", 1.0)
 # Realistic backtest friction (round-trip = entry+exit).
 BACKTEST_FEE_BPS = _env_float("BACKTEST_FEE_BPS", 10.0)
 BACKTEST_SLIPPAGE_BPS = _env_float("BACKTEST_SLIPPAGE_BPS", 5.0)
+
+# ==============================================================================
+# Binance Futures Derivatives Alpha Filter (Funding Rate & Open Interest)
+# ==============================================================================
+BINANCE_DERIVATIVES_FILTER_ENABLED = _env_bool("BINANCE_DERIVATIVES_FILTER_ENABLED", True)
+BINANCE_DERIVATIVES_VETO_ENABLED = _env_bool("BINANCE_DERIVATIVES_VETO_ENABLED", True)
+BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE = _env_float("BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004)   # +0.04% per 8h
+BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE = _env_float("BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003) # -0.03% per 8h
+BINANCE_DERIVATIVES_OI_LOOKBACK_BARS = _env_int("BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4)                   # 4 bars x 15m = 1h
+BINANCE_DERIVATIVES_OI_CONFIRMATION_MIN_PCT = _env_float("BINANCE_DERIVATIVES_OI_CONFIRMATION_MIN_PCT", 1.0)  # +1.0% OI expansion
+BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT = _env_float("BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT", -2.0)    # -2.0% OI contraction

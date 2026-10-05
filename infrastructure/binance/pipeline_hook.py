@@ -168,11 +168,52 @@ def execute_binance_auto_trade_pipeline(
             actionable.append(c)
 
     # 3. Execute actionable entries
+    from .derivatives_filter import BinanceDerivativesFilter
+    deriv_filter = BinanceDerivativesFilter() if bool(getattr(config, "BINANCE_DERIVATIVES_FILTER_ENABLED", True)) else None
+
     for c in actionable:
         aid = str(c.get("alert_id") or "").strip()
         if aid and aid in executed_records:
             logger.info("Alert %s already executed on Binance, skipping duplicate.", aid)
             continue
+
+        # Evaluate positioning & leverage via Derivatives Filter
+        deriv_eval = None
+        if deriv_filter:
+            try:
+                deriv_eval = deriv_filter.evaluate_candidate(
+                    c,
+                    max_long_funding=float(getattr(config, "BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004)),
+                    min_short_funding=float(getattr(config, "BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003)),
+                    oi_lookback_bars=int(getattr(config, "BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4)),
+                    oi_confirm_min_pct=float(getattr(config, "BINANCE_DERIVATIVES_OI_CONFIRMATION_MIN_PCT", 1.0)),
+                    oi_contract_max_pct=float(getattr(config, "BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT", -2.0)),
+                    veto_enabled=bool(getattr(config, "BINANCE_DERIVATIVES_VETO_ENABLED", True)),
+                )
+                if not deriv_eval.get("approved"):
+                    veto_r = str(deriv_eval.get("veto_reason") or "derivatives_risk")
+                    logger.warning("Auto-trade vetoed by Derivatives Filter for %s %s: %s", c.get("symbol"), c.get("signal"), veto_r)
+                    results["executed_entries"].append({"success": False, "reason": f"derivatives_veto_{veto_r}", "symbol": c.get("symbol")})
+                    if callable(send_telegram_alert):
+                        veto_text = "Funding Rate สูงเกินเกณฑ์ (เสี่ยงโดนกวาด Long)" if "crowded_long" in veto_r else (
+                            "Funding Rate ติดลบลึกเกินเกณฑ์ (เสี่ยงโดน Short Squeeze)" if "crowded_short" in veto_r else
+                            "Open Interest ร่วงผิดปกติ (เข้าข่ายเบรกหลอก Fakeout)"
+                        )
+                        msg = (
+                            f"🛡️ <b>[Derivatives Veto] สกัดการเปิดไม้โดยระบบป้องกันความเสี่ยง!</b>\n"
+                            f"────────────────\n"
+                            f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
+                            f"<b>สาเหตุ:</b> {veto_text}\n"
+                            f"{deriv_eval.get('badge')}\n"
+                            f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เพื่อปกป้องเงินทุนตามวินัยระบบอนุพันธ์"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                        except Exception:
+                            pass
+                    continue
+            except Exception as de:
+                logger.warning("Derivatives filter evaluation skipped due to error: %s", de)
 
         try:
             exec_res = order_mgr.execute_candidate(c)
@@ -209,6 +250,9 @@ def execute_binance_auto_trade_pipeline(
                         bal_str = f"\n💰 <b>เงินคงเหลือในพอร์ต:</b> {usdt_bal['available']:,.2f} USDT (รวม {usdt_bal['total']:,.2f} USDT)"
                     except Exception:
                         bal_str = ""
+
+                    deriv_badge_str = f"\n{deriv_eval.get('badge')}" if deriv_eval and deriv_eval.get("badge") else ""
+
                     msg = (
                         f"🤖 <b>{env_badge} เปิดออเดอร์ Binance Futures สำเร็จ!</b>\n"
                         f"────────────────\n"
@@ -220,6 +264,7 @@ def execute_binance_auto_trade_pipeline(
                         f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
                         f"{sizing_note}"
                         f"{bal_str}"
+                        f"{deriv_badge_str}"
                     )
                     try:
                         send_telegram_alert(msg)

@@ -178,6 +178,16 @@ def _alert_timestamp_value(value):
     try:
         return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
     except Exception:
+        pass
+    try:
+        if "T" in text:
+            clean = text.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean)
+            if dt.tzinfo:
+                return dt.replace(tzinfo=None)
+            return dt
+        return datetime.strptime(text, "%Y-%m-%d %H:%M")
+    except Exception:
         return None
 
 

@@ -513,7 +513,7 @@ def generate_llm_narrative(config, snapshot, calibration, news, levels=None):
     api_key = str(getattr(config, "GEMINI_API_KEY", "") or os.environ.get("GEMINI_API_KEY") or "").strip()
     if not api_key:
         return None
-    model = str(getattr(config, "GEMINI_MODEL", "gemini-3.8-flash") or "gemini-3.8-flash").strip()
+    model = str(getattr(config, "GEMINI_MODEL", "gemini-2.5-flash") or "gemini-2.5-flash").strip()
     max_tokens = max(100, _safe_int(getattr(config, "DAILY_AI_LLM_MAX_OUTPUT_TOKENS", 800), 800))
     timeout = float(getattr(config, "DAILY_AI_LLM_TIMEOUT_SECONDS", 25.0) or 25.0)
     url = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent".format(model)

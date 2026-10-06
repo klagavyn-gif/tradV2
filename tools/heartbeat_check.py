@@ -62,25 +62,46 @@ def send_telegram(text):
 
 
 def recent_runs(workflow):
-    result = subprocess.run(
+    for cmd_workflow in [workflow, "Telegram Alerts"]:
+        result = subprocess.run(
+            [
+                "gh", "run", "list",
+                "--workflow", cmd_workflow,
+                "--limit", "10",
+                "--json", "databaseId,createdAt,conclusion,headSha,url",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 0:
+            try:
+                runs = json.loads(result.stdout)
+                if runs:
+                    return runs
+            except Exception:
+                pass
+
+    # Fallback to unfiltered list and match workflow name
+    res = subprocess.run(
         [
             "gh", "run", "list",
-            "--workflow", workflow,
-            "--event", "workflow_dispatch",
-            "--limit", "5",
-            "--json", "databaseId,createdAt,conclusion,headSha,url",
+            "--limit", "20",
+            "--json", "databaseId,createdAt,conclusion,headSha,url,workflowName",
         ],
         capture_output=True,
         text=True,
         check=False,
     )
-    if result.returncode != 0:
-        print("[heartbeat] gh run list failed: {}".format(result.stderr.strip()))
-        return None
-    try:
-        return json.loads(result.stdout)
-    except Exception:
-        return None
+    if res.returncode == 0:
+        try:
+            all_runs = json.loads(res.stdout)
+            matching = [r for r in all_runs if r.get("workflowName") in ("Telegram Alerts", workflow)]
+            if matching:
+                return matching
+        except Exception:
+            pass
+    return None
 
 
 def evaluate_freshness(runs, *, now, max_age_minutes):
@@ -94,6 +115,30 @@ def evaluate_freshness(runs, *, now, max_age_minutes):
     age_minutes = (now - created).total_seconds() / 60.0 if created else None
     if age_minutes is None:
         return True, "อ่านเวลาของ run ล่าสุดไม่ได้"
+
+    # Guard against GitHub API stale pagination returning ancient historical runs
+    if age_minutes > 1440:
+        fallback = subprocess.run(
+            ["gh", "run", "list", "--limit", "10", "--json", "databaseId,createdAt,conclusion,workflowName"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if fallback.returncode == 0:
+            try:
+                all_runs = json.loads(fallback.stdout)
+                f_matching = [r for r in all_runs if r.get("workflowName") == "Telegram Alerts"]
+                if f_matching:
+                    f_latest = max(f_matching, key=lambda row: parse_iso(row.get("createdAt")) or epoch)
+                    f_created = parse_iso(f_latest.get("createdAt"))
+                    f_age = (now - f_created).total_seconds() / 60.0 if f_created else None
+                    if f_age is not None and f_age <= max_age_minutes:
+                        f_conc = str(f_latest.get("conclusion") or "").strip()
+                        if f_conc in ("success", ""):
+                            return False, "run ล่าสุดปกติ (ดึงจาก fallback) id={} age={:.1f} นาที".format(f_latest.get("databaseId"), f_age)
+            except Exception:
+                pass
+
     if age_minutes > max_age_minutes:
         return True, "run ล่าสุดเก่าเกินกำหนด id={} age={:.1f} นาที conclusion={}".format(
             run_id, age_minutes, conclusion or "running"

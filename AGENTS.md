@@ -207,6 +207,28 @@ BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+
   - **Live Diagnostic Tool**: `python tools/test_binance_futures.py --derivatives` แสดงตารางวิเคราะห์ชีพจรอนุพันธ์ 11 เหรียญแบบเรียลไทม์
   - **Auto-Trade Integration**: เชื่อมต่อเข้ากับ `infrastructure/binance/pipeline_hook.py` โดยประเมินสัญญาณก่อนส่งคำสั่ง และแสดง `Derivatives Pulse` badge ในใบเสร็จ Telegram
 
+## 10. การปลดล็อคเป้า Take Profit สู่ Dynamic R-Multiples (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+### ปัญหาที่พบ
+- ผู้ใช้สังเกตว่าสัญญาณแจ้งเตือนเกือบทั้งหมดบน Telegram ขึ้นสถานะ `⛔ ห้ามเข้า / ข้ามสัญญาณ` และไม่มี `🟢 เข้าได้` เลย
+- **Root Cause**:
+  1. ใน `config.py` ค่า `take_profit_pct = 0.2` (เดิมเซ็ตไว้ตอน พ.ค. 2026 เพื่อปั่น Hit Rate สั้นๆ) ถูกฟิกซ์ค้างไว้ใน 11 เหรียญ
+  2. ในขณะที่ Stop Loss ตาม ATR อยู่ที่ ~1.30% - 1.60% ทำให้ Reward/Risk ถึง TP1 กลายเป็น $0.20\% / 1.50\% = \mathbf{0.13R}$
+  3. โค้ดตัดสินใจ `_resolve_trade_decision` ใน `alerts/messages.py` และ `trad.py` มีตัวกรองความเสี่ยง `if rr1 < 1.0: return "ห้ามเข้า"`
+  4. ผลคือสัญญาณ BUY ของ CDC+VixFix 15m ทุกตัวถูกฆ่าทิ้งเป็น "⛔ ห้ามเข้า" 100% แม้ว่า 1H Trend จะ Strong UP และ TP2 จะอยู่ที่ 1.8R - 2.1R
+
+### การแก้ไข
+1. ปรับ `CDC_VIXFIX_15M_TAKE_PROFIT_PCT = 0.0` และเซ็ต `take_profit_pct = 0.0` ใน `CDC_VIXFIX_15M_SYMBOL_PROFILES` ทั้ง 11 เหรียญใน `config.py` เพื่อให้ระบบสลับไปใช้ Dynamic R-Multiple levels อัตโนมัติ:
+   - `TP1`: 1.20R (ซิงค์กับ Breakeven Stop +1.2R)
+   - `TP2`: 2.10R (ซิงค์กับ Trailing Stop +2.0R)
+   - `TP3`: 3.20R
+2. ปรับตัวกรองความเสี่ยงใน `alerts/messages.py` และ `trad.py`:
+   - `if rr1 is not None and rr1 < 1.0 and (rr2 is None or rr2 < 1.5): return "ห้ามเข้า"`
+   - หากแผนมีเป้าเทรนด์รันเนอร์ `rr2 >= 1.5R` จะไม่ถูกตัดสิทธิ์ทิ้งแม้ TP1 จะเป็นจุดกันทุนย่อย
+3. ผลการทดสอบ: สัญญาณ BUY ปลดล็อคเป็น `🟢 เข้าได้` ทันที ด้วย RR1 = 1.20R และ RR2 = 2.10R
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

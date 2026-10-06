@@ -207,13 +207,14 @@ def _resolve_trade_decision(plan, *, signal=None, strategy_label=None, action_gu
     entry = _safe_float(guidance.get("entry"), None)
     stop = _safe_float(guidance.get("stop"), None)
     rr1 = _safe_float(guidance.get("rr1"), None)
+    rr2 = _safe_float(guidance.get("rr2"), None)
     if entry is None or stop is None:
         return {
             "label": "ห้ามเข้า",
             "icon": "⛔",
             "reason": "ไม่มี Entry หรือ SL ที่ชัดพอสำหรับเข้าไม้",
         }
-    if rr1 is not None and rr1 < 1.0:
+    if rr1 is not None and rr1 < 1.0 and (rr2 is None or rr2 < 1.5):
         return {
             "label": "ห้ามเข้า",
             "icon": "⛔",

@@ -1171,11 +1171,11 @@ CDC_VIXFIX_15M_RELAXED_STOCH_MAX = _env_float("CDC_VIXFIX_15M_RELAXED_STOCH_MAX"
 CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK = _env_int("CDC_VIXFIX_15M_FORECAST_MOMENTUM_LOOKBACK", 3)
 CDC_VIXFIX_15M_FORECAST_MIN_SCORE = _env_float("CDC_VIXFIX_15M_FORECAST_MIN_SCORE", 60.0)
 CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT = _env_bool("CDC_VIXFIX_15M_REQUIRE_EMA200_ALIGNMENT", False)
-CDC_VIXFIX_15M_TAKE_PROFIT_PCT = _env_float("CDC_VIXFIX_15M_TAKE_PROFIT_PCT", 0.2)
+CDC_VIXFIX_15M_TAKE_PROFIT_PCT = _env_float("CDC_VIXFIX_15M_TAKE_PROFIT_PCT", 0.0)
 CDC_VIXFIX_15M_MAX_HOLD_BARS = _env_int("CDC_VIXFIX_15M_MAX_HOLD_BARS", 24)
 
-# Precision profiles tuned toward >=60% recent win rate per symbol on 15m replay.
-# Note: these profiles optimize hit rate, not expectancy, so some symbols remain negative expectancy.
+# Profiles tuned for M15 trend capture with dynamic R-multiple targets (TP1=1.2R, TP2=2.1R, TP3=3.2R)
+# synchronized with Breakeven Stop (+1.2R) and Trailing Stop (+2.0R) engines.
 CDC_VIXFIX_15M_SYMBOL_PROFILES = {
     "BTC-USD": {
         "require_pattern": False,
@@ -1185,7 +1185,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 88.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "DOGE-USD": {
@@ -1196,7 +1196,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 65.0,
         "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 48,
     },
     "ETH-USD": {
@@ -1207,7 +1207,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "ADA-USD": {
@@ -1218,7 +1218,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "XRP-USD": {
@@ -1229,7 +1229,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 65.0,
         "daily_best_min_red_to_green_score": 84.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 48,
     },
     "BNB-USD": {
@@ -1240,7 +1240,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 88.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "SOL-USD": {
@@ -1251,7 +1251,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "TRX-USD": {
@@ -1262,7 +1262,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 65.0,
         "daily_best_min_red_to_green_score": 92.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "ONDO-USD": {
@@ -1273,7 +1273,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 85.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "SUI-USD": {
@@ -1284,7 +1284,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 82.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
     "PAXG-USD": {
@@ -1295,7 +1295,7 @@ CDC_VIXFIX_15M_SYMBOL_PROFILES = {
         "forecast_min_score": 60.0,
         "daily_best_min_red_to_green_score": 90.0,
         "daily_best_require_reclaim": True,
-        "take_profit_pct": 0.2,
+        "take_profit_pct": 0.0,
         "max_hold_bars": 24,
     },
 }

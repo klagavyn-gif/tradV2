@@ -3987,9 +3987,10 @@ def _resolve_trade_decision_legacy(plan, *, signal=None, strategy_label=None, ac
     entry = _safe_float(guidance.get("entry"), None)
     stop = _safe_float(guidance.get("stop"), None)
     rr1 = _safe_float(guidance.get("rr1"), None)
+    rr2 = _safe_float(guidance.get("rr2"), None)
     if entry is None or stop is None:
         return ("ห้ามเข้า", "ไม่มี Entry หรือ SL ที่ชัดพอสำหรับเข้าไม้", "⛔")
-    if rr1 is not None and rr1 < 1.0:
+    if rr1 is not None and rr1 < 1.0 and (rr2 is None or rr2 < 1.5):
         return ("ห้ามเข้า", "RR ถึง TP1 ต่ำกว่า 1R ไม่คุ้มสำหรับเล่นสั้น", "⛔")
     current_value = _safe_float(current_price, None)
     if current_value is None:

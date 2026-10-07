@@ -154,7 +154,7 @@ BINANCE_FUTURES_MARGIN_TYPE = "ISOLATED"        # Isolated Margin แยกค�
 
 # Dynamic Risk Management & Circuit Breaker
 BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED = True   # เปิดระบบคำนวณขนาดไม้ตาม % พอร์ตจริง
-BINANCE_FUTURES_EQUITY_RISK_PCT = 0.40          # 0.40% ของ Equity เป็น Margin (ที่ 20x = ~20 USDT บน 5,000 USDT)
+BINANCE_FUTURES_EQUITY_RISK_PCT = 5.0           # 5.0% ของ Equity เป็น Margin (ถือ 2 ไม้ = 10%, เงินสำรอง 90%)
 BINANCE_FUTURES_LOSS_STREAK_THROTTLE = 2        # แพ้ติดกัน 2 ไม้ -> ลดขนาดไม้ลง 50%
 BINANCE_FUTURES_LOSS_STREAK_MAX = 3             # แพ้ติดกัน 3 ไม้ -> Circuit Breaker พักเทรด 6 ชม.
 BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS = 6.0     # เวลาพัก Circuit Breaker

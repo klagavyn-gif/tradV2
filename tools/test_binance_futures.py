@@ -122,7 +122,7 @@ def main():
         from infrastructure.binance import BinanceFuturesRiskManager
         rm = BinanceFuturesRiskManager(
             dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
-            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 0.40),
+            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 5.0),
             loss_streak_throttle=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_THROTTLE", 2),
             loss_streak_max=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_MAX", 3),
             circuit_breaker_hours=getattr(config, "BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS", 6.0),
@@ -191,7 +191,8 @@ def main():
         print("\n Dry-Run Order Manager Simulation...")
         rm = BinanceFuturesRiskManager(
             dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
-            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 0.40),
+            equity_risk_pct=getattr(config, "BINANCE_FUTURES_EQUITY_RISK_PCT", 5.0),
+            max_notional_usdt=getattr(config, "BINANCE_FUTURES_MAX_TRADE_NOTIONAL_USDT", 5000.0),
             loss_streak_throttle=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_THROTTLE", 2),
             loss_streak_max=getattr(config, "BINANCE_FUTURES_LOSS_STREAK_MAX", 3),
             circuit_breaker_hours=getattr(config, "BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS", 6.0),

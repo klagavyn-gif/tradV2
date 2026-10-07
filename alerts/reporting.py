@@ -624,24 +624,37 @@ def infer_alert_intent(row):
     """Infer an alert's intent for historical rows that predate alert_intent.
 
     Priority (highest first):
-      1. dispatch_status_label     -> exit/avoid/watch if user was told not to enter
-      2. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
-      3. existing alert_intent     -> keep   (entry/exit/watch already classified)
-      4. watch-only strategy       -> watch
-      5. tier_action               -> entry/watch
-      6. plan_reason entry phrases -> entry
-      7. default                   -> watch  (conservative, avoid overclaiming)
+      1. dispatch_status_label     -> entry ("เข้าได้") or exit/avoid/watch
+      2. message explicit decision -> entry if "🟢 เข้าได้" in message
+      3. sell_continuation_override_mode == "entry" -> entry
+      4. plan_reason exit phrases  -> exit   (unambiguous close/tp/time-stop)
+      5. existing alert_intent     -> keep   (entry/exit/watch already classified)
+      6. watch-only strategy       -> watch
+      7. tier_action               -> entry/watch
+      8. plan_reason entry phrases -> entry
+      9. default                   -> watch  (conservative, avoid overclaiming)
     """
     if not isinstance(row, dict):
         return "watch", "invalid_row"
     dispatch_status = str(row.get("dispatch_status_label") or "").strip()
     dispatch_reason = str(row.get("dispatch_status_reason_group") or "").strip()
+    if dispatch_status == "เข้าได้":
+        return "entry", f"dispatch_status_{dispatch_reason or 'entry'}"
     if dispatch_status == "ห้ามเข้า":
         if "ปิดรอบ" in dispatch_reason or "exit" in dispatch_reason.lower():
             return "exit", f"dispatch_status_{dispatch_reason}"
         return "avoid", f"dispatch_status_{dispatch_reason}"
     if dispatch_status == "รอ":
         return "watch", f"dispatch_status_{dispatch_reason}"
+
+    message = str(row.get("message") or "")
+    if "<b>🎯 สรุป:</b> 🟢 เข้าได้" in message or "🎯 สรุป: 🟢 เข้าได้" in message or "🟢 เข้าได้" in message:
+        return "entry", "message_decision_entry"
+
+    plan = row.get("plan") if isinstance(row.get("plan"), dict) else {}
+    continuation_mode = str(plan.get("sell_continuation_override_mode") or "").strip().lower()
+    if continuation_mode == "entry":
+        return "entry", "continuation_mode_entry"
 
     existing = str(row.get("alert_intent") or "").strip().lower()
     existing_reason = str(row.get("alert_intent_reason") or "").strip()

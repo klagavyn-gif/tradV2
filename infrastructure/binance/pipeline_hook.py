@@ -158,14 +158,22 @@ def execute_binance_auto_trade_pipeline(
     actionable = []
     for c in (sent_candidates or []):
         signal = str(c.get("signal") or "").strip().upper()
+        sym = str(c.get("symbol") or "")
         if signal not in ("BUY", "SELL"):
             continue
         dispatch_label = str(c.get("dispatch_status_label") or "").strip()
+        msg = str(c.get("message") or "")
         if dispatch_label in ("ห้ามเข้า", "รอ"):
+            logger.info("[Auto-Trade] Skipping candidate %s %s: dispatch_status=%s", sym, signal, dispatch_label)
             continue
-        intent, _ = infer_alert_intent(c)
+        intent, intent_reason = infer_alert_intent(c)
+        if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg:
+            intent = "entry"
         if intent == "entry":
             actionable.append(c)
+            logger.info("[Auto-Trade] Approved candidate %s %s for auto-trade (intent=%s, reason=%s)", sym, signal, intent, intent_reason)
+        else:
+            logger.info("[Auto-Trade] Skipped non-entry candidate %s %s: intent=%s (reason=%s)", sym, signal, intent, intent_reason)
 
     # 3. Execute actionable entries
     from .derivatives_filter import BinanceDerivativesFilter

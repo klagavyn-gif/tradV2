@@ -30,6 +30,38 @@ def is_daily_best_pick_window(*, config, get_now):
     return 0.0 <= delta_minutes < float(window_minutes)
 
 
+def _stamp_daily_candidate_dispatch_status(candidate, message):
+    if not isinstance(candidate, dict) or not isinstance(message, str):
+        return
+    label = None
+    intent = None
+    reason = None
+    if "<b>🎯 สรุป:</b> 🟢 เข้าได้" in message or "🎯 สรุป: 🟢 เข้าได้" in message or "🟢 เข้าได้" in message:
+        label = "เข้าได้"
+        intent = "entry"
+        reason = "daily_pick_actionable_entry"
+    elif "<b>🎯 สรุป:</b> ⛔ ห้ามเข้า" in message or "🎯 สรุป: ⛔ ห้ามเข้า" in message or "⛔ ห้ามเข้า" in message:
+        label = "ห้ามเข้า"
+        intent = "avoid"
+        reason = "daily_pick_avoid"
+    elif "<b>🎯 สรุป:</b> 🟡 รอ" in message or "🎯 สรุป: 🟡 รอ" in message or "🟡 รอ" in message:
+        label = "รอ"
+        intent = "watch"
+        reason = "daily_pick_watch"
+
+    if label:
+        candidate["dispatch_status_label"] = label
+        candidate["alert_intent"] = intent
+        candidate["alert_intent_reason"] = reason
+
+    for line in message.splitlines():
+        if "<b>📝 เหตุผล:</b>" in line:
+            reason_txt = line.replace("<b>📝 เหตุผล:</b>", "").strip()
+            candidate["dispatch_status_reason_group"] = reason_txt
+            candidate["dispatch_status_reason_detail"] = reason_txt
+            break
+
+
 def _normalize_symbol_allowlist(raw_values, normalize_symbol):
     symbols = set()
     if isinstance(raw_values, (set, list, tuple)):
@@ -363,6 +395,7 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now, runti
             strict_required_conf = max(float(min_conf), float(relaxed_min_conf)) + float(regime_uplift)
             if float(best_conf) < float(strict_required_conf):
                 continue
+
             message = build_daily_best_pick_message(
                 item,
                 signal,
@@ -376,6 +409,7 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now, runti
             if not isinstance(message, str) or not message.strip():
                 continue
             candidate["message"] = message
+            _stamp_daily_candidate_dispatch_status(candidate, message)
             gate_ok, _, normalized_edge = evaluate_candidate_backtest_gate(candidate)
             if gate_ok and float(best_conf) >= float(strict_required_conf):
                 candidate["edge_metrics"] = normalized_edge
@@ -419,6 +453,7 @@ def build_daily_best_pick_candidates(results, *, config, helpers, get_now, runti
                 continue
             relaxed_candidate = dict(candidate)
             relaxed_candidate["message"] = relaxed_message
+            _stamp_daily_candidate_dispatch_status(relaxed_candidate, relaxed_message)
             relaxed_candidate["edge_metrics"] = relaxed_edge
             relaxed_candidate["score"] = float(candidate.get("score", score))
             relaxed_candidate["strategy_label"] = (str(strategy_label or "").strip() + " | Trend Pick").strip(" |")

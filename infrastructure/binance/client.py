@@ -301,3 +301,125 @@ class BinanceFuturesClient:
         if res.get("success"):
             return res.get("data", [])
         return []
+
+    # --- Algo Orders (Mandatory for STOP_MARKET, TRAILING_STOP_MARKET) ---
+
+    def create_algo_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        algo_type: str = "CONDITIONAL",
+        trigger_price: Optional[float] = None,
+        price: Optional[float] = None,
+        quantity: Optional[float] = None,
+        callback_rate: Optional[float] = None,
+        activation_price: Optional[float] = None,
+        reduce_only: bool = False,
+        close_position: bool = False,
+        client_algo_id: Optional[str] = None,
+        working_type: str = "MARK_PRICE",
+    ) -> Dict[str, Any]:
+        """
+        Place an Algorithmic / Conditional order on Binance Futures.
+        Supported types: STOP_MARKET, STOP, TAKE_PROFIT_MARKET, TAKE_PROFIT, TRAILING_STOP_MARKET.
+        """
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        params: Dict[str, Any] = {
+            "symbol": clean_sym,
+            "side": side.upper(),
+            "algoType": algo_type.upper(),
+            "type": order_type.upper(),
+        }
+
+        if trigger_price is not None:
+            params["triggerPrice"] = trigger_price
+        if price is not None:
+            params["price"] = price
+        if quantity is not None and not close_position:
+            params["quantity"] = quantity
+        if callback_rate is not None:
+            params["callbackRate"] = callback_rate
+        if activation_price is not None:
+            params["activationPrice"] = activation_price
+        if close_position:
+            params["closePosition"] = "true"
+        elif reduce_only:
+            params["reduceOnly"] = "true"
+        if client_algo_id:
+            # clientAlgoId max length 32 chars
+            params["clientAlgoId"] = str(client_algo_id)[:32]
+        if working_type:
+            params["workingType"] = working_type
+
+        return self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def get_open_algo_orders(self, symbol: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get open conditional/algo orders for a symbol or all symbols."""
+        params = {}
+        if symbol:
+            params["symbol"] = symbol.replace("-", "").replace("/", "").upper()
+        res = self._request("GET", "/fapi/v1/openAlgoOrders", params=params, signed=True)
+        if res.get("success"):
+            data = res.get("data")
+            if isinstance(data, list):
+                return data
+            elif isinstance(data, dict) and "orders" in data:
+                return data["orders"]
+        return []
+
+    def cancel_algo_order(
+        self,
+        symbol: str,
+        algo_id: Optional[int] = None,
+        client_algo_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Cancel a single algo order by algoId or clientAlgoId."""
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        params: Dict[str, Any] = {"symbol": clean_sym}
+        if algo_id:
+            params["algoId"] = int(algo_id)
+        if client_algo_id:
+            params["clientAlgoId"] = str(client_algo_id)[:32]
+        return self._request("DELETE", "/fapi/v1/algoOrder", params=params, signed=True)
+
+    def cancel_all_algo_orders(self, symbol: str) -> Dict[str, Any]:
+        """Cancel all open algo orders for a symbol."""
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        return self._request("DELETE", "/fapi/v1/algoOpenOrders", params={"symbol": clean_sym}, signed=True)
+
+    def close_position_market(self, symbol: str) -> Dict[str, Any]:
+        """
+        Immediately close an open position on Binance Futures with a MARKET order
+        and cancel any pending open orders and algo orders for this symbol.
+        """
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        positions = self.get_positions()
+        target_pos = next((p for p in positions if p.get("symbol") == clean_sym), None)
+        if not target_pos:
+            return {"success": False, "reason": "no_open_position", "symbol": clean_sym}
+
+        side = str(target_pos.get("side", "")).upper()
+        close_side = "SELL" if side == "LONG" else "BUY"
+        qty = abs(float(target_pos.get("amount", 0.0)))
+        if qty <= 0:
+            return {"success": False, "reason": "position_amount_zero", "symbol": clean_sym}
+
+        # 1. Cancel open orders and open algo orders
+        try:
+            self.cancel_all_open_orders(clean_sym)
+        except Exception:
+            pass
+        try:
+            self.cancel_all_algo_orders(clean_sym)
+        except Exception:
+            pass
+
+        # 2. Place market order to close position
+        return self.create_order(
+            symbol=clean_sym,
+            side=close_side,
+            order_type="MARKET",
+            quantity=qty,
+            reduce_only=True,
+        )

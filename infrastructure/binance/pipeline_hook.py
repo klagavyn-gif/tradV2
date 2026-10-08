@@ -149,6 +149,31 @@ def execute_binance_auto_trade_pipeline(
     except Exception as e:
         logger.exception("Error syncing Breakeven stops: %s", e)
 
+    # 1.5. Sync and close settled positions on Binance (e.g. time_exit, TP, SL, exit signal)
+    try:
+        outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
+        if os.path.exists(outcomes_path):
+            with open(outcomes_path, "r", encoding="utf-8") as f:
+                pld = json.load(f)
+            if isinstance(pld, dict) and "outcomes" in pld:
+                closed_settled = order_mgr.sync_close_settled_positions(pld["outcomes"])
+                results["closed_positions"] = closed_settled
+                if closed_settled and callable(send_telegram_alert):
+                    for cp in closed_settled:
+                        pnl_str = f" ({cp['pnl_pct']:+.2f}%)" if isinstance(cp.get("pnl_pct"), (int, float)) else ""
+                        msg = (
+                            f"🏁 <b>[Auto-Trade] ซิงค์ปิดออเดอร์บน Binance สำเร็จ!</b>\n"
+                            f"<b>เหรียญ:</b> {cp['symbol']} | <b>ฝั่ง:</b> {cp['side']}\n"
+                            f"<b>สาเหตุ:</b> ปิดตามแผนสัญญาณ ({cp['exit_reason']}){pnl_str}\n"
+                            f"✅ เคลียร์ Position และยกเลิกออเดอร์ค้างใน Binance เรียบร้อย"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                        except Exception:
+                            pass
+    except Exception as e:
+        logger.exception("Error syncing closed settled positions on Binance: %s", e)
+
     # Load executed orders history for idempotency
     executed_orders_path = helpers.get("binance_executed_orders_path", lambda: ".data/telegram_alerts/binance_executed_orders.json")()
     executed_records = _load_executed_orders(executed_orders_path)

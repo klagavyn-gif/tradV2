@@ -230,16 +230,19 @@ def _candidate_evaluation_window_bars(candidate, *, config):
     default_bars = _safe_int(getattr(config, "TELEGRAM_ALERT_REALIZED_MAX_HOLD_BARS", 64), 64)
     if default_bars is None or default_bars < 1:
         default_bars = 64
+    min_eval_bars = _safe_int(getattr(config, "TELEGRAM_ALERT_REALIZED_MIN_EVALUATION_BARS", 64), 64)
+    if min_eval_bars is None or min_eval_bars < 1:
+        min_eval_bars = 64
     plan = (candidate or {}).get("plan")
     strategy = str((candidate or {}).get("strategy") or "").strip().upper()
     if isinstance(plan, dict):
         for key in ("max_forward_bars", "time_stop_bars", "holding_window_bars", "max_hold_bars"):
             candidate_value = _safe_int(plan.get(key))
             if isinstance(candidate_value, int) and candidate_value > 0:
-                return candidate_value
+                return max(candidate_value, min_eval_bars)
     if strategy == "DAILY_BEST":
-        return max(default_bars, 96)
-    return default_bars
+        return max(default_bars, 96, min_eval_bars)
+    return max(default_bars, min_eval_bars)
 
 
 def _normalize_price_history_df(df):

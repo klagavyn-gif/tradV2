@@ -229,6 +229,31 @@ BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+
    - หากแผนมีเป้าเทรนด์รันเนอร์ `rr2 >= 1.5R` จะไม่ถูกตัดสิทธิ์ทิ้งแม้ TP1 จะเป็นจุดกันทุนย่อย
 3. ผลการทดสอบ: สัญญาณ BUY ปลดล็อคเป็น `🟢 เข้าได้` ทันที ด้วย RR1 = 1.20R และ RR2 = 2.10R
 
+## 11. การแก้ไข Binance Futures Algo Order API (-4120), Position Exit Sync, และการขยายเวลาถือไม้ (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+### ประเด็นที่ 1: คำสั่ง Stop Loss และ Trailing Stop ไม่ขึ้นบน Binance (Error -4120)
+- **ปัญหา**: เมื่อเข้าออเดอร์ MARKET สำเร็จ แต่คำสั่ง `STOP_MARKET` และ `TRAILING_STOP_MARKET` ไม่ปรากฏใน Binance เลย
+- **Root Cause**: Binance Futures ได้ย้ายคำสั่ง Conditional ทั้งหมดออกจาก `/fapi/v1/order` ไปยัง **Algo Order API Endpoint (`POST /fapi/v1/algoOrder`)** หากส่งแบบเดิมจะได้รับ Error:
+  `Binance API error -4120: Order type not supported for this endpoint. Please use the Algo Order API endpoints instead.`
+- **การแก้ไข**:
+  1. เพิ่มเมธอด `create_algo_order`, `get_open_algo_orders`, `cancel_algo_order`, `cancel_all_algo_orders`, และ `close_position_market` ใน `infrastructure/binance/client.py`
+  2. อัปเดต `BinanceFuturesOrderManager` ใน `order_manager.py` ให้ส่งคำสั่ง Stop Loss และ Trailing Stop ผ่าน `create_algo_order` (`algoType="CONDITIONAL"`, `triggerPrice`, `closePosition=True`)
+  3. ปรับปรุง `sync_breakeven_stops` ให้ค้นหาและอัปเดต Algo Orders อัตโนมัติ
+
+### ประเด็นที่ 2: แจ้งเตือนปิดไม้บน Telegram แต่ Position ใน Binance ยังค้างอยู่
+- **ปัญหา**: เมื่อครบกำหนดเวลาถือ (เช่น 24 แท่ง / 6 ชม.) Telegram แจ้งเตือนว่า "ปิดไม้แล้ว (Time Exit)" แต่บน Binance จริง Position ยังเปิดค้างอยู่
+- **การแก้ไข**:
+  1. เพิ่มฟังก์ชัน `sync_close_settled_positions` ใน `order_manager.py`
+  2. เชื่อมต่อเข้ากับ `pipeline_hook.py` ให้ตรวจสอบ Position ที่เปิดค้างอยู่บน Binance เทียบกับผลการประเมินใน `realized_outcomes.json` ทุกๆ 15 นาที หากไม้ใดปิดรอบหรือหมดเวลาแล้ว บอทจะส่งคำสั่ง MARKET เพื่อปิด Position และยกเลิกออเดอร์ค้างใน Binance ทันที พร้อมแจ้งเตือนยืนยันบน Telegram
+
+### ประเด็นที่ 3: สัญญาณแจ้งเตือนปิดไม้เร็วเกินไป (Time Exit ภายใน 6 ชั่วโมง)
+- **ปัญหา**: `AW15` และกลยุทธ์ย่อยมี `time_stop_bars = 24` (24 แท่ง 15m = 6 ชม.) ทำให้ไม้ถูกตัดปิดก่อนที่ราคาจะทันวิ่งระเบิดเทรนด์
+- **การแก้ไข**:
+  1. เพิ่ม `TELEGRAM_ALERT_REALIZED_MIN_EVALUATION_BARS = 64` (16 ชั่วโมง) ใน `config.py` และ `.github/workflows/main.yml`
+  2. ปรับปรุง `_candidate_evaluation_window_bars` ใน `alerts/reporting.py` ให้ใช้ค่า Floor อย่างน้อย 64 แท่ง (หรือ 96 แท่ง) เพื่อให้เวลาไม้ได้พัฒนาตัวและให้ Stop Loss / Trailing Stop ทำงานอย่างเต็มประสิทธิภาพ
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

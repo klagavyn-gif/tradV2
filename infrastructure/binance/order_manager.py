@@ -199,21 +199,23 @@ class BinanceFuturesOrderManager:
         if exec_price <= 0:
             exec_price = entry_price
 
-        # 5. Place Protective Stop Loss (STOP_MARKET with closePosition=True)
+        # 5. Place Protective Stop Loss via Algo Order API (Mandatory for Binance Futures)
         opposite_side = "SELL" if signal == "BUY" else "BUY"
         sl_client_id = f"trad_{alert_id}_sl"
         clean_sl_price = round_to_tick(stop_loss, tick_size)
 
-        sl_res = self.client.create_order(
+        sl_res = self.client.create_algo_order(
             symbol=symbol,
             side=opposite_side,
             order_type="STOP_MARKET",
-            stop_price=clean_sl_price,
+            trigger_price=clean_sl_price,
             close_position=True,
-            client_order_id=sl_client_id,
+            client_algo_id=sl_client_id,
         )
+        if not sl_res.get("success"):
+            logger.error("Failed to place Stop Loss algo order for %s: %s", symbol, sl_res)
 
-        # 6. Place Trailing Stop Order (TRAILING_STOP_MARKET)
+        # 6. Place Trailing Stop Order via Algo Order API
         risk = abs(exec_price - stop_loss)
         ts_res = None
         if self.trailing_r > 0 and risk > 0:
@@ -227,7 +229,7 @@ class BinanceFuturesOrderManager:
             clean_activation = round_to_tick(ts_activation, tick_size)
             ts_client_id = f"trad_{alert_id}_ts"
 
-            ts_res = self.client.create_order(
+            ts_res = self.client.create_algo_order(
                 symbol=symbol,
                 side=opposite_side,
                 order_type="TRAILING_STOP_MARKET",
@@ -235,8 +237,10 @@ class BinanceFuturesOrderManager:
                 activation_price=clean_activation,
                 callback_rate=callback_pct,
                 reduce_only=True,
-                client_order_id=ts_client_id,
+                client_algo_id=ts_client_id,
             )
+            if not ts_res.get("success"):
+                logger.warning("Failed to place Trailing Stop algo order for %s: %s", symbol, ts_res)
 
         return {
             "success": True,
@@ -249,7 +253,9 @@ class BinanceFuturesOrderManager:
             "sizing_info": sizing_info,
             "entry_order": entry_data,
             "sl_order": sl_res.get("data") if sl_res else None,
+            "sl_success": bool(sl_res and sl_res.get("success")),
             "ts_order": ts_res.get("data") if ts_res else None,
+            "ts_success": bool(ts_res and ts_res.get("success")),
         }
 
     def sync_breakeven_stops(self) -> List[Dict[str, Any]]:
@@ -268,15 +274,46 @@ class BinanceFuturesOrderManager:
             entry_price = pos["entryPrice"]
             mark_price = pos["markPrice"]
 
-            # Query existing open orders for symbol
-            orders = self.client.get_open_orders(symbol)
-            sl_order = next((o for o in orders if o.get("type") == "STOP_MARKET"), None)
-            if not sl_order:
-                continue
+            # Query existing open algo orders (and fallback to regular orders)
+            algo_orders = self.client.get_open_algo_orders(symbol)
+            sl_order = next((o for o in algo_orders if str(o.get("orderType") or o.get("type") or "").upper() == "STOP_MARKET"), None)
+            is_algo = sl_order is not None
 
-            current_sl = float(sl_order.get("stopPrice", 0.0))
+            if not sl_order:
+                regular_orders = self.client.get_open_orders(symbol)
+                sl_order = next((o for o in regular_orders if o.get("type") == "STOP_MARKET"), None)
+                is_algo = False
+
             filters = self.client.get_symbol_filters(symbol)
             tick_size = filters["tickSize"] if filters else 0.01
+
+            if not sl_order:
+                # If no SL order exists on Binance at all, place one immediately!
+                if side == "LONG" and mark_price > entry_price:
+                    new_sl = round_to_tick(entry_price, tick_size)
+                    res = self.client.create_algo_order(
+                        symbol=symbol,
+                        side="SELL",
+                        order_type="STOP_MARKET",
+                        trigger_price=new_sl,
+                        close_position=True,
+                        client_algo_id=f"be_{int(time.time())}",
+                    )
+                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
+                elif side == "SHORT" and mark_price < entry_price:
+                    new_sl = round_to_tick(entry_price, tick_size)
+                    res = self.client.create_algo_order(
+                        symbol=symbol,
+                        side="BUY",
+                        order_type="STOP_MARKET",
+                        trigger_price=new_sl,
+                        close_position=True,
+                        client_algo_id=f"be_{int(time.time())}",
+                    )
+                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
+                continue
+
+            current_sl = float(sl_order.get("triggerPrice") or sl_order.get("stopPrice") or 0.0)
 
             # Estimate initial risk from entry and current SL
             risk = abs(entry_price - current_sl)
@@ -288,31 +325,96 @@ class BinanceFuturesOrderManager:
                 # If gain >= breakeven_r and SL is still below entry
                 if gain_r >= self.breakeven_r and current_sl < entry_price:
                     # Cancel old SL
-                    self.client.cancel_order(symbol, order_id=sl_order["orderId"])
-                    # Place new SL at Entry (Breakeven)
+                    if is_algo:
+                        self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
+                    else:
+                        self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
+                    # Place new SL at Entry (Breakeven) via Algo Order API
                     new_sl = round_to_tick(entry_price, tick_size)
-                    res = self.client.create_order(
+                    res = self.client.create_algo_order(
                         symbol=symbol,
                         side="SELL",
                         order_type="STOP_MARKET",
-                        stop_price=new_sl,
+                        trigger_price=new_sl,
                         close_position=True,
-                        client_order_id=f"be_{int(time.time())}",
+                        client_algo_id=f"be_{int(time.time())}",
                     )
                     updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
             else: # SHORT
                 gain_r = (entry_price - mark_price) / risk
                 if gain_r >= self.breakeven_r and current_sl > entry_price:
-                    self.client.cancel_order(symbol, order_id=sl_order["orderId"])
+                    if is_algo:
+                        self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
+                    else:
+                        self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
                     new_sl = round_to_tick(entry_price, tick_size)
-                    res = self.client.create_order(
+                    res = self.client.create_algo_order(
                         symbol=symbol,
                         side="BUY",
                         order_type="STOP_MARKET",
-                        stop_price=new_sl,
+                        trigger_price=new_sl,
                         close_position=True,
-                        client_order_id=f"be_{int(time.time())}",
+                        client_algo_id=f"be_{int(time.time())}",
                     )
                     updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
 
         return updated
+
+    def sync_close_settled_positions(
+        self,
+        settled_outcomes: List[Dict[str, Any]],
+        executed_records: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Check active Binance positions against recently settled trade outcomes.
+        If an alert outcome was settled (e.g. time_exit, take_profit, stop_loss)
+        and the position is still open on Binance, close it immediately via MARKET order
+        to avoid orphan/stuck positions.
+        """
+        closed_positions = []
+        open_positions = self.client.get_positions()
+        if not open_positions or not settled_outcomes:
+            return closed_positions
+
+        # Build map of settled symbols from recently settled outcomes
+        settled_by_symbol = {}
+        for outcome in settled_outcomes:
+            if not isinstance(outcome, dict):
+                continue
+            if str(outcome.get("outcome_status") or "").strip().lower() != "settled":
+                continue
+            raw_sym = str(outcome.get("symbol") or "")
+            clean_sym = normalize_futures_symbol(raw_sym)
+            if clean_sym:
+                # Keep latest outcome
+                settled_by_symbol[clean_sym] = outcome
+
+        for pos in open_positions:
+            sym = pos.get("symbol")
+            if not sym or sym not in settled_by_symbol:
+                continue
+
+            outcome = settled_by_symbol[sym]
+            exit_reason = str(outcome.get("exit_reason") or "settled")
+            pnl_pct = outcome.get("pnl_pct")
+
+            logger.info(
+                "[Auto-Trade] Position for %s is settled in outcome tracker (reason=%s). Closing position on Binance...",
+                sym, exit_reason
+            )
+
+            close_res = self.client.close_position_market(sym)
+            if close_res.get("success"):
+                logger.info("[Auto-Trade] Successfully closed position for %s on Binance: %s", sym, close_res)
+                closed_positions.append({
+                    "symbol": sym,
+                    "side": pos.get("side"),
+                    "amount": pos.get("amount"),
+                    "exit_reason": exit_reason,
+                    "pnl_pct": pnl_pct,
+                    "result": close_res,
+                })
+            else:
+                logger.warning("[Auto-Trade] Failed to close position for %s on Binance: %s", sym, close_res)
+
+        return closed_positions

@@ -51,9 +51,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .data/telegram_alerts
-          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+          key: telegram-alert-history-v2-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            telegram-alert-history-${{ github.ref_name }}-
+            telegram-alert-history-v2-${{ github.ref_name }}-
       - name: Build entry edge report
         run: |
           EXTRA_ARGS=""

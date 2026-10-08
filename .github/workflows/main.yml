@@ -412,9 +412,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: .data/telegram_alerts
-          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+          key: telegram-alert-history-v2-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
-            telegram-alert-history-${{ github.ref_name }}-
+            telegram-alert-history-v2-${{ github.ref_name }}-
       - name: Restore live AI model cache
         if: ${{ env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true' }}
         uses: actions/cache/restore@v5
@@ -509,7 +509,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: .data/telegram_alerts
-          key: telegram-alert-history-${{ github.ref_name }}-${{ github.run_id }}
+          key: telegram-alert-history-v2-${{ github.ref_name }}-${{ github.run_id }}
       - name: Save live AI model cache
         if: ${{ always() && (env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true') }}
         uses: actions/cache/save@v5

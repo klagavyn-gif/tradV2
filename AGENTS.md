@@ -278,6 +278,33 @@ BINANCE_WATCHDOG_DEFAULT_SL_PCT = 1.8       # Stop Loss สำรองฉุก
 เครื่องมือทดสอบ:
 `python tools/test_binance_futures.py --watchdog`
 
+## 13. การเปิดใช้งาน Clean V2 Baseline & การสำรองข้อมูล V1 (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+### บริบทและการตัดสินใจ
+- สถิติเดิม (พ.ค. - ก.ย. 2026) ถูกบันทึกภายใต้ระบบเก่า:
+  - ฟิกซ์ Take Profit 0.20% (ไม้ชนะได้กำไรสั้น ไม้แพ้เสียเต็ม)
+  - ไม่มี Breakeven Stop และ Trailing Stop
+  - มี Ghost Entries (สัญญาณ "ห้ามเข้า" ถูกนับเป็น entry)
+  - มีเหรียญเก่าที่ถูกคัดทิ้ง (`NEAR`, `LINK`)
+- หากเก็บสถิติเก่าไว้ในระบบปัจจุบัน สถิติเดิมจะฉุดรั้งการประเมิน Win Rate และอาจทำให้ Realized Gate ไปบล็อกสัญญาณดีๆ
+- **แนวทางที่เลือก**: ทำการ **Archive ประวัติ V1 เดิมเก็บไว้ทั้งหมด** แล้ว **เริ่มต้นนับสถิติใหม่เป็น Version 2 (Clean V2 Epoch)**
+
+### สิ่งที่ดำเนินการ:
+1. **สำรองข้อมูล V1**: ย้ายข้อมูลและรายงานสถิติเดิม 220 รายการไปเก็บไว้ที่ `.data/archive/v1_pre_oct2026/` (พร้อม Commit ไฟล์สำคัญขึ้น Git เพื่อใช้อ้างอิงและเปรียบเทียบในอนาคต)
+2. **รีเซ็ต V2 Baseline**: สร้างไฟล์เริ่มต้นใหม่ที่สะอาดใน `.data/telegram_alerts/`:
+   - `realized_outcomes.json` (Epoch: V2, outcomes: [])
+   - `realized_summary.json`
+   - `realized_report.json` และ `.md`
+   - `risk_state.json` (รีเซ็ต consecutive_losses = 0, pnl = 0)
+   - `binance_executed_orders.json`
+   - `notified_closes.json`
+   - `alert_history.jsonl` และ `alert_history.csv`
+3. **อัปเกรด GitHub Actions Cache Prefix**:
+   - เปลี่ยน Cache Key Prefix ใน `.github/workflows/main.yml`, `daily-summary.yml`, และ `entry-edge-report.yml` จาก `telegram-alert-history-` เป็น `telegram-alert-history-v2-`
+   - เพื่อป้องกันไม่ให้ GitHub Actions นำ Cache ประวัติเดิมก่อนหน้านี้มาทับไฟล์ใหม่
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

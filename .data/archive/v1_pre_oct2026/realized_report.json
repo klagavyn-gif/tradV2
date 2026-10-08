@@ -1,0 +1,62 @@
+{
+  "generated_at": "2026-06-07 16:30:03",
+  "request": {
+    "days": 30.0,
+    "strategies": [
+      "REV15"
+    ],
+    "signals": [
+      "SELL"
+    ],
+    "symbols": null,
+    "top": 20
+  },
+  "source_summary": {
+    "enabled": true,
+    "generated_at": "2026-06-07 16:30:03",
+    "window_days": 45.0,
+    "total_alerts": 0,
+    "eligible_directional_alerts": 0,
+    "settled_alerts": 0,
+    "open_alerts": 0,
+    "unsupported_alerts": 0,
+    "wins": 0,
+    "losses": 0,
+    "flats": 0,
+    "win_rate_pct": null,
+    "avg_rr_realized": null,
+    "avg_pnl_pct": null,
+    "alerts_per_day_avg": 0.0,
+    "alerts_per_30d_est": 0.0,
+    "by_strategy": {},
+    "by_month": {}
+  },
+  "overview": {
+    "name": "ALL",
+    "alerts": 0,
+    "settled_alerts": 0,
+    "open_alerts": 0,
+    "unsupported_alerts": 0,
+    "wins": 0,
+    "losses": 0,
+    "flats": 0,
+    "win_rate_pct": null,
+    "avg_rr_realized": null,
+    "avg_pnl_pct": null,
+    "alerts_per_day_avg": 0.0
+  },
+  "tables": {
+    "by_strategy": [],
+    "by_signal": [],
+    "by_symbol": [],
+    "by_strategy_signal": []
+  },
+  "filtered_outcomes_count": 0,
+  "all_outcomes_count": 0,
+  "files": {
+    "summary_json": "E:\\TRAD\\DDD\\tradV2\\.data\\telegram_alerts\\realized_summary.json",
+    "outcomes_json": "E:\\TRAD\\DDD\\tradV2\\.data\\telegram_alerts\\realized_outcomes.json",
+    "report_markdown": "E:\\TRAD\\DDD\\tradV2\\.data\\telegram_alerts\\realized_report.md",
+    "report_json": "E:\\TRAD\\DDD\\tradV2\\.data\\telegram_alerts\\realized_report.json"
+  }
+}

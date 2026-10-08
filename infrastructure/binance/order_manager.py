@@ -409,7 +409,7 @@ class BinanceFuturesOrderManager:
                 closed_positions.append({
                     "symbol": sym,
                     "side": pos.get("side"),
-                    "amount": pos.get("amount"),
+                    "amount": pos.get("positionAmt", pos.get("amount")),
                     "exit_reason": exit_reason,
                     "pnl_pct": pnl_pct,
                     "result": close_res,

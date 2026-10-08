@@ -6234,7 +6234,8 @@ def _notify_telegram_from_results(results, runtime_context=None):
         logger=logger,
         runtime_context=runtime_context,
     )
-    if bool(getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False)):
+    binance_api_key = str(getattr(config, "BINANCE_FUTURES_API_KEY", "") or os.environ.get("BINANCE_FUTURES_API_KEY", "")).strip()
+    if bool(getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False)) or (bool(getattr(config, "BINANCE_WATCHDOG_ENABLED", True)) and bool(binance_api_key)):
         try:
             recent_sent = _read_telegram_alert_history(days=1)
             now_dt = get_thai_now()

@@ -53,8 +53,9 @@ def execute_binance_auto_trade_pipeline(
     Main hook called after alert dispatch.
     Controlled by config.BINANCE_FUTURES_AUTO_TRADE_ENABLED.
     """
-    enabled = bool(getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False))
-    if not enabled:
+    auto_trade_enabled = bool(getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False))
+    watchdog_enabled = bool(getattr(config, "BINANCE_WATCHDOG_ENABLED", True))
+    if not auto_trade_enabled and not watchdog_enabled:
         return {"enabled": False, "executed": []}
 
     api_key = str(getattr(config, "BINANCE_FUTURES_API_KEY", "") or "").strip()
@@ -62,8 +63,9 @@ def execute_binance_auto_trade_pipeline(
     testnet = bool(getattr(config, "BINANCE_FUTURES_TESTNET", True))
 
     if not api_key or not api_secret:
-        logger.warning("Binance Futures Auto-Trade enabled but API Key/Secret is missing!")
-        return {"enabled": True, "error": "missing_credentials"}
+        if auto_trade_enabled:
+            logger.warning("Binance Futures Auto-Trade enabled but API Key/Secret is missing!")
+        return {"enabled": False, "error": "missing_credentials"}
 
     from .client import BinanceFuturesClient
     from .order_manager import BinanceFuturesOrderManager
@@ -129,9 +131,50 @@ def execute_binance_auto_trade_pipeline(
         "be_updates": [],
         "executed_entries": [],
         "cb_alerted": False,
+        "watchdog_report": None,
     }
 
-    # 1. Sync Breakeven Stops on any existing open positions
+    # 1. Run Binance Futures Watchdog (Naked position defense, ghost order cleanup, health audit)
+    from .watchdog import BinanceFuturesWatchdog
+    watchdog = BinanceFuturesWatchdog(
+        client=client,
+        target_leverage=leverage,
+        target_margin_type=margin_type,
+        max_positions=max_positions,
+        min_liquidation_distance_pct=float(getattr(config, "BINANCE_WATCHDOG_MIN_LIQ_DIST_PCT", 3.0)),
+        default_stop_loss_pct=float(getattr(config, "BINANCE_WATCHDOG_DEFAULT_SL_PCT", 1.8)),
+    )
+
+    executed_orders_path = helpers.get("binance_executed_orders_path", lambda: ".data/telegram_alerts/binance_executed_orders.json")()
+    executed_records = _load_executed_orders(executed_orders_path)
+
+    try:
+        outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
+        settled_outcomes = []
+        if os.path.exists(outcomes_path):
+            with open(outcomes_path, "r", encoding="utf-8") as f:
+                pld = json.load(f)
+            if isinstance(pld, dict) and "outcomes" in pld:
+                settled_outcomes = pld["outcomes"]
+
+        watchdog_report = watchdog.audit_and_heal(
+            settled_outcomes=settled_outcomes,
+            executed_records=executed_records,
+        )
+        results["watchdog_report"] = watchdog_report
+
+        # If any healing action, issue, or warning was discovered, send Telegram alert immediately!
+        if (watchdog_report.get("healed_actions") or watchdog_report.get("issues_detected") or watchdog_report.get("warnings")) and callable(send_telegram_alert):
+            tg_msg = watchdog.format_telegram_alert(watchdog_report)
+            if tg_msg:
+                try:
+                    send_telegram_alert(tg_msg)
+                except Exception:
+                    pass
+    except Exception as e:
+        logger.exception("Error executing Binance Watchdog: %s", e)
+
+    # 1.5. Sync Breakeven Stops on any existing open positions
     try:
         be_updates = order_mgr.sync_breakeven_stops()
         results["be_updates"] = be_updates
@@ -149,34 +192,10 @@ def execute_binance_auto_trade_pipeline(
     except Exception as e:
         logger.exception("Error syncing Breakeven stops: %s", e)
 
-    # 1.5. Sync and close settled positions on Binance (e.g. time_exit, TP, SL, exit signal)
-    try:
-        outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
-        if os.path.exists(outcomes_path):
-            with open(outcomes_path, "r", encoding="utf-8") as f:
-                pld = json.load(f)
-            if isinstance(pld, dict) and "outcomes" in pld:
-                closed_settled = order_mgr.sync_close_settled_positions(pld["outcomes"])
-                results["closed_positions"] = closed_settled
-                if closed_settled and callable(send_telegram_alert):
-                    for cp in closed_settled:
-                        pnl_str = f" ({cp['pnl_pct']:+.2f}%)" if isinstance(cp.get("pnl_pct"), (int, float)) else ""
-                        msg = (
-                            f"🏁 <b>[Auto-Trade] ซิงค์ปิดออเดอร์บน Binance สำเร็จ!</b>\n"
-                            f"<b>เหรียญ:</b> {cp['symbol']} | <b>ฝั่ง:</b> {cp['side']}\n"
-                            f"<b>สาเหตุ:</b> ปิดตามแผนสัญญาณ ({cp['exit_reason']}){pnl_str}\n"
-                            f"✅ เคลียร์ Position และยกเลิกออเดอร์ค้างใน Binance เรียบร้อย"
-                        )
-                        try:
-                            send_telegram_alert(msg)
-                        except Exception:
-                            pass
-    except Exception as e:
-        logger.exception("Error syncing closed settled positions on Binance: %s", e)
-
-    # Load executed orders history for idempotency
-    executed_orders_path = helpers.get("binance_executed_orders_path", lambda: ".data/telegram_alerts/binance_executed_orders.json")()
-    executed_records = _load_executed_orders(executed_orders_path)
+    # If auto-trading new entries is disabled, finish after watchdog & BE sync
+    if not auto_trade_enabled:
+        logger.info("[Auto-Trade] Auto-trade entry execution is disabled; watchdog monitoring and health reconciliation completed.")
+        return results
 
     # 2. Filter actionable entry candidates from this run
     from alerts.reporting import infer_alert_intent

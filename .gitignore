@@ -23,3 +23,7 @@ aw15_step*.txt
 .env
 .env.*
 !.env.example
+
+.tmp_*
+.vscode/
+.data/heartbeat/

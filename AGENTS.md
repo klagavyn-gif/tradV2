@@ -254,6 +254,30 @@ BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE = True  # ชนะติดกัน 2+
   1. เพิ่ม `TELEGRAM_ALERT_REALIZED_MIN_EVALUATION_BARS = 64` (16 ชั่วโมง) ใน `config.py` และ `.github/workflows/main.yml`
   2. ปรับปรุง `_candidate_evaluation_window_bars` ใน `alerts/reporting.py` ให้ใช้ค่า Floor อย่างน้อย 64 แท่ง (หรือ 96 แท่ง) เพื่อให้เวลาไม้ได้พัฒนาตัวและให้ Stop Loss / Trailing Stop ทำงานอย่างเต็มประสิทธิภาพ
 
+## 12. ระบบ Binance Futures Watchdog & Continuous Health Reconciliation (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests & CLI)**
+
+โครงสร้างโมดูล (`infrastructure/binance/watchdog.py`):
+- `BinanceFuturesWatchdog`:
+  1. **Naked Position Defense (ป้องกันไม้ไร้ Stop Loss)**: สแกนทุกลำดับของ Position ที่เปิดอยู่ใน Binance หากพบว่าไม่มีคำสั่ง Stop Loss (ทั้งจากข้อผิดพลาดในอดีตหรือหลุดจากการเชื่อมต่อ) ระบบจะทำ **Self-Healing ทันที** โดยดึง Stop Loss เดิมตาม ATR ของกลยุทธ์จาก `binance_executed_orders.json` (หรือใช้ค่าสำรอง 1.8%) แล้วยิงคำสั่ง `STOP_MARKET` algo order แบบ `closePosition=True` ทันที
+  2. **Ghost Order Defense (ล้างคำสั่งตกค้าง)**: สแกน Open Orders และ Open Algo Orders ทั้งหมด หากพบคำสั่งที่ผูกกับเหรียญที่ไม่มี Position ถือครองอยู่แล้ว (เช่น โดนชน SL หรือปิดมือไปแล้ว แต่ Limit TP หรือ Trailing Stop ค้างอยู่) ระบบจะยกเลิกคำสั่งเหล่านั้นทั้งหมดอัตโนมัติ เพื่อป้องกันไม่ให้คำสั่งค้างกลายเป็นการเปิด Position ย้อนทิศทางโดยไม่ตั้งใจ
+  3. **Stuck / Settled Position Sync**: ตรวจสอบสถานะการปิดรอบใน `realized_outcomes.json` เทียบกับกระดานจริง หากในระบบบันทึกว่าไม้จบแล้ว (เช่น ชน TP, SL, หรือ Time Exit) แต่ใน Binance ยังค้างอยู่ ระบบจะส่ง Market Close และล้างคำสั่งค้างทันที
+  4. **Liquidation Proximity Warning**: คำนวณระยะห่างระหว่าง Mark Price กับ Liquidation Price แบบเรียลไทม์ หากต่ำกว่า 3.0% จะยิง Telegram Alert แจ้งเตือนฉุกเฉินทันที
+  5. **Leverage & Margin Type Guard**: ตรวจสอบและบังคับใช้ Isolated Margin และ Leverage 20x หากพบว่าเหรียญใดหลุดไปเป็น Leverage อื่น ระบบจะปรับคืนค่าอัตโนมัติ
+  6. **Margin Utilization & Max Positions Guard**: ตรวจสอบว่า Margin รวมไม่เกิน 80% ของ Equity เพื่อสำรองเงินสดไว้เสมอ และแจ้งเตือนหากจำนวนไม้เกินเพดาน (Max 2 ไม้)
+  7. **One-way vs Hedge Mode Check**: ตรวจสอบและบันทึกโหมดของพอร์ต (One-way Mode)
+  8. **Automated Telegram Status Report**: จัดรูปแบบรายงานสถานะสุขภาพของพอร์ตและออเดอร์ใน Binance ส่งเข้า Telegram อย่างสวยงามและเข้าใจง่าย
+
+การตั้งค่า (`config.py`):
+```python
+BINANCE_WATCHDOG_ENABLED = True             # เปิดระบบ Watchdog เฝ้าระวังอัตโนมัติทุก 15 นาที
+BINANCE_WATCHDOG_MIN_LIQ_DIST_PCT = 3.0     # แจ้งเตือนเมื่อราคาห่างจาก Liquidation ต่ำกว่า 3%
+BINANCE_WATCHDOG_DEFAULT_SL_PCT = 1.8       # Stop Loss สำรองฉุกเฉินกรณีเกิด Naked Position
+```
+เครื่องมือทดสอบ:
+`python tools/test_binance_futures.py --watchdog`
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

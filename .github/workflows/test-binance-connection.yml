@@ -56,19 +56,19 @@ jobs:
 
           # Run diagnostic
           if mode == "live":
-              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions"]
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions", "--watchdog"]
           elif mode == "testnet":
-              cmd = [sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance", "--positions"]
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance", "--positions", "--watchdog"]
           else:
               # auto: try testnet first, if fails try live
               print("\n--- [1/2] Trying Testnet endpoint ---")
-              res = subprocess.run([sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance"], capture_output=True, text=True)
+              res = subprocess.run([sys.executable, "tools/test_binance_futures.py", "--testnet", "--balance", "--watchdog"], capture_output=True, text=True)
               print(res.stdout)
               if "[PASS] Total USDT" in res.stdout:
                   print("✅ SUCCESS: Successfully connected to Binance Testnet!")
                   sys.exit(0)
               print("\n--- [2/2] Trying Live endpoint ---")
-              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions"]
+              cmd = [sys.executable, "tools/test_binance_futures.py", "--live", "--balance", "--positions", "--watchdog"]
 
           res = subprocess.run(cmd, text=True)
           if res.returncode != 0:

@@ -188,6 +188,7 @@ class BinanceFuturesClient:
                 open_positions.append({
                     "symbol": p.get("symbol"),
                     "positionAmt": amt,
+                    "amount": amt,
                     "entryPrice": float(p.get("entryPrice", 0.0)),
                     "markPrice": float(p.get("markPrice", 0.0)),
                     "unRealizedProfit": float(p.get("unRealizedProfit", 0.0)),
@@ -219,6 +220,13 @@ class BinanceFuturesClient:
             params={"symbol": clean_sym, "marginType": margin_type.upper()},
             signed=True,
         )
+
+    def get_position_mode(self) -> Dict[str, Any]:
+        """Check user position mode: dualSidePosition True (Hedge Mode) or False (One-way Mode)."""
+        res = self._request("GET", "/fapi/v1/positionSide/dual", signed=True)
+        if res.get("success"):
+            return res.get("data", {})
+        return {}
 
     # --- Orders ---
 
@@ -401,7 +409,7 @@ class BinanceFuturesClient:
 
         side = str(target_pos.get("side", "")).upper()
         close_side = "SELL" if side == "LONG" else "BUY"
-        qty = abs(float(target_pos.get("amount", 0.0)))
+        qty = abs(float(target_pos.get("positionAmt", target_pos.get("amount", 0.0))))
         if qty <= 0:
             return {"success": False, "reason": "position_amount_zero", "symbol": clean_sym}
 

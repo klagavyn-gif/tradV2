@@ -34,6 +34,7 @@ def main():
     parser.add_argument("--positions", action="store_true", help="List active open positions")
     parser.add_argument("--symbol-info", default=None, help="Inspect precision and minNotional for symbol (e.g. ADA-USD or BTCUSDT)")
     parser.add_argument("--risk-status", action="store_true", help="Display current risk management & circuit breaker status")
+    parser.add_argument("--watchdog", action="store_true", help="Run full Binance Watchdog health audit and position reconciliation")
     parser.add_argument("--derivatives", action="store_true", help="Display live Funding Rate and Open Interest momentum for all 11 symbols")
     parser.add_argument("--dry-run", action="store_true", help="Simulate sizing and pre-flight checks for a test candidate")
 
@@ -80,7 +81,16 @@ def main():
         print(f"   Min Notional: {filters['minNotional']} USDT")
 
     # 3. Balance & Auth Check
-    if args.balance or not (args.ping or args.symbol_info or args.dry_run):
+    any_custom_action = any([
+        args.ping,
+        args.symbol_info,
+        args.dry_run,
+        args.positions,
+        args.risk_status,
+        args.derivatives,
+        args.watchdog,
+    ])
+    if args.balance or not any_custom_action:
         if not api_key or not api_secret:
             print("\n [INFO] API Key / Secret not configured. (Skipping private account endpoints)")
             print(" To test authenticated endpoints, provide --api-key and --api-secret or set in .env:")
@@ -118,7 +128,7 @@ def main():
                 print(f"   {p['symbol']}: {p['side']} {p['positionAmt']} @ {p['entryPrice']} (Mark: {p['markPrice']}, PnL: {p['unRealizedProfit']:+.2f} USDT)")
 
     # 5. Risk Status Check
-    if args.risk_status or not (args.ping or args.symbol_info or args.dry_run or args.positions or args.balance):
+    if args.risk_status or not any_custom_action:
         from infrastructure.binance import BinanceFuturesRiskManager
         rm = BinanceFuturesRiskManager(
             dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
@@ -184,6 +194,55 @@ def main():
 
             print(f" {s:<10} | {fr_str:<18} | {oi_delta_str:<14} | {pos_str:<14} | {veto_status}")
         print("-" * 75)
+
+    # 5.6 Watchdog Health Audit & Reconciliation
+    if args.watchdog:
+        from infrastructure.binance.watchdog import BinanceFuturesWatchdog
+        print("\n Running Binance Futures Watchdog Health Audit & Reconciliation...")
+        watchdog = BinanceFuturesWatchdog(
+            client=client,
+            target_leverage=getattr(config, "BINANCE_FUTURES_LEVERAGE", 20),
+            target_margin_type=getattr(config, "BINANCE_FUTURES_MARGIN_TYPE", "ISOLATED"),
+            max_positions=getattr(config, "BINANCE_FUTURES_MAX_POSITIONS", 2),
+            min_liquidation_distance_pct=getattr(config, "BINANCE_WATCHDOG_MIN_LIQ_DIST_PCT", 3.0),
+            default_stop_loss_pct=getattr(config, "BINANCE_WATCHDOG_DEFAULT_SL_PCT", 1.8),
+        )
+        report = watchdog.audit_and_heal()
+        print(f"   Audit Timestamp:      {report['timestamp']}")
+        print(f"   Health Status:        {'✅ ALL SYSTEMS HEALTHY' if report['healthy'] else '⚠️ ISSUES DETECTED & ADDRESSED'}")
+        print(f"   Position Mode:        {report.get('position_mode', 'ONE_WAY')}")
+        print(f"   Open Positions:       {report['open_positions_count']}")
+        print(f"   Account Equity:       {report['account_equity']:,.2f} USDT (Available: {report['available_balance']:,.2f} USDT)")
+        print(f"   Unrealized PnL:       {report['total_unrealized_pnl']:+,.2f} USDT")
+        if report.get("margin_utilization_pct"):
+            print(f"   Margin Utilization:   {report['margin_utilization_pct']:.1f}%")
+
+        if report.get("open_positions"):
+            print("\n   --- Active Position Audit ---")
+            for p in report["open_positions"]:
+                sl_str = f"✅ SL: {p['sl_price']}" if p["sl_protected"] else "❌ NO SL (Naked!)"
+                ts_str = " | 🔄 TS Active" if p["ts_active"] else ""
+                print(f"   • {p['symbol']} ({p['side']}) Qty: {p['amount']} | Entry: {p['entry_price']} | Mark: {p['mark_price']} | ROE: {p['roe_pct']:+.1f}% | {sl_str}{ts_str}")
+
+        if report.get("healed_actions"):
+            print("\n   --- Self-Healed Actions ---")
+            for h in report["healed_actions"]:
+                print(f"   • {h}")
+
+        if report.get("issues_detected"):
+            print("\n   --- Issues Detected ---")
+            for i in report["issues_detected"]:
+                print(f"   • {i}")
+
+        if report.get("warnings"):
+            print("\n   --- Safety Warnings ---")
+            for w in report["warnings"]:
+                print(f"   • {w}")
+
+        tg_text = watchdog.format_telegram_alert(report)
+        if tg_text:
+            print("\n   --- Formatted Telegram Alert Preview ---")
+            print(tg_text)
 
     # 6. Dry-Run Candidate Sizing
     if args.dry_run:

@@ -344,54 +344,29 @@ def _clean_json_value(v):
     return _service_support.clean_json_value(v)
 
 
-def send_telegram_alert(message):
-    bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
-    thread_id = os.environ.get("TELEGRAM_THREAD_ID")
-    if not bot_token or not chat_id or not message:
-        return False
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    payload = {
-        "chat_id": chat_id, 
-        "text": message, 
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    if thread_id:
-        payload["message_thread_id"] = thread_id
-        
-    # Retry logic
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            if http_requests is not None:
-                resp = http_requests.post(url, json=payload, timeout=10)
-                if bool(getattr(resp, "ok", False)):
-                    return True
-                status_code = int(getattr(resp, "status_code", 0))
-            else:
-                session = _create_curl_session()
-                resp = session.post(url, json=payload, timeout=10)
-                status_code = int(getattr(resp, "status_code", 0))
-                ok = getattr(resp, "ok", None)
-                if ok is not None and bool(ok):
-                    return True
-                if 200 <= status_code < 300:
-                    return True
-                    
-            # Handle rate limits (429)
-            if status_code == 429:
-                import time
-                retry_after = int(resp.json().get("parameters", {}).get("retry_after", 3))
-                time.sleep(retry_after)
-                continue
-                
-            logger.warning("Telegram alert attempt %d failed (status: %d): %s", attempt + 1, status_code, resp.text if hasattr(resp, 'text') else '')
-            
-        except Exception as e:
-            logger.warning("Telegram alert attempt %d failed with exception: %s", attempt + 1, e)
-            
-    return False
+from infrastructure.notifications.telegram_gateway import (
+    TelegramSendResult as _TelegramSendResult,
+    send_telegram_alert as _infra_send_telegram_alert,
+    edit_telegram_alert as _infra_edit_telegram_alert,
+)
+
+
+def send_telegram_alert(message, chat_id=None, thread_id=None, reply_to_message_id=None, disable_notification=False):
+    return _infra_send_telegram_alert(
+        message,
+        chat_id=chat_id,
+        thread_id=thread_id,
+        reply_to_message_id=reply_to_message_id,
+        disable_notification=disable_notification,
+    )
+
+
+def edit_telegram_alert(message_id, new_message, chat_id=None):
+    return _infra_edit_telegram_alert(
+        message_id,
+        new_message,
+        chat_id=chat_id,
+    )
 
 
 def _normalize_confidence(value):

@@ -1484,12 +1484,43 @@ def dispatch_trade_close_notifications(
         message = _build_trade_close_message(outcome, get_now=get_now)
         if not isinstance(message, str) or not message.strip():
             continue
-        if send_telegram_alert(message):
-            sent += 1
-            mark_handled(alert_id)
-        else:
-            # Failed send: leave un-notified so it retries next run.
-            failed += 1
+
+        handled_via_edit = False
+        edit_enabled = bool(getattr(config, "TELEGRAM_ALERT_EDIT_MESSAGE_ENABLE", True))
+        if edit_enabled:
+            try:
+                from infrastructure.notifications.telegram_gateway import (
+                    LiveCardStore,
+                    edit_telegram_alert as _infra_edit,
+                    format_short_close_reply,
+                )
+                store_path = str(getattr(config, "TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH", ".data/telegram_alerts/live_trade_messages.json"))
+                live_store = LiveCardStore(store_path)
+                card = live_store.get_card(symbol=outcome.get("symbol"), alert_id=alert_id)
+                if card and card.get("message_id"):
+                    edit_res = _infra_edit(
+                        card["message_id"],
+                        message,
+                        chat_id=card.get("chat_id"),
+                    )
+                    if edit_res:
+                        handled_via_edit = True
+                        live_store.close_card(card.get("symbol") or outcome.get("symbol"), outcome)
+                        if bool(getattr(config, "TELEGRAM_ALERT_EDIT_MESSAGE_NOTIFY_ON_CLOSE", True)):
+                            short_reply = format_short_close_reply(outcome)
+                            send_telegram_alert(short_reply, reply_to_message_id=card["message_id"])
+                        sent += 1
+                        mark_handled(alert_id)
+            except Exception:
+                pass
+
+        if not handled_via_edit:
+            if send_telegram_alert(message):
+                sent += 1
+                mark_handled(alert_id)
+            else:
+                # Failed send: leave un-notified so it retries next run.
+                failed += 1
 
     # Persist notified ids so we never send the same close twice. Only ids
     # that were actually sent (or intentionally skipped) are persisted; failed
@@ -2173,6 +2204,7 @@ def record_telegram_alert_history(
         "max_chase_price": float(candidate.get("max_chase_price")) if isinstance(candidate.get("max_chase_price"), (int, float)) else None,
         "red_to_green_quality_score": float(plan.get("red_to_green_quality_score")) if isinstance(plan, dict) and isinstance(plan.get("red_to_green_quality_score"), (int, float)) else None,
         "green_flip_reclaim": bool(plan.get("green_flip_reclaim")) if isinstance(plan, dict) and "green_flip_reclaim" in plan else None,
+        "telegram_message_id": int(candidate["telegram_message_id"]) if candidate.get("telegram_message_id") else None,
     }
     path = helpers["alert_history_file_path"]()
     max_rows = getattr(config, "TELEGRAM_ALERT_HISTORY_MAX_ROWS", 5000)

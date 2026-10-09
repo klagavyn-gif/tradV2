@@ -171,7 +171,27 @@ def dispatch_primary_candidates(
         message = candidate.get("message")
         if not isinstance(message, str) or not message.strip():
             continue
-        if send_telegram_alert(message):
+        send_res = send_telegram_alert(message)
+        if send_res:
+            msg_id = getattr(send_res, "message_id", None)
+            chat_id = getattr(send_res, "chat_id", None)
+            if msg_id:
+                candidate["telegram_message_id"] = msg_id
+                try:
+                    from infrastructure.notifications.telegram_gateway import LiveCardStore
+                    LiveCardStore().register_card(
+                        symbol=symbol,
+                        message_id=msg_id,
+                        chat_id=chat_id,
+                        alert_id=str(candidate.get("alert_id") or ""),
+                        signal=str(candidate.get("signal") or "BUY"),
+                        entry_price=candidate.get("entry_price"),
+                        stop_loss=candidate.get("stop_loss"),
+                        take_profit=candidate.get("take_profit"),
+                        original_message=message,
+                    )
+                except Exception:
+                    pass
             cache_mark_sent(telegram_alert_cache, cache_key, ttl_seconds=limits["cooldown_ttl"])
             if isinstance(max_trade_remaining, int) and max_trade_remaining >= 0:
                 mark_global_trade_alert_sent(

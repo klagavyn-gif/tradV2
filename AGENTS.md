@@ -305,6 +305,40 @@ BINANCE_WATCHDOG_DEFAULT_SL_PCT = 1.8       # Stop Loss สำรองฉุก
    - เปลี่ยน Cache Key Prefix ใน `.github/workflows/main.yml`, `daily-summary.yml`, และ `entry-edge-report.yml` จาก `telegram-alert-history-` เป็น `telegram-alert-history-v2-`
    - เพื่อป้องกันไม่ให้ GitHub Actions นำ Cache ประวัติเดิมก่อนหน้านี้มาทับไฟล์ใหม่
 
+## 14. ระบบ Telegram Live Card & In-Place Message Editing (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests)**
+
+### ปัญหาและความต้องการ
+- ผู้ใช้ต้องการให้การแจ้งเตือนไม่รก ไม่สแปม และไม่ทับซ้อนกับสัญญาณเข้าเทรดตัวอื่น
+- แทนที่จะส่งข้อความใหม่ทุกครั้งที่มีการอัปเดตสถานะ ให้ใช้เทคนิค **"แก้ไขข้อความเดิม (Edit Message)"** เพื่อให้ 1 ไม้เทรดมีข้อความเพียง 1 การ์ดตลอดวงจรชีวิต (Single Source of Truth)
+
+### การทำงานและโครงสร้างโมดูล (`infrastructure/notifications/telegram_gateway.py`)
+1. **TelegramSendResult**:
+   - คลาสครอบผลลัพธ์ของ Telegram API รองรับการประเมินแบบ Boolean (`__bool__`) เพื่อให้เข้ากันได้กับโค้ดเดิม 100% พร้อมเก็บ `message_id` และ `chat_id`
+2. **In-Place Message Editing (`edit_telegram_alert`)**:
+   - เรียก Telegram API `editMessageText` เพื่อแก้ไขข้อความเดิมในห้องแชทแบบ Real-time โดยไม่ส่งเสียงรบกวน (Silent Update)
+   - จัดการ Rate Limit (429) และดักจับเคส `message is not modified` อัตโนมัติ
+3. **LiveCardStore (`.data/telegram_alerts/live_trade_messages.json`)**:
+   - จัดเก็บและติดตามสถานะของตั๋วเทรดที่ยังเปิดอยู่ (Open Cards)
+   - ซิงค์ข้ามรันใน GitHub Actions ผ่าน Cache `.data/telegram_alerts`
+   - ค้นหาตั๋วด้วย `symbol` (เช่น `SUI-USD` หรือ `SUIUSDT`) หรือ `alert_id`
+4. **วงจรชีวิตของ Live Card (Lifecycle Progression)**:
+   - **เมื่อเปิดไม้ (Entry Executed)**: ส่งตั๋วเปิดไม้ตามปกติ พร้อมจำ `message_id` ลงใน `LiveCardStore`
+   - **เมื่อขยับกันทุน (Breakeven Active +1.2R)**: ใน `pipeline_hook.py` ระบบจะแก้ไขข้อความเดิมทันที โดยเปลี่ยนแถบสถานะเป็น `🛡️ ปรับกันทุนแล้ว (RISK-FREE)` และเปลี่ยนราคา Stop Loss เป็น `1.8200 🔒 (กันทุนแล้ว — ความเสี่ยง 0%)` พร้อมส่ง Silent Thread Reply
+   - **เมื่อปิดไม้ (Trade Closed)**: ใน `alerts/reporting.py` ระบบจะแก้ไขตั๋วเดิมให้กลายเป็น **ใบสรุปผลการปิดไม้แบบสมบูรณ์** (ผลลัพธ์ ชนะ/เสมอ/แพ้, Net PnL, R-Multiple, เวลาถือ, ยอด Balance) และส่งแจ้งเตือนสั้นๆ 1 บรรทัดแบบ Reply ตั๋วเดิม เช่น:  
+     `🏆 #SUIUSDT ปิดไม้แล้ว — ชนะ (WIN): PnL +4.04% (+2.30R | +16.16 USDT)`  
+     เพื่อให้โทรศัพท์สั่นเตือน 1 ครั้งอย่างพอดี และสามารถกดลิงก์ย้อนไปดูตั๋วเต็มได้ทันที
+   - **Fallback Resilience**: หากตั๋วเดิมไม่อยู่ หรือการ Edit ล้มเหลว ระบบจะส่งข้อความแจ้งเตือนใหม่ตามปกติ 100% ไม่สูญหาย
+
+การตั้งค่า (`config.py`):
+```python
+TELEGRAM_ALERT_EDIT_MESSAGE_ENABLE = True             # เปิดระบบอัปเดตข้อความเดิม
+TELEGRAM_ALERT_EDIT_MESSAGE_NOTIFY_ON_CLOSE = True    # ส่ง Ping สรุป 1 บรรทัดแบบ Reply ตอนปิดไม้
+TELEGRAM_ALERT_EDIT_MESSAGE_SILENT_MILESTONES = True  # ส่งอัปเดตกันทุนแบบไม่เปิดเสียงเตือน
+TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messages.json"
+```
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

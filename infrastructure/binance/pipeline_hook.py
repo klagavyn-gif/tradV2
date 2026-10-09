@@ -179,14 +179,38 @@ def execute_binance_auto_trade_pipeline(
         be_updates = order_mgr.sync_breakeven_stops()
         results["be_updates"] = be_updates
         if be_updates and callable(send_telegram_alert):
+            from infrastructure.notifications.telegram_gateway import (
+                LiveCardStore,
+                edit_telegram_alert as _infra_edit,
+                format_breakeven_edit_text,
+            )
+            live_store = LiveCardStore()
             for u in be_updates:
+                sym = u['symbol']
+                card = live_store.get_card(symbol=sym)
+                edited = False
+                if card and card.get("message_id") and not card.get("breakeven_active"):
+                    orig_text = card.get("original_message", "")
+                    if orig_text:
+                        new_text = format_breakeven_edit_text(orig_text, u['new_sl'])
+                        edit_res = _infra_edit(card["message_id"], new_text, chat_id=card.get("chat_id"))
+                        if edit_res:
+                            edited = True
+                            live_store.update_card(
+                                sym,
+                                breakeven_active=True,
+                                new_stop_loss=u['new_sl'],
+                                updated_message=new_text,
+                            )
                 msg = (
-                    f"🛡️ <b>[Auto-Trade] ปรับกันทุน (Breakeven) สำเร็จ!</b>\n"
-                    f"<b>เหรียญ:</b> {u['symbol']} | <b>ฝั่ง:</b> {u['side']}\n"
-                    f"<b>Stop Loss ใหม่:</b> {u['new_sl']:,} (เลื่อนมาที่ทุนเพื่อกันความเสี่ยง)"
+                    f"🛡️ <b>[Auto-Trade] #{sym} ปรับกันทุน (Breakeven) สำเร็จ!</b>\n"
+                    f"<b>เหรียญ:</b> {sym} | <b>ฝั่ง:</b> {u['side']}\n"
+                    f"<b>Stop Loss ใหม่:</b> {u['new_sl']:,} (เลื่อนมาที่ทุนเพื่อกันความเสี่ยง 0%)"
                 )
                 try:
-                    send_telegram_alert(msg)
+                    silent = bool(getattr(config, "TELEGRAM_ALERT_EDIT_MESSAGE_SILENT_MILESTONES", True))
+                    reply_id = card.get("message_id") if (card and edited) else None
+                    send_telegram_alert(msg, reply_to_message_id=reply_id, disable_notification=silent)
                 except Exception:
                     pass
     except Exception as e:
@@ -319,7 +343,19 @@ def execute_binance_auto_trade_pipeline(
                         f"{deriv_badge_str}"
                     )
                     try:
-                        send_telegram_alert(msg)
+                        send_res = send_telegram_alert(msg)
+                        if send_res and getattr(send_res, "message_id", None):
+                            from infrastructure.notifications.telegram_gateway import LiveCardStore
+                            LiveCardStore().register_card(
+                                symbol=exec_res['symbol'],
+                                message_id=send_res.message_id,
+                                chat_id=getattr(send_res, "chat_id", None),
+                                alert_id=aid,
+                                signal=exec_res['signal'],
+                                entry_price=exec_res['entry_price'],
+                                stop_loss=exec_res['stop_loss'],
+                                original_message=msg,
+                            )
                     except Exception:
                         pass
             else:

@@ -360,6 +360,27 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
    - ในช่วง Cold-Start (เมื่อ `settled_alerts < 5.0` ใน V2 epoch) ให้ fallback ไปใช้ `STRATEGY_BASELINE_EDGE_PRIORS` อัตโนมัติ ป้องกันการโดนบล็อกด้วย `missing_edge_metrics`
    - เมื่อสะสมการปิดไม้ใน V2 ครบ 5 ไม้ขึ้นไป ระบบจะ switch ไปใช้ Live Realized Stats ของ V2 โดยสมบูรณ์ 100%
 
+## 15. ระบบ Daily System Doctor & Anomaly Watchdog (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
+
+โครงสร้างโมดูล (`alerts/system_doctor.py`, `tools/system_doctor.py`):
+- **5-Point Daily Health Audit** ตรวจสอบเชิงรุก 5 มิติสำคัญ:
+  1. **Pipeline Deadlock Watchdog**: ตรวจจับ `missing_edge_metrics`, `missing_plan`, หรือเคสที่ 100% ของเหรียญถูกบล็อกด้วย technical error เดียวกัน ป้องกันการติดล็อกแบบเงียบ (Silent Lockup)
+  2. **Data Freshness Watchdog**: ตรวจสอบว่ารอบการวิเคราะห์หรือแท่งเทียนล่าช้าเกิน 45-60 นาทีหรือไม่
+  3. **State & Baseline Prior Watchdog**: ตรวจสอบว่าในสภาวะ Cold-Start มี `STRATEGY_BASELINE_EDGE_PRIORS` รองรับถูกต้อง ป้องกัน Deadlock
+  4. **Risk State Integrity Watchdog**: ตรวจสอบสถานะ `circuit_breaker_active` ว่าค้างเกินเวลาหรือไม่ และตรวจการรีเซ็ตของ Daily Drawdown
+  5. **Binance Futures Reconciliation**: ตรวจสอบการเชื่อมต่อ API, ยอดเงิน Margin USDT คงเหลือ (> 20 USDT) และจำนวน Positions
+- **Gemini Flash AI Root-Cause Diagnostics**:
+  - เมื่อพบจุดบกพร่อง (Warning หรือ Critical) ระบบจะส่ง Error Payload ให้โมเดล Gemini Flash สรุปสาเหตุและแนะนำวิธีแก้ไขสั้นๆ 2-3 บรรทัดภาษาไทย
+  - มี Deterministic Heuristic Fallback อัตโนมัติเมื่อไม่มี Gemini API Key
+- **การเชื่อมต่อเข้ากับ Daily Summary (09:00 น.)**:
+  - ผนวก Badge สุขภาพระบบลงในข้อความ Daily Summary ตอน 09:00 น. อัตโนมัติ:
+    - ปกติ: `🩺 สุขภาพระบบ: 🟢 สมบูรณ์ 100% (Pipeline OK | Data OK | Risk OK | Prior OK)`
+    - มีปัญหา: `🚨 สุขภาพระบบ: ⛔ มีจุดติดล็อกวิกฤต` พร้อมแนบการวินิจฉัยของ AI
+  - หากพบความผิดปกติระดับ `CRITICAL` ระบบจะยิงแจ้งเตือนด่วนเข้า Telegram แยกทันที
+- **เครื่องมือตรวจสอบ**: `python -m tools.system_doctor --audit` หรือ `--notify-telegram`
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -369,6 +390,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+
 
 
 

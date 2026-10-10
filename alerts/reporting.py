@@ -1917,6 +1917,17 @@ def build_telegram_daily_summary_message(
         f"🎯 <b>สถานะวันนี้:</b> {html.escape(trade_status)}",
     ]
 
+    if bool(getattr(config, "SYSTEM_DOCTOR_ENABLE", True)):
+        try:
+            from alerts.system_doctor import run_system_health_audit
+            doctor_report = run_system_health_audit(config)
+            if isinstance(doctor_report, dict) and doctor_report.get("summary_badge"):
+                lines.append(doctor_report["summary_badge"])
+                if doctor_report.get("severity") in ("WARNING", "CRITICAL") and doctor_report.get("ai_diagnosis"):
+                    lines.append(f"🤖 <b>AI Doctor:</b>\n{html.escape(doctor_report['ai_diagnosis'])}")
+        except Exception:
+            pass
+
     runtime_parts = [
         "ON" if runtime.get("live_enabled") else "OFF",
         runtime.get("model_name") or "-",

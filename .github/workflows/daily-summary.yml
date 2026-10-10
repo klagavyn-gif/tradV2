@@ -3,6 +3,8 @@ run-name: >-
   Telegram Daily Summary [retry=${{ github.event.inputs.retry_attempt || '0' }}]
 
 on:
+  schedule:
+    - cron: '0 2 * * *'  # 09:00 AM Thai Time (UTC+7)
   workflow_dispatch:
     inputs:
       symbols:

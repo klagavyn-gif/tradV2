@@ -170,6 +170,22 @@ def main(argv=None):
                         trad.get_thai_now().strftime("%Y-%m-%d %H:%M:%S"),
                     )
 
+    doctor_report = None
+    doctor_urgent_sent = False
+    if bool(getattr(trad.config, "SYSTEM_DOCTOR_ENABLE", True)):
+        try:
+            from alerts.system_doctor import run_system_health_audit, format_doctor_alert_message
+            doctor_report = run_system_health_audit(trad.config, data_dir=Path(trad._alert_history_dir()))
+            if (
+                doctor_report.get("severity") == "CRITICAL"
+                and bool(getattr(trad.config, "SYSTEM_DOCTOR_NOTIFY_ON_WARNING", True))
+            ):
+                urgent_alert = format_doctor_alert_message(doctor_report)
+                if urgent_alert:
+                    doctor_urgent_sent = bool(trad.send_telegram_alert(urgent_alert))
+        except Exception as exc:
+            trad.logger.warning("System Doctor audit failed: %s", exc)
+
     recent_cache_keys = trad._load_recent_alert_cache_keys(
         trad.get_thai_now,
         max_age_seconds=26 * 60 * 60,
@@ -223,6 +239,13 @@ def main(argv=None):
             "scorecard": (outlook_payload or {}).get("scorecard"),
         },
         "ai_outlook_path": str(outlook_path) if outlook_path else None,
+        "system_doctor": {
+            "enabled": bool(getattr(trad.config, "SYSTEM_DOCTOR_ENABLE", True)),
+            "severity": (doctor_report or {}).get("severity"),
+            "score": (doctor_report or {}).get("score"),
+            "urgent_alert_sent": doctor_urgent_sent,
+            "issues_count": len((doctor_report or {}).get("issues") or []),
+        },
     }
     if args.verify_output:
         payload["verify_output_path"] = _write_json(args.verify_output, payload)

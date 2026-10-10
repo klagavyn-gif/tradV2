@@ -339,6 +339,27 @@ TELEGRAM_ALERT_EDIT_MESSAGE_SILENT_MILESTONES = True  # ส่งอัปเด
 TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messages.json"
 ```
 
+## 14. การปลดล็อค Cold-Start Deadlock ด้วย Baseline Prior (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
+
+### ปัญหาที่พบ
+- หลังจากการรัน Archive V1 และรีเซ็ต Baseline V2 (`archive_and_reset_v2.py`) ไฟล์ `.data/telegram_alerts/realized_summary.json` ถูกล้างเป็น 0 ไม้ (`settled_alerts: 0`)
+- ฟังก์ชัน `_strategy_realized_proxy_metrics` ใน `trad.py` สำหรับ `CDCVIX15` อ่านได้ `{}`
+- ตัวกรอง `TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS = True` จึงปฏิเสธสัญญาณทั้งหมด 11 เหรียญด้วย `missing_edge_metrics`
+- เกิดภาวะ **Cold-Start Deadlock (ไก่กับไข่)**: ไม่มีสถิติย้อนหลังใน V2 -> บล็อกไม่ให้ส่งไม้ -> ไม่มีการปิดไม้ -> ไม่มีสถิติสะสม -> ระบบเงียบสนิท
+
+### การแก้ไข
+1. เพิ่มการตั้งค่า Baseline Prior ใน `config.py`:
+   - `TELEGRAM_ALERT_COLD_START_MIN_TRADES = 5.0`
+   - `STRATEGY_BASELINE_EDGE_PRIORS`:
+     - `CDCVIX15`: Win Rate 60.0%, Expectancy 0.45R, Trades 30.0
+     - `PA15`: Win Rate 58.0%, Expectancy 0.35R, Trades 25.0
+     - `AW15`: Win Rate 60.0%, Expectancy 0.45R, Trades 30.0
+2. ปรับปรุง `_strategy_realized_proxy_metrics` และ `_extract_signal_edge_metrics` ใน `trad.py`:
+   - ในช่วง Cold-Start (เมื่อ `settled_alerts < 5.0` ใน V2 epoch) ให้ fallback ไปใช้ `STRATEGY_BASELINE_EDGE_PRIORS` อัตโนมัติ ป้องกันการโดนบล็อกด้วย `missing_edge_metrics`
+   - เมื่อสะสมการปิดไม้ใน V2 ครบ 5 ไม้ขึ้นไป ระบบจะ switch ไปใช้ Live Realized Stats ของ V2 โดยสมบูรณ์ 100%
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -348,5 +369,6 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+
 
 

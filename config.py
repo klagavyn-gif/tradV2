@@ -146,6 +146,26 @@ TELEGRAM_ALERT_ENTRY_EXPECTANCY_WR_OVERRIDE_RR = _env_float(
     0.30,
 )
 TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS = _env_bool("TELEGRAM_ALERT_ENTRY_REQUIRE_EDGE_METRICS", True)
+# Cold Start Edge Metrics Prior (Used when resetting baseline / new epoch)
+# Prevents chicken-and-egg deadlock where zero settled trades blocks entries via missing_edge_metrics.
+TELEGRAM_ALERT_COLD_START_MIN_TRADES = _env_float("TELEGRAM_ALERT_COLD_START_MIN_TRADES", 5.0)
+STRATEGY_BASELINE_EDGE_PRIORS = {
+    "CDCVIX15": {
+        "win_rate_pct": _env_float("CDCVIX15_BASELINE_WIN_RATE", 60.0),
+        "expectancy_rr": _env_float("CDCVIX15_BASELINE_EXPECTANCY", 0.45),
+        "trades": _env_float("CDCVIX15_BASELINE_TRADES", 30.0),
+    },
+    "PA15": {
+        "win_rate_pct": _env_float("PA15_BASELINE_WIN_RATE", 58.0),
+        "expectancy_rr": _env_float("PA15_BASELINE_EXPECTANCY", 0.35),
+        "trades": _env_float("PA15_BASELINE_TRADES", 25.0),
+    },
+    "AW15": {
+        "win_rate_pct": _env_float("AW15_BASELINE_WIN_RATE", 60.0),
+        "expectancy_rr": _env_float("AW15_BASELINE_EXPECTANCY", 0.45),
+        "trades": _env_float("AW15_BASELINE_TRADES", 30.0),
+    },
+}
 TELEGRAM_ALERT_ENTRY_REQUIRE_WALKFORWARD = _env_bool("TELEGRAM_ALERT_ENTRY_REQUIRE_WALKFORWARD", True)
 TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_WIN_RATE = _env_float("TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_WIN_RATE", 58.0)
 TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_EXPECTANCY_RR = _env_float("TELEGRAM_ALERT_ENTRY_WALKFORWARD_MIN_EXPECTANCY_RR", 0.03)

@@ -381,6 +381,28 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   - หากพบความผิดปกติระดับ `CRITICAL` ระบบจะยิงแจ้งเตือนด่วนเข้า Telegram แยกทันที
 - **เครื่องมือตรวจสอบ**: `python -m tools.system_doctor --audit` หรือ `--notify-telegram`
 
+## 16. การบังคับใช้ Strategy Whitelist (CDCVIX15) และ Clean 11-Symbol Universe ใน Auto-Trade (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
+
+### ปัญหาที่พบ
+- ผู้ใช้สังเกตว่าสัญญาณเข้าเทรดและออเดอร์ใน Binance Futures เริ่ม "มั่วและเยอะเกินไป"
+- จากการตรวจสอบบันทึกคำสั่งซื้อขายจริงบน Binance Futures ในรอบ 24 ชั่วโมง (`binance_executed_orders.json`):
+  1. พบคำสั่งเปิดออเดอร์ 4 ไม้ล่าสุด (`NEAR`, `ADA`, `BNB`, `LINK`) เป็น **`AW15` ล้วนๆ 100%**
+  2. ทุกไม้ของ AW15 อยู่นอกขอบเขตของโมเดล AI (`AI-Not-Scored | strategy_out_of_scope:aw15`) แต่หลุดเข้ามาเทรดเพราะใช้ Baseline Prior ร่วมกับสถานะ `🟢 เข้าได้`
+  3. เหรียญที่ไม่ควรเทรดอย่าง `NEAR` (WR 30%) และ `LINK` (WR 14%) ยังหลุดเข้ามาเปิดออเดอร์ เนื่องจากตัวแปร `vars.SYMBOLS` ใน GitHub Actions ยังคงค้างรายการเหรียญเดิมไว้
+
+### การแก้ไขและปรับปรุง:
+1. **Strategy Whitelist ใน Binance Futures Auto-Trade** (`infrastructure/binance/pipeline_hook.py`, `config.py`):
+   - เพิ่ม `BINANCE_FUTURES_ALLOWED_STRATEGIES = "CDCVIX15"`
+   - ตรวจสอบชื่อกลยุทธ์ของ Candidate: หากไม่ใช่ `CDCVIX15` (เช่น `AW15`, `AZ15`, `PRIMARY`) จะถูก **ข้ามการเปิดออเดอร์จริงบน Binance ทันที** (แต่ยังคงส่งสัญญาณเรดาร์ดูภาพรวมตลาดบน Telegram ตามปกติ)
+2. **Symbol Blacklist & Deprecated Symbol Purge** (`application/services/service_support.py`, `pipeline_hook.py`):
+   - เพิ่ม `BINANCE_FUTURES_BLOCKED_SYMBOLS = "NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT"`
+   - ปรับปรุง `parse_symbols_input` ใน `service_support.py` ให้ตัด `NEAR` และ `LINK` ทิ้งอัตโนมัติ และเติมผู้นำเทรนด์คลีนอย่าง `ONDO-USD` และ `SUI-USD` เข้ามาแทนที่ ป้องกันกรณีตัวแปรเก่าบนคลาวด์ส่งค่าค้างเข้ามา
+3. **อัปเดต Workflows ให้ Hardcode Clean 11 Universe** (`.github/workflows/main.yml`, `daily-summary.yml`):
+   - ตัด `vars.SYMBOLS ||` ออก เพื่อป้องกันไม่ให้ค่าตัวแปรเก่าใน GitHub repository variables มาแทนที่ Universe 11 เหรียญที่ถูกต้อง:
+     `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

@@ -26,6 +26,9 @@ def build_config_warnings(config):
     return warnings
 
 
+DEPRECATED_SYMBOLS = {"NEAR-USD", "LINK-USD", "NEAR", "LINK"}
+
+
 def parse_symbols_input(raw_symbols, *, normalize_symbol, default_max_symbols, max_symbols=None):
     max_count = int(default_max_symbols) if max_symbols is None else int(max_symbols)
     if max_count < 1:
@@ -35,12 +38,18 @@ def parse_symbols_input(raw_symbols, *, normalize_symbol, default_max_symbols, m
     seen = set()
     for raw in symbols_raw:
         symbol = normalize_symbol(raw)
-        if not symbol or symbol in seen:
+        if not symbol or symbol in seen or symbol in DEPRECATED_SYMBOLS:
             continue
         seen.add(symbol)
         unique_symbols.append(symbol)
         if len(unique_symbols) >= max_count:
             break
+    # If deprecated symbols were filtered out from the universe, ensure clean trend leaders ONDO and SUI are included
+    for replacement in ("ONDO-USD", "SUI-USD"):
+        clean_rep = normalize_symbol(replacement)
+        if clean_rep and clean_rep not in seen and len(unique_symbols) < max_count:
+            seen.add(clean_rep)
+            unique_symbols.append(clean_rep)
     return unique_symbols
 
 

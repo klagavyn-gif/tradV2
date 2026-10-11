@@ -224,24 +224,55 @@ def execute_binance_auto_trade_pipeline(
     # 2. Filter actionable entry candidates from this run
     from alerts.reporting import infer_alert_intent
     actionable = []
+
+    # Strategy Whitelist & Symbol Filters (Enforces clean focus on core high-conviction strategies)
+    allowed_strats_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_STRATEGIES", "CDCVIX15")
+    if isinstance(allowed_strats_raw, str):
+        allowed_strats = {s.strip().upper() for s in allowed_strats_raw.split(",") if s.strip()}
+    elif isinstance(allowed_strats_raw, (list, tuple, set)):
+        allowed_strats = {str(s).strip().upper() for s in allowed_strats_raw if str(s).strip()}
+    else:
+        allowed_strats = {"CDCVIX15"}
+
+    blocked_syms_raw = getattr(config, "BINANCE_FUTURES_BLOCKED_SYMBOLS", "NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT")
+    if isinstance(blocked_syms_raw, str):
+        blocked_syms = {s.strip().upper() for s in blocked_syms_raw.split(",") if s.strip()}
+    elif isinstance(blocked_syms_raw, (list, tuple, set)):
+        blocked_syms = {str(s).strip().upper() for s in blocked_syms_raw if str(s).strip()}
+    else:
+        blocked_syms = {"NEAR-USD", "LINK-USD", "NEARUSDT", "LINKUSDT"}
+
     for c in (sent_candidates or []):
         signal = str(c.get("signal") or "").strip().upper()
         sym = str(c.get("symbol") or "")
+        strat = str(c.get("strategy") or "").strip().upper()
         if signal not in ("BUY", "SELL"):
             continue
+
+        # Strategy Whitelist Check: Focus strictly on allowed strategies (e.g. CDCVIX15)
+        if strat not in allowed_strats:
+            logger.info("[Auto-Trade] Skipping candidate %s %s: strategy %s not in allowed_strategies %s", sym, signal, strat, allowed_strats)
+            continue
+
+        # Blocked Symbol Check: Exclude deprecated/unreliable symbols
+        sym_clean = sym.upper().replace("-", "").replace("_", "")
+        if sym.upper() in blocked_syms or sym_clean in blocked_syms:
+            logger.info("[Auto-Trade] Skipping candidate %s %s (%s): symbol is blocked from auto-trading", sym, signal, strat)
+            continue
+
         dispatch_label = str(c.get("dispatch_status_label") or "").strip()
         msg = str(c.get("message") or "")
         if dispatch_label in ("ห้ามเข้า", "รอ"):
-            logger.info("[Auto-Trade] Skipping candidate %s %s: dispatch_status=%s", sym, signal, dispatch_label)
+            logger.info("[Auto-Trade] Skipping candidate %s %s (%s): dispatch_status=%s", sym, signal, strat, dispatch_label)
             continue
         intent, intent_reason = infer_alert_intent(c)
         if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg:
             intent = "entry"
         if intent == "entry":
             actionable.append(c)
-            logger.info("[Auto-Trade] Approved candidate %s %s for auto-trade (intent=%s, reason=%s)", sym, signal, intent, intent_reason)
+            logger.info("[Auto-Trade] Approved candidate %s %s (%s) for auto-trade (intent=%s, reason=%s)", sym, signal, strat, intent, intent_reason)
         else:
-            logger.info("[Auto-Trade] Skipped non-entry candidate %s %s: intent=%s (reason=%s)", sym, signal, intent, intent_reason)
+            logger.info("[Auto-Trade] Skipped non-entry candidate %s %s (%s): intent=%s (reason=%s)", sym, signal, strat, intent, intent_reason)
 
     # 3. Execute actionable entries
     from .derivatives_filter import BinanceDerivativesFilter

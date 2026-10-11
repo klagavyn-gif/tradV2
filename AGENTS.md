@@ -381,7 +381,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   - หากพบความผิดปกติระดับ `CRITICAL` ระบบจะยิงแจ้งเตือนด่วนเข้า Telegram แยกทันที
 - **เครื่องมือตรวจสอบ**: `python -m tools.system_doctor --audit` หรือ `--notify-telegram`
 
-## 16. การบังคับใช้ Strategy Whitelist (CDCVIX15) และ Clean 11-Symbol Universe ใน Auto-Trade (ต.ค. 2026)
+## 16. การบังคับใช้ Strategy Whitelist (สูตร 3 ทหารเสือ: CDCVIX15, PA15, PRIMARY) และ Clean 11-Symbol Universe ใน Auto-Trade (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -394,14 +394,19 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 
 ### การแก้ไขและปรับปรุง:
 1. **Strategy Whitelist ใน Binance Futures Auto-Trade** (`infrastructure/binance/pipeline_hook.py`, `config.py`):
-   - เพิ่ม `BINANCE_FUTURES_ALLOWED_STRATEGIES = "CDCVIX15"`
-   - ตรวจสอบชื่อกลยุทธ์ของ Candidate: หากไม่ใช่ `CDCVIX15` (เช่น `AW15`, `AZ15`, `PRIMARY`) จะถูก **ข้ามการเปิดออเดอร์จริงบน Binance ทันที** (แต่ยังคงส่งสัญญาณเรดาร์ดูภาพรวมตลาดบน Telegram ตามปกติ)
+   - กำหนด `BINANCE_FUTURES_ALLOWED_STRATEGIES = "CDCVIX15,PA15,PRIMARY"`
+   - ตรวจสอบชื่อกลยุทธ์ของ Candidate: เฉพาะ 3 กลยุทธ์ที่มี Edge และผ่านเกณฑ์คุณภาพเท่านั้นที่จะถูกยิงเปิดออเดอร์จริงบน Binance Futures:
+     - **`CDCVIX15`**: ดักจับ Panic Flush / จุดกลับตัวรอบใหญ่ (มีโมเดล AI คุม)
+     - **`PA15`**: ดักจับ Price Action แท่งเทียน Pinbar/Engulfing ตามแนวรับ-ต้าน (มีโมเดล AI คุม `metadata.strategies: ['CDCVIX15','PA15']`)
+     - **`PRIMARY`**: มติเอกฉันท์ที่ต้องมีอย่างน้อย 2 แหล่งสัญญาณยืนยันตรงกัน (ผลงานจริงย้อนหลัง: Win Rate 75.0%, Net RR +2.70R, Net PnL +4.05% ต่อไม้)
+   - สัญญาณอื่น เช่น **`AW15`** (All-Weather) ถูกจัดชั้นเป็น "เรดาร์ดูภาพรวมตลาด" จะส่งแจ้งเตือน Telegram เท่านั้น **ไม่ยิงเปิดออเดอร์บนกระดานเทรดจริง** ป้องกันการ Overtrading
 2. **Symbol Blacklist & Deprecated Symbol Purge** (`application/services/service_support.py`, `pipeline_hook.py`):
    - เพิ่ม `BINANCE_FUTURES_BLOCKED_SYMBOLS = "NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT"`
    - ปรับปรุง `parse_symbols_input` ใน `service_support.py` ให้ตัด `NEAR` และ `LINK` ทิ้งอัตโนมัติ และเติมผู้นำเทรนด์คลีนอย่าง `ONDO-USD` และ `SUI-USD` เข้ามาแทนที่ ป้องกันกรณีตัวแปรเก่าบนคลาวด์ส่งค่าค้างเข้ามา
-3. **อัปเดต Workflows ให้ Hardcode Clean 11 Universe** (`.github/workflows/main.yml`, `daily-summary.yml`):
+3. **อัปเดต Workflows ให้ Hardcode Clean 11 Universe & Auto-Trade Env** (`.github/workflows/main.yml`, `daily-summary.yml`):
    - ตัด `vars.SYMBOLS ||` ออก เพื่อป้องกันไม่ให้ค่าตัวแปรเก่าใน GitHub repository variables มาแทนที่ Universe 11 เหรียญที่ถูกต้อง:
      `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
+   - เพิ่มตัวแปร `BINANCE_FUTURES_ALLOWED_STRATEGIES` และ `BINANCE_FUTURES_BLOCKED_SYMBOLS` ใน workflow environment
 
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local

@@ -226,13 +226,13 @@ def execute_binance_auto_trade_pipeline(
     actionable = []
 
     # Strategy Whitelist & Symbol Filters (Enforces clean focus on core high-conviction strategies)
-    allowed_strats_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_STRATEGIES", "CDCVIX15")
+    allowed_strats_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_STRATEGIES", "CDCVIX15,PA15,PRIMARY")
     if isinstance(allowed_strats_raw, str):
         allowed_strats = {s.strip().upper() for s in allowed_strats_raw.split(",") if s.strip()}
     elif isinstance(allowed_strats_raw, (list, tuple, set)):
         allowed_strats = {str(s).strip().upper() for s in allowed_strats_raw if str(s).strip()}
     else:
-        allowed_strats = {"CDCVIX15"}
+        allowed_strats = {"CDCVIX15", "PA15", "PRIMARY"}
 
     blocked_syms_raw = getattr(config, "BINANCE_FUTURES_BLOCKED_SYMBOLS", "NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT")
     if isinstance(blocked_syms_raw, str):
@@ -341,7 +341,7 @@ def execute_binance_auto_trade_pipeline(
                 logger.info("Auto-traded on Binance: %s %s @ %s", exec_res["symbol"], exec_res["signal"], exec_res["entry_price"])
                 if callable(send_telegram_alert):
                     env_badge = "🧪 [Testnet]" if testnet else "⚡ [Real Money]"
-                    margin_used = exec_res['notional'] / max(1, leverage)
+                    margin_used = float(exec_res.get('notional') or 0.0) / max(1, leverage)
                     sizing_info = exec_res.get("sizing_info") or {}
                     sizing_note = ""
                     mult_reason = str(sizing_info.get("multiplier_reason") or "")
@@ -363,11 +363,11 @@ def execute_binance_auto_trade_pipeline(
                     msg = (
                         f"🤖 <b>{env_badge} เปิดออเดอร์ Binance Futures สำเร็จ!</b>\n"
                         f"────────────────\n"
-                        f"<b>เหรียญ:</b> {exec_res['symbol']} | <b>ฝั่ง:</b> {exec_res['signal']}\n"
-                        f"<b>จำนวน:</b> {exec_res['quantity']} (มูลค่าสัญญา ~{exec_res['notional']:.2f} USDT)\n"
+                        f"<b>เหรียญ:</b> {exec_res.get('symbol')} | <b>ฝั่ง:</b> {exec_res.get('signal')}\n"
+                        f"<b>จำนวน:</b> {exec_res.get('quantity')} (มูลค่าสัญญา ~{float(exec_res.get('notional') or 0.0):.2f} USDT)\n"
                         f"<b>Margin ที่ใช้:</b> ~{margin_used:.2f} USDT ({leverage}x {margin_type})\n"
-                        f"<b>ราคาเข้า:</b> {exec_res['entry_price']:,}\n"
-                        f"<b>Stop Loss:</b> {exec_res['stop_loss']:,} (ตั้งคำสั่ง STOP_MARKET แล้ว)\n"
+                        f"<b>ราคาเข้า:</b> {float(exec_res.get('entry_price') or 0.0):,}\n"
+                        f"<b>Stop Loss:</b> {float(exec_res.get('stop_loss') or 0.0):,} (ตั้งคำสั่ง STOP_MARKET แล้ว)\n"
                         f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
                         f"{sizing_note}"
                         f"{bal_str}"

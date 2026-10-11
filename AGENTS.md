@@ -408,6 +408,32 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
      `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
    - เพิ่มตัวแปร `BINANCE_FUTURES_ALLOWED_STRATEGIES` และ `BINANCE_FUTURES_BLOCKED_SYMBOLS` ใน workflow environment
 
+## 17. การซิงค์การแจ้งเตือนปิดไม้เข้ากับคำสั่งซื้อขายจริง 100% (Trade Close Execution Sync) (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
+
+### ปัญหาที่พบ
+- ผู้ใช้สังเกตเห็นการแจ้งเตือน "ปิดไม้แล้ว" บน Telegram สำหรับเหรียญหรือกลยุทธ์ที่ไม่ได้เข้าออเดอร์ใน Binance จริง (เช่น สัญญาณเรดาร์ AW15 บน NEAR หรือสัญญาณที่ติด Blocklist / Max Positions)
+- **สาเหตุเชิงลึก**: ระบบประเมินผลปิดไม้ (`dispatch_trade_close_notifications` ใน `alerts/reporting.py`) เดิมทำงานบนระดับ Paper Trading / Alert History โดยเมื่อสัญญาณใดๆ มี `intent == "entry"` และครบระยะประเมินผล ระบบจะยิงสรุปปิดไม้เข้า Telegram ทันที โดยไม่เคยตรวจสอบว่าไม้นั้นถูกส่งคำสั่งเปิดบนกระดานเทรดจริง (`binance_executed_orders.json`) หรือไม่
+
+### การแก้ไขและปรับปรุง (แนวทางที่ 1: Sync เฉพาะพอร์ตจริง 100%):
+1. **เพิ่ม Flag ควบคุมใน Config & GitHub Actions** (`config.py`, `.github/workflows/main.yml`):
+   - `TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED = True`
+2. **คัดกรองเฉพาะคำสั่งที่เปิดจริงก่อนส่งแจ้งเตือนปิดไม้** (`alerts/reporting.py`):
+   - โหลดประวัติคำสั่งเปิดออเดอร์จริงจาก `binance_executed_orders.json`
+   - หาก `only_executed` เปิดอยู่ และ `alert_id` นั้น **ไม่เคยถูกยิงเข้า Binance จริง**:
+     - ระบบจะเรียก `mark_handled(alert_id)` ทำเครื่องหมายว่าประมวลผลแล้วทันที เพื่อป้องกันการค้างสะสมใน Backlog
+     - ข้ามการส่งแจ้งเตือน Telegram (Silent Skip) ไม่ให้เกิดข้อความรบกวนผู้ใช้
+3. **แสดงข้อมูลไม้จริงอย่างแม่นยำ (Real Executed Badge & PnL)**:
+   - หากเป็นไม้ที่เทรดจริงบนกระดาน:
+     - แสดง Badge สภาพแวดล้อม: `🧪 [Testnet Binance] ปิดออเดอร์แล้ว` หรือ `⚡ [พอร์ตจริง Binance] ปิดออเดอร์แล้ว`
+     - คำนวณกำไร/ขาดทุนสุทธิ (`กำไร/ขาดทุนสุทธิ:`) อิงตามขนาดมูลค่าสัญญา Notional และ Margin จริงของไม้นั้น
+     - แสดงยอดเงินคงเหลือในกระเป๋า Futures ล่าสุด
+4. **รองรับ Reply Notification ควบคู่ Live Card Editing** (`infrastructure/notifications/telegram_gateway.py`):
+   - ส่งขนาด Notional จริงเข้า `format_short_close_reply` เมื่อมีการ Reply Ping ไปยังการ์ดเทรดเดิม
+5. **การทดสอบยืนยันผล**:
+   - สร้างชุดทดสอบ `scratch/test_trade_close_sync.py`: จำลอง Ghost Entry (`AW15` บน `NEAR-USD`) ควบคู่กับคำสั่งจริง (`CDCVIX15` บน `BTC-USD`) ผลลัพธ์คือ Ghost Entry ถูกข้ามและบันทึกประวัติแบบเงียบ ส่วนคำสั่งจริงถูกส่งข้อความสรุปพร้อม Badge และกำไรสุทธิ USDT ครบถ้วน 100%
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

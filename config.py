@@ -703,6 +703,10 @@ TELEGRAM_ALERT_TRADE_CLOSE_SKIP_FLAT = _env_bool(
 TELEGRAM_ALERT_TRADE_CLOSE_MAX_AGE_DAYS = _env_int(
     "TELEGRAM_ALERT_TRADE_CLOSE_MAX_AGE_DAYS", 7
 )
+# Only notify closes for trades that were actually executed on Binance (Approach 1: Sync 100% with real trades).
+TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED = _env_bool(
+    "TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED", True
+)
 # Telegram Live Trade Card & Message Editing Settings (In-place updates)
 TELEGRAM_ALERT_EDIT_MESSAGE_ENABLE = _env_bool("TELEGRAM_ALERT_EDIT_MESSAGE_ENABLE", True)
 TELEGRAM_ALERT_EDIT_MESSAGE_NOTIFY_ON_CLOSE = _env_bool("TELEGRAM_ALERT_EDIT_MESSAGE_NOTIFY_ON_CLOSE", True)

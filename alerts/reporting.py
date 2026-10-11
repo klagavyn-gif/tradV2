@@ -1240,7 +1240,7 @@ def _trade_close_exit_reason_label(exit_reason):
     return "—"
 
 
-def _build_trade_close_message(outcome, *, get_now):
+def _build_trade_close_message(outcome, *, get_now, executed_info=None, config=None):
     symbol = str(outcome.get("symbol") or "").strip().upper() or "—"
     signal = str(outcome.get("signal") or "").strip().upper() or "—"
     result = str(outcome.get("outcome_result") or "").strip().lower()
@@ -1260,8 +1260,23 @@ def _build_trade_close_message(outcome, *, get_now):
     intent = str(outcome.get("alert_intent") or "").strip().lower() or "—"
     tv_symbol = symbol.replace("-", "")
 
+    if config is None:
+        try:
+            import config as app_config
+            config = app_config
+        except Exception:
+            config = None
+
+    executed_trade = executed_info if isinstance(executed_info, dict) else {}
+    if executed_trade:
+        testnet = bool(getattr(config, "BINANCE_FUTURES_TESTNET", True))
+        env_badge = "🧪 [Testnet Binance]" if testnet else "⚡ [พอร์ตจริง Binance]"
+        title = f"{icon} <b>{env_badge} ปิดออเดอร์แล้ว — {result_label}</b>"
+    else:
+        title = f"{icon} <b>ปิดไม้แล้ว — {result_label}</b>"
+
     lines = []
-    lines.append(f"{icon} <b>ปิดไม้แล้ว — {result_label}</b>")
+    lines.append(title)
     lines.append("────────────────")
     lines.append(f"<b>เหรียญ:</b> {html.escape(symbol)} | <b>สัญญาณ:</b> {html.escape(signal)}")
     lines.append(f"<b>กลยุทธ์:</b> {html.escape(strategy)} | <b>Intent:</b> {html.escape(intent)}")
@@ -1279,14 +1294,17 @@ def _build_trade_close_message(outcome, *, get_now):
     if isinstance(pnl, (int, float)):
         lines.append(f"<b>PnL:</b> {pnl:+.2f}%")
         try:
-            import config
-            if getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False):
-                notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0))
-                lev = int(getattr(config, "BINANCE_FUTURES_LEVERAGE", 20))
+            if executed_trade or getattr(config, "BINANCE_FUTURES_AUTO_TRADE_ENABLED", False):
+                if executed_trade and float(executed_trade.get("notional") or 0.0) > 0:
+                    notional = float(executed_trade["notional"])
+                else:
+                    notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0) or 400.0)
+                lev = int(getattr(config, "BINANCE_FUTURES_LEVERAGE", 20) or 20)
                 margin = notional / max(1, lev)
                 dollar_pnl = (pnl / 100.0) * notional
                 roi_pct = pnl * lev
-                lines.append(f"<b>กำไร/ขาดทุนโดยประมาณ:</b> {dollar_pnl:+.2f} USDT ({roi_pct:+.1f}% บน Margin {margin:.0f} USDT)")
+                label = "กำไร/ขาดทุนสุทธิ:" if executed_trade else "กำไร/ขาดทุนโดยประมาณ:"
+                lines.append(f"<b>{label}</b> {dollar_pnl:+.2f} USDT ({roi_pct:+.1f}% บน Margin {margin:.1f} USDT)")
                 api_key = getattr(config, "BINANCE_FUTURES_API_KEY", "")
                 api_secret = getattr(config, "BINANCE_FUTURES_API_SECRET", "")
                 if api_key and api_secret:
@@ -1297,7 +1315,7 @@ def _build_trade_close_message(outcome, *, get_now):
                         testnet=getattr(config, "BINANCE_FUTURES_TESTNET", True),
                     )
                     _bal = _c.get_usdt_balance()
-                    if _bal.get("total", 0) > 0:
+                    if isinstance(_bal, dict) and _bal.get("total", 0) > 0:
                         lines.append(f"💰 <b>เงินคงเหลือในพอร์ต:</b> {_bal['available']:,.2f} USDT (รวม {_bal['total']:,.2f} USDT)")
         except Exception:
             pass
@@ -1441,6 +1459,19 @@ def dispatch_trade_close_notifications(
             newly_notified.append(alert_id)
             handled_ids.add(alert_id)
 
+    only_executed = bool(getattr(config, "TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED", True))
+    executed_orders_path = helpers.get(
+        "binance_executed_orders_path",
+        lambda: getattr(
+            config,
+            "BINANCE_FUTURES_EXECUTED_ORDERS_PATH",
+            os.path.join(os.path.dirname(outcomes_path), "binance_executed_orders.json"),
+        ),
+    )()
+    executed_records = _read_json_file(executed_orders_path) if os.path.exists(executed_orders_path) else {}
+    if not isinstance(executed_records, dict):
+        executed_records = {}
+
     for outcome in fresh_outcomes:
         if not isinstance(outcome, dict):
             continue
@@ -1472,6 +1503,11 @@ def dispatch_trade_close_notifications(
             mark_handled(alert_id)
             skipped += 1
             continue
+        # Sync 100% with real trades: only notify closes for trades actually executed on Binance
+        if only_executed and alert_id not in executed_records:
+            mark_handled(alert_id)
+            skipped += 1
+            continue
         result = str(outcome.get("outcome_result") or "").strip().lower()
         if skip_flat and result == "flat":
             mark_handled(alert_id)
@@ -1481,7 +1517,8 @@ def dispatch_trade_close_notifications(
             # Leave un-notified so it retries next run; do not drop silently.
             capped += 1
             continue
-        message = _build_trade_close_message(outcome, get_now=get_now)
+        exec_info = executed_records.get(alert_id)
+        message = _build_trade_close_message(outcome, get_now=get_now, executed_info=exec_info, config=config)
         if not isinstance(message, str) or not message.strip():
             continue
 
@@ -1507,7 +1544,7 @@ def dispatch_trade_close_notifications(
                         handled_via_edit = True
                         live_store.close_card(card.get("symbol") or outcome.get("symbol"), outcome)
                         if bool(getattr(config, "TELEGRAM_ALERT_EDIT_MESSAGE_NOTIFY_ON_CLOSE", True)):
-                            short_reply = format_short_close_reply(outcome)
+                            short_reply = format_short_close_reply(outcome, executed_info=exec_info)
                             send_telegram_alert(short_reply, reply_to_message_id=card["message_id"])
                         sent += 1
                         mark_handled(alert_id)

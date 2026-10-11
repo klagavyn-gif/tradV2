@@ -7043,6 +7043,7 @@ def _reporting_module_helpers():
         "alert_realized_breakeven_r": _alert_realized_breakeven_r,
         "alert_realized_trailing_r": _alert_realized_trailing_r,
         "alert_realized_trailing_distance_r": _alert_realized_trailing_distance_r,
+        "binance_executed_orders_path": lambda: getattr(config, "BINANCE_FUTURES_EXECUTED_ORDERS_PATH", os.path.join(_alert_history_dir(), "binance_executed_orders.json")),
     }
 
 

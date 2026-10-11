@@ -436,7 +436,7 @@ def format_breakeven_edit_text(original_text: str, new_sl: float) -> str:
     return new_text
 
 
-def format_short_close_reply(outcome: Dict[str, Any]) -> str:
+def format_short_close_reply(outcome: Dict[str, Any], executed_info: Optional[Dict[str, Any]] = None) -> str:
     """
     Formats a concise, high-visibility 1-line reply message to ping the phone on close.
     """
@@ -454,7 +454,9 @@ def format_short_close_reply(outcome: Dict[str, Any]) -> str:
     dollar_str = ""
     try:
         import config
-        notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0))
+        notional = float(executed_info.get("notional") or 0.0) if isinstance(executed_info, dict) else 0.0
+        if notional <= 0:
+            notional = float(getattr(config, "BINANCE_FUTURES_TRADE_NOTIONAL_USDT", 400.0))
         if isinstance(pnl, (int, float)):
             dollar_val = (pnl / 100.0) * notional
             dollar_str = f" | {dollar_val:+.2f} USDT"

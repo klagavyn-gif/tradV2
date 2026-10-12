@@ -63,6 +63,7 @@ class BinanceFuturesOrderManager:
         trailing_r: float = 2.0,
         trailing_dist_r: float = 0.8,
         risk_manager: Optional[Any] = None,
+        max_entry_drift_pct: float = 0.80,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -73,6 +74,7 @@ class BinanceFuturesOrderManager:
         self.trailing_r = float(trailing_r)
         self.trailing_dist_r = float(trailing_dist_r)
         self.risk_manager = risk_manager
+        self.max_entry_drift_pct = float(max_entry_drift_pct)
 
     def execute_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -176,6 +178,34 @@ class BinanceFuturesOrderManager:
             self.client.set_leverage(symbol, self.leverage)
         except Exception:
             pass
+
+        # 3.5. Anti-Chase / Price Drift Guard:
+        # If live market price has drifted too far in the direction of the trade (e.g. pumped > 0.8% away),
+        # entering now worsens the Risk:Reward ratio significantly. Skip chasing!
+        try:
+            current_market_price = self.client.get_symbol_price(symbol)
+            if current_market_price and current_market_price > 0 and entry_price > 0:
+                if signal == "BUY":
+                    drift_pct = ((current_market_price - entry_price) / entry_price) * 100.0
+                else:
+                    drift_pct = ((entry_price - current_market_price) / entry_price) * 100.0
+
+                if drift_pct > self.max_entry_drift_pct:
+                    logger.warning(
+                        "[OrderManager] Skipping entry for %s: price drifted by +%.2f%% (max allowed %.2f%%)",
+                        symbol, drift_pct, self.max_entry_drift_pct
+                    )
+                    return {
+                        "success": False,
+                        "reason": "price_drift_exceeded",
+                        "symbol": symbol,
+                        "entry_price": entry_price,
+                        "current_price": current_market_price,
+                        "drift_pct": round(drift_pct, 2),
+                        "max_drift_pct": self.max_entry_drift_pct,
+                    }
+        except Exception as pe:
+            logger.debug("Could not verify price drift for %s: %s", symbol, pe)
 
         # 4. Send Entry Order (MARKET for immediate clean fill on M15)
         entry_client_id = f"trad_{alert_id}_ent"

@@ -128,6 +128,7 @@ def execute_binance_auto_trade_pipeline(
         trailing_r=ts_r,
         trailing_dist_r=trail_dist_r,
         risk_manager=risk_mgr,
+        max_entry_drift_pct=float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80)),
     )
 
     results = {

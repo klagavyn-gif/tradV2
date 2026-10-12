@@ -43,6 +43,7 @@ class BinanceFuturesRiskManager:
         daily_max_loss_pct: float = 4.0,
         win_streak_scale_enable: bool = True,
         win_streak_scale_mult: float = 1.25,
+        only_executed: Optional[bool] = None,
     ):
         self.state_file_path = state_file_path or os.path.join(
             ".data", "telegram_alerts", "risk_state.json"
@@ -57,6 +58,14 @@ class BinanceFuturesRiskManager:
         self.daily_max_loss_pct = float(daily_max_loss_pct)
         self.win_streak_scale_enable = bool(win_streak_scale_enable)
         self.win_streak_scale_mult = float(win_streak_scale_mult)
+        if only_executed is None:
+            try:
+                import config
+                self.only_executed = bool(getattr(config, "BINANCE_FUTURES_RISK_ONLY_EXECUTED", True))
+            except Exception:
+                self.only_executed = True
+        else:
+            self.only_executed = bool(only_executed)
 
     def load_state(self) -> Dict[str, Any]:
         """Load persistent risk state from disk or return clean initial state."""
@@ -171,14 +180,106 @@ class BinanceFuturesRiskManager:
         *,
         leverage: int = 20,
         notional_per_trade: float = 400.0,
+        executed_records: Optional[Dict[str, Any]] = None,
+        only_executed: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Ingest newly settled outcomes from realized_outcomes.json.
-        Updates loss streaks, win streaks, daily PnL, and triggers circuit breakers if thresholds are breached.
+        If only_executed is True, only outcomes matching real executed orders on Binance
+        (from binance_executed_orders.json) are counted toward loss streaks, daily PnL,
+        and circuit breakers. Paper/radar outcomes are marked processed without affecting risk metrics.
         """
+        if only_executed is None:
+            only_executed = self.only_executed
+
+        if executed_records is None and only_executed:
+            try:
+                import config
+                exec_path = getattr(
+                    config,
+                    "BINANCE_FUTURES_EXECUTED_ORDERS_PATH",
+                    os.path.join(os.path.dirname(self.state_file_path), "binance_executed_orders.json"),
+                )
+                if os.path.exists(exec_path):
+                    with open(exec_path, "r", encoding="utf-8") as f:
+                        executed_records = json.load(f)
+            except Exception as e:
+                logger.warning("Could not load executed orders for RiskManager: %s", e)
+
+        if not isinstance(executed_records, dict):
+            executed_records = {} if only_executed else None
+
         state = self.load_state()
         processed = set(state.get("processed_outcome_ids", []))
         newly_processed = []
+
+        # Auto-reconciliation: sanitize state if it was contaminated by paper trade losses
+        if only_executed and executed_records is not None:
+            today_utc = _utc_now().strftime("%Y-%m-%d")
+            real_today_trades = 0
+            real_today_loss_pct = 0.0
+            real_today_pnl_usdt = 0.0
+            real_consecutive_losses = 0
+            real_consecutive_wins = 0
+
+            # Find all settled executed outcomes sorted by settled time
+            executed_settled = []
+            for o in outcomes:
+                if not isinstance(o, dict):
+                    continue
+                aid = str(o.get("alert_id") or "").strip()
+                if aid in executed_records and str(o.get("outcome_status") or "").strip().lower() == "settled":
+                    executed_settled.append(o)
+            executed_settled.sort(key=lambda x: str(x.get("settled_at") or x.get("timestamp") or ""))
+
+            # Only recompute baseline for trades that were ALREADY in processed
+            for row in executed_settled:
+                aid = str(row.get("alert_id") or "").strip()
+                if aid not in processed:
+                    continue  # New outcome, will be handled in candidate loop below
+
+                result = str(row.get("outcome_result") or "").strip().lower()
+                pnl_pct = float(row.get("pnl_pct") or 0.0)
+                ex_info = executed_records.get(aid) or {}
+                trade_notional = float(ex_info.get("notional") or notional_per_trade or 400.0)
+                d_pnl = (pnl_pct / 100.0) * trade_notional
+
+                ts = str(row.get("settled_at") or row.get("timestamp") or "")
+                ex_at = str(ex_info.get("executed_at") or "")
+                if today_utc in ts or ex_at.startswith(today_utc):
+                    real_today_trades += 1
+                    real_today_pnl_usdt += d_pnl
+                    if result == "loss":
+                        real_today_loss_pct += abs(pnl_pct)
+
+                if result == "loss":
+                    real_consecutive_losses += 1
+                    real_consecutive_wins = 0
+                elif result == "win":
+                    real_consecutive_wins += 1
+                    real_consecutive_losses = 0
+
+            # Reconcile if processed outcomes exist
+            if processed:
+                state["daily_trades_count"] = real_today_trades
+                state["daily_pnl_usdt"] = real_today_pnl_usdt
+                state["daily_loss_pct"] = real_today_loss_pct
+                state["consecutive_losses"] = real_consecutive_losses
+                state["consecutive_wins"] = real_consecutive_wins
+
+                # Clear false circuit breaker triggered by paper trades
+                if state.get("circuit_breaker_active"):
+                    cb_reason = str(state.get("circuit_breaker_reason") or "")
+                    if cb_reason.startswith("daily_drawdown_limit_") and real_today_loss_pct < self.daily_max_loss_pct:
+                        logger.info("Clearing falsely triggered daily drawdown circuit breaker (paper trades excluded)")
+                        state["circuit_breaker_active"] = False
+                        state["circuit_breaker_until"] = None
+                        state["circuit_breaker_reason"] = None
+                    elif cb_reason.startswith("loss_streak_") and real_consecutive_losses < self.loss_streak_max:
+                        logger.info("Clearing falsely triggered loss streak circuit breaker (paper trades excluded)")
+                        state["circuit_breaker_active"] = False
+                        state["circuit_breaker_until"] = None
+                        state["circuit_breaker_reason"] = None
 
         # Filter for newly settled directional outcomes
         settled_candidates = []
@@ -192,6 +293,7 @@ class BinanceFuturesRiskManager:
                 settled_candidates.append(o)
 
         if not settled_candidates:
+            self.save_state(state)
             return state
 
         # Sort by settlement time or timestamp
@@ -212,8 +314,20 @@ class BinanceFuturesRiskManager:
                 newly_processed.append(aid)
                 continue
 
+            # If only_executed is active, check if this trade was actually placed on Binance
+            if only_executed and executed_records is not None:
+                if aid not in executed_records:
+                    # Paper trade: mark processed silently, do not affect real risk state
+                    processed.add(aid)
+                    newly_processed.append(aid)
+                    continue
+                exec_trade = executed_records.get(aid) or {}
+                trade_notional = float(exec_trade.get("notional") or notional_per_trade or 400.0)
+            else:
+                trade_notional = notional_per_trade
+
             state["daily_trades_count"] = state.get("daily_trades_count", 0) + 1
-            dollar_pnl = (pnl_pct / 100.0) * notional_per_trade
+            dollar_pnl = (pnl_pct / 100.0) * trade_notional
             state["daily_pnl_usdt"] = state.get("daily_pnl_usdt", 0.0) + dollar_pnl
 
             if result == "loss":

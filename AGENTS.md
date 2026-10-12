@@ -434,6 +434,27 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 5. **การทดสอบยืนยันผล**:
    - สร้างชุดทดสอบ `scratch/test_trade_close_sync.py`: จำลอง Ghost Entry (`AW15` บน `NEAR-USD`) ควบคู่กับคำสั่งจริง (`CDCVIX15` บน `BTC-USD`) ผลลัพธ์คือ Ghost Entry ถูกข้ามและบันทึกประวัติแบบเงียบ ส่วนคำสั่งจริงถูกส่งข้อความสรุปพร้อม Badge และกำไรสุทธิ USDT ครบถ้วน 100%
 
+## 18. การซิงค์ระบบตัดวงจรความเสี่ยงเข้ากับพอร์ตจริง 100% (RiskManager Real Execution Sync) (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
+
+### ปัญหาที่พบ
+- ผู้ใช้สงสัยว่าทำไมระบบขึ้นสถานะ "แพ้ 2 ไม้ติด" และตัดวงจร Circuit Breaker พักเทรด ทั้งที่ในพอร์ตจริงเพิ่งมีไม้ SOL ชน SL เพียงไม้เดียว (-1.61%) และอีกไม้ (ETH) ยังเปิดอยู่
+- **สาเหตุเชิงลึก**: เดิม `BinanceFuturesRiskManager` ใน `update_from_settled_outcomes` ดึงผลลัพธ์ที่ settled ทุกไม้จาก `realized_outcomes.json` มารวมคำนวณ `consecutive_losses` และ `daily_loss_pct` โดยไม่ได้ตรวจสอบว่าไม้นั้นถูกยิงเข้า Binance จริงหรือไม่ ส่งผลให้ไม้จำลองกระดาษ (Paper Trades เช่น AW15 บน SUI และ ONDO) ที่ชน SL ถูกนำมารวมเป็นผลขาดทุนของพอร์ตจริง ทำให้ยอดขาดทุนสะสมพุ่งเป็น 7.9% และเข้าสู่โหมดพักเทรดผิดพลาด
+
+### การแก้ไขและปรับปรุง:
+1. **เพิ่ม Flag ควบคุมใน Config & GitHub Actions** (`config.py`, `.github/workflows/main.yml`):
+   - `BINANCE_FUTURES_RISK_ONLY_EXECUTED = True`
+2. **ปรับปรุง `BinanceFuturesRiskManager` (`infrastructure/binance/risk_manager.py`)**:
+   - รองรับ `executed_records` และ `only_executed = True`
+   - **คัดแยกไม้กระดาษ**: หาก `alert_id` ไม่อยู่ใน `executed_records` จะบันทึกว่าตรวจสอบแล้ว (`processed.add(aid)`) แต่ **ไม่นำค่าขาดทุน, ไม่เพิ่มตัวนับไม้, และไม่เพิ่ม Consecutive Losses** เข้าสู่พอร์ตจริง
+   - **คำนวณจากไม้จริง 100%**: นำขนาด Notional สัญญาจริงของไม้มาคูณ PnL% ได้ตัวเลข Dollar PnL ที่แท้จริง
+   - **ระบบ Auto-Reconciliation**: ตรวจสอบและคลีนค่าความเสี่ยงของวันที่เคยถูกปนเปื้อนด้วยไม้กระดาษ และทำการปลดล็อก Circuit Breaker ที่ติดค้างอยู่อัตโนมัติ (เช่น วันนี้ขาดทุนจริงเพียง 1.61% จาก SOL ซึ่งต่ำกว่าเพดาน 4.0% วงจรจะถูกปลดล็อกกลับมาเทรดได้ตามปกติ)
+3. **เชื่อมโยงใน `pipeline_hook.py`**:
+   - โหลด `executed_records` ก่อนและส่งเข้า `risk_mgr.update_from_settled_outcomes` ทันที
+4. **การทดสอบยืนยันผล**:
+   - ชุดทดสอบ `scratch/test_risk_manager_sync.py` ผ่าน 100%: ยืนยันการตัดผลไม้กระดาษ, การคำนวณไม้จริง, การปลดล็อก False Circuit Breaker, และการตัดวงจรเมื่อไม้จริงชนเกณฑ์ 4.0% อย่างแม่นยำ
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

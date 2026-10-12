@@ -98,7 +98,11 @@ def execute_binance_auto_trade_pipeline(
         win_streak_scale_mult=getattr(config, "BINANCE_FUTURES_WIN_STREAK_SCALE_MULT", 1.25),
     )
 
-    # Sync settled outcomes into risk manager
+    # Load executed orders first so RiskManager and Watchdog have full context
+    executed_orders_path = helpers.get("binance_executed_orders_path", lambda: ".data/telegram_alerts/binance_executed_orders.json")()
+    executed_records = _load_executed_orders(executed_orders_path)
+
+    # Sync settled outcomes into risk manager (filtered strictly to real executed trades)
     try:
         outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
         if os.path.exists(outcomes_path):
@@ -109,6 +113,7 @@ def execute_binance_auto_trade_pipeline(
                     payload["outcomes"],
                     leverage=leverage,
                     notional_per_trade=trade_notional,
+                    executed_records=executed_records,
                 )
     except Exception as e:
         logger.warning("Could not sync outcomes to RiskManager: %s", e)
@@ -144,9 +149,6 @@ def execute_binance_auto_trade_pipeline(
         min_liquidation_distance_pct=float(getattr(config, "BINANCE_WATCHDOG_MIN_LIQ_DIST_PCT", 3.0)),
         default_stop_loss_pct=float(getattr(config, "BINANCE_WATCHDOG_DEFAULT_SL_PCT", 1.8)),
     )
-
-    executed_orders_path = helpers.get("binance_executed_orders_path", lambda: ".data/telegram_alerts/binance_executed_orders.json")()
-    executed_records = _load_executed_orders(executed_orders_path)
 
     try:
         outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()

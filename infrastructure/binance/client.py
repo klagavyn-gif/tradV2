@@ -150,6 +150,14 @@ class BinanceFuturesClient:
             "minNotional": float(min_notional_filter.get("notional", 5.0)),
         }
 
+    def get_symbol_price(self, symbol: str) -> Optional[float]:
+        """Fetch current ticker/market price for a symbol."""
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        res = self._request("GET", "/fapi/v1/ticker/price", params={"symbol": clean_sym})
+        if res.get("success"):
+            return float(res.get("data", {}).get("price") or 0.0)
+        return None
+
     # --- Account & Positions ---
 
     def get_account_balance(self) -> List[Dict[str, Any]]:

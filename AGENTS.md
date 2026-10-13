@@ -339,7 +339,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_SILENT_MILESTONES = True  # ส่งอัปเด
 TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messages.json"
 ```
 
-## 14. การปลดล็อค Cold-Start Deadlock ด้วย Baseline Prior (ต.ค. 2026)
+## 15. การปลดล็อค Cold-Start Deadlock ด้วย Baseline Prior (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -360,7 +360,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
    - ในช่วง Cold-Start (เมื่อ `settled_alerts < 5.0` ใน V2 epoch) ให้ fallback ไปใช้ `STRATEGY_BASELINE_EDGE_PRIORS` อัตโนมัติ ป้องกันการโดนบล็อกด้วย `missing_edge_metrics`
    - เมื่อสะสมการปิดไม้ใน V2 ครบ 5 ไม้ขึ้นไป ระบบจะ switch ไปใช้ Live Realized Stats ของ V2 โดยสมบูรณ์ 100%
 
-## 15. ระบบ Daily System Doctor & Anomaly Watchdog (ต.ค. 2026)
+## 16. ระบบ Daily System Doctor & Anomaly Watchdog (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -381,7 +381,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   - หากพบความผิดปกติระดับ `CRITICAL` ระบบจะยิงแจ้งเตือนด่วนเข้า Telegram แยกทันที
 - **เครื่องมือตรวจสอบ**: `python -m tools.system_doctor --audit` หรือ `--notify-telegram`
 
-## 16. การบังคับใช้ Strategy Whitelist (สูตร 3 ทหารเสือ: CDCVIX15, PA15, PRIMARY) และ Clean 11-Symbol Universe ใน Auto-Trade (ต.ค. 2026)
+## 17. การบังคับใช้ Strategy Whitelist (สูตร 3 ทหารเสือ: CDCVIX15, PA15, PRIMARY) และ Clean 11-Symbol Universe ใน Auto-Trade (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -408,7 +408,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
      `BTC-USD, DOGE-USD, ETH-USD, ADA-USD, XRP-USD, BNB-USD, SOL-USD, TRX-USD, PAXG-USD, ONDO-USD, SUI-USD`
    - เพิ่มตัวแปร `BINANCE_FUTURES_ALLOWED_STRATEGIES` และ `BINANCE_FUTURES_BLOCKED_SYMBOLS` ใน workflow environment
 
-## 17. การซิงค์การแจ้งเตือนปิดไม้เข้ากับคำสั่งซื้อขายจริง 100% (Trade Close Execution Sync) (ต.ค. 2026)
+## 18. การซิงค์การแจ้งเตือนปิดไม้เข้ากับคำสั่งซื้อขายจริง 100% (Trade Close Execution Sync) (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -434,7 +434,7 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 5. **การทดสอบยืนยันผล**:
    - สร้างชุดทดสอบ `scratch/test_trade_close_sync.py`: จำลอง Ghost Entry (`AW15` บน `NEAR-USD`) ควบคู่กับคำสั่งจริง (`CDCVIX15` บน `BTC-USD`) ผลลัพธ์คือ Ghost Entry ถูกข้ามและบันทึกประวัติแบบเงียบ ส่วนคำสั่งจริงถูกส่งข้อความสรุปพร้อม Badge และกำไรสุทธิ USDT ครบถ้วน 100%
 
-## 18. การซิงค์ระบบตัดวงจรความเสี่ยงเข้ากับพอร์ตจริง 100% (RiskManager Real Execution Sync) (ต.ค. 2026)
+## 19. การซิงค์ระบบตัดวงจรความเสี่ยงเข้ากับพอร์ตจริง 100% (RiskManager Real Execution Sync) (ต.ค. 2026)
 
 สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
@@ -455,23 +455,13 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 4. **การทดสอบยืนยันผล**:
    - ชุดทดสอบ `scratch/test_risk_manager_sync.py` ผ่าน 100%: ยืนยันการตัดผลไม้กระดาษ, การคำนวณไม้จริง, การปลดล็อก False Circuit Breaker, และการตัดวงจรเมื่อไม้จริงชนเกณฑ์ 4.0% อย่างแม่นยำ
 
-## ข้อควรรู้ทั่วไป
-- Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
-  ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
-- `.data/research/` ถูก gitignore (dataset/โมเดลไม่ commit)
-- โมเดล entry AI live ถูก fetch ผ่าน secret `TELEGRAM_ALERT_ENTRY_AI_MODEL_URL`
-  และ cache key `TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION` — การ promote ต้อง upload
-  artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
-- วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
-  (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+## 20. การปลดระวาง Web UI สู่สถาปัตยกรรม Pure Headless Trading Engine (ต.ค. 2026)
 
-## 16. การปลดระวาง Web UI สู่สถาปัตยกรรม Pure Headless Trading Engine (ต.ค. 2026)
-
-สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified & Deployed)**
 
 - **บริบท**: ผู้ใช้เทรดจริงผ่าน Binance USDT-M Futures และรับการแจ้งเตือนทาง Telegram Bot แบบอัตโนมัติบน GitHub Actions (ทุก 15 นาที) จึงไม่มีความจำเป็นต้องเปิดหน้าเว็บ UI หรือรัน Flask Web Server
 - **สิ่งที่ดำเนินการ (Option B — Full Headless Purge)**:
-  1. **ลบส่วนประกอบ Frontend & Web Server**:
+  1. **ลบส่วนประกอบ Frontend & Web Server (2,600+ บรรทัด)**:
      - ลบ `templates/` (`index.html`) และ `static/` (`style.css`)
      - ลบ `web/` (`app_factory.py`, `routes/`)
      - ลบ `app.py` และ `bootstrap.py`
@@ -484,3 +474,12 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
      - ป้องกัน `UnicodeEncodeError: 'charmap'` บน Windows Thai Locale (CP874) ใน `trad.py`, `alert_engine.py`, และ `auto_tune_telegram_thresholds.py`
 - **ผลลัพธ์**: โค้ดกระชับลงกว่า 2,600 บรรทัด ปิดช่องโหว่ความปลอดภัยบนเว็บ 100% และระบบ Auto-Trading ผ่านการทดสอบ Live Simulation ครบ 7/7 Scenario อย่างสมบูรณ์แบบ
 
+## ข้อควรรู้ทั่วไป
+- Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
+  ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
+- `.data/research/` ถูก gitignore (dataset/โมเดลไม่ commit)
+- โมเดล entry AI live ถูก fetch ผ่าน secret `TELEGRAM_ALERT_ENTRY_AI_MODEL_URL`
+  และ cache key `TELEGRAM_ALERT_ENTRY_AI_MODEL_CACHE_VERSION` — การ promote ต้อง upload
+  artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
+- วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
+  (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json

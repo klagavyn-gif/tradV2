@@ -1,5 +1,3 @@
-from flask import jsonify, request
-
 from application.services.service_support import (
     analyze_symbols_batch,
     build_analysis_summary,
@@ -86,14 +84,6 @@ def build_analyze_response_payload(data):
         ),
     }
     return {"results": cleaned, "meta": clean_json_value(meta)}, 200
-
-
-def handle_analyze_request():
-    data = request.get_json(silent=True) or {}
-    if not isinstance(data, dict):
-        return jsonify({"error": "Invalid request body"}), 400
-    payload, status_code = build_analyze_response_payload(data)
-    return jsonify(payload), status_code
 
 
 def run_once(symbols, period, notify_telegram, verify_output=None, verify_include_results=None):

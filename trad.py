@@ -1,4 +1,10 @@
-from flask import Flask, render_template, request, jsonify
+import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
+
 import argparse
 import csv
 import json
@@ -23,12 +29,7 @@ from itertools import repeat
 from curl_cffi import requests as curl_requests
 import config
 from application.services.analysis_service import (
-    handle_analyze_request as _app_handle_analyze_request,
     run_once as _app_run_once,
-)
-from application.services.report_service import (
-    handle_all_weather_report_request as _app_handle_all_weather_report_request,
-    handle_telegram_alert_report_request as _app_handle_telegram_alert_report_request,
 )
 from application.services import service_support as _service_support
 from domain.alerts.dispatch.cache_policy import build_symbol_intent_key as _domain_build_symbol_intent_key
@@ -127,10 +128,6 @@ try:
     import requests as http_requests
 except Exception:
     http_requests = None
-
-app = Flask(__name__)
-if getattr(config, "SECRET_KEY", ""):
-    app.config["SECRET_KEY"] = config.SECRET_KEY
 
 logger = logging.getLogger(__name__)
 _YF_TZ_CACHE_LOCK = threading.Lock()
@@ -11724,16 +11721,6 @@ def _build_analysis_summary(results, requested_symbols=None, period=None):
         period=period,
     )
 
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify(_build_health_snapshot())
-
-
 def _analyze_symbols_batch(symbols, period, include_chart_data=False):
     return _service_support.analyze_symbols_batch(
         symbols,
@@ -11743,21 +11730,6 @@ def _analyze_symbols_batch(symbols, period, include_chart_data=False):
         executor=_ANALYZE_EXECUTOR,
         repeat_values=repeat,
     )
-
-
-@app.route('/analyze', methods=['POST'])
-def analyze():
-    return _app_handle_analyze_request()
-
-
-@app.route('/report/telegram-alerts', methods=['GET', 'POST'])
-def report_telegram_alerts():
-    return _app_handle_telegram_alert_report_request()
-
-
-@app.route('/report/all-weather', methods=['POST'])
-def report_all_weather():
-    return _app_handle_all_weather_report_request()
 
 def _run_once(symbols, period, notify_telegram, verify_output=None, verify_include_results=None):
     return _app_run_once(
@@ -11769,23 +11741,22 @@ def _run_once(symbols, period, notify_telegram, verify_output=None, verify_inclu
     )
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="tradV2 Headless Trading Engine")
     parser.add_argument("--symbols", default="")
     parser.add_argument("--period", default="1mo")
     parser.add_argument("--notify-telegram", action="store_true")
     parser.add_argument("--verify-output", default="")
     parser.add_argument("--verify-include-results", action="store_true", default=None)
-    parser.add_argument("--port", type=int, default=None)
     args = parser.parse_args()
-    if str(args.symbols or "").strip():
-        raise SystemExit(
-            _run_once(
-                args.symbols,
-                str(args.period or "1mo"),
-                bool(args.notify_telegram),
-                verify_output=str(args.verify_output or ""),
-                verify_include_results=args.verify_include_results,
-            )
+    if not str(args.symbols or "").strip():
+        parser.print_help()
+        raise SystemExit(0)
+    raise SystemExit(
+        _run_once(
+            args.symbols,
+            str(args.period or "1mo"),
+            bool(args.notify_telegram),
+            verify_output=str(args.verify_output or ""),
+            verify_include_results=args.verify_include_results,
         )
-    port = int(args.port) if args.port is not None else int(getattr(config, "PORT", 5000))
-    app.run(debug=getattr(config, "FLASK_DEBUG", True), port=port)
+    )

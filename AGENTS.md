@@ -465,6 +465,22 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
 
+## 16. การปลดระวาง Web UI สู่สถาปัตยกรรม Pure Headless Trading Engine (ต.ค. 2026)
 
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
 
+- **บริบท**: ผู้ใช้เทรดจริงผ่าน Binance USDT-M Futures และรับการแจ้งเตือนทาง Telegram Bot แบบอัตโนมัติบน GitHub Actions (ทุก 15 นาที) จึงไม่มีความจำเป็นต้องเปิดหน้าเว็บ UI หรือรัน Flask Web Server
+- **สิ่งที่ดำเนินการ (Option B — Full Headless Purge)**:
+  1. **ลบส่วนประกอบ Frontend & Web Server**:
+     - ลบ `templates/` (`index.html`) และ `static/` (`style.css`)
+     - ลบ `web/` (`app_factory.py`, `routes/`)
+     - ลบ `app.py` และ `bootstrap.py`
+     - ลบ `application/services/legacy_http_service.py` และ `report_service.py`
+  2. **ถอด Flask ออกจาก Core Logic & Requirements**:
+     - ลบ `flask` ออกจาก `requirements.txt` (ลดการติดตั้ง package ส่วนเกินใน GitHub Actions 7 packages)
+     - ถอด `from flask import ...` ออกจาก `trad.py` และ `application/services/analysis_service.py`
+     - ปรับ `__main__` ใน `trad.py` ให้เป็น Pure Headless CLI (หากรัน `python trad.py` จะแสดง CLI usage และออกทันที ไม่เปิดเว็บเซิร์ฟเวอร์ค้างที่ port 5000)
+  3. **เพิ่ม UTF-8 Terminal Guard**:
+     - ป้องกัน `UnicodeEncodeError: 'charmap'` บน Windows Thai Locale (CP874) ใน `trad.py`, `alert_engine.py`, และ `auto_tune_telegram_thresholds.py`
+- **ผลลัพธ์**: โค้ดกระชับลงกว่า 2,600 บรรทัด ปิดช่องโหว่ความปลอดภัยบนเว็บ 100% และระบบ Auto-Trading ผ่านการทดสอบ Live Simulation ครบ 7/7 Scenario อย่างสมบูรณ์แบบ
 

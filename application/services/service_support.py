@@ -36,20 +36,25 @@ def parse_symbols_input(raw_symbols, *, normalize_symbol, default_max_symbols, m
     symbols_raw = str(raw_symbols or "").upper().replace("\n", ",").replace(";", ",").split(",")
     unique_symbols = []
     seen = set()
+    has_deprecated = False
     for raw in symbols_raw:
         symbol = normalize_symbol(raw)
-        if not symbol or symbol in seen or symbol in DEPRECATED_SYMBOLS:
+        if symbol in DEPRECATED_SYMBOLS or raw.strip() in DEPRECATED_SYMBOLS:
+            has_deprecated = True
+            continue
+        if not symbol or symbol in seen:
             continue
         seen.add(symbol)
         unique_symbols.append(symbol)
         if len(unique_symbols) >= max_count:
             break
     # If deprecated symbols were filtered out from the universe, ensure clean trend leaders ONDO and SUI are included
-    for replacement in ("ONDO-USD", "SUI-USD"):
-        clean_rep = normalize_symbol(replacement)
-        if clean_rep and clean_rep not in seen and len(unique_symbols) < max_count:
-            seen.add(clean_rep)
-            unique_symbols.append(clean_rep)
+    if has_deprecated:
+        for replacement in ("ONDO-USD", "SUI-USD"):
+            clean_rep = normalize_symbol(replacement)
+            if clean_rep and clean_rep not in seen and len(unique_symbols) < max_count:
+                seen.add(clean_rep)
+                unique_symbols.append(clean_rep)
     return unique_symbols
 
 

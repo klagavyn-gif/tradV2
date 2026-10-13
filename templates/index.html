@@ -449,7 +449,7 @@
             container.innerHTML = `
                 <div class="action-queue">
                     ${queue.map(item => `
-                        <button type="button" class="queue-item" onclick="viewWatchlistSymbol('${escapeHtml(item.symbol)}')">
+                        <button type="button" class="queue-item" data-symbol="${escapeHtml(item.symbol)}" onclick="viewWatchlistSymbol(this.dataset.symbol)">
                             <div class="queue-item-head">
                                 <strong>${escapeHtml(item.symbol)}</strong>
                                 <span class="signal-pill ${getSignalToneClass(item.signal)}">${escapeHtml(item.signal)}</span>
@@ -586,9 +586,9 @@
             }
             setCount(items.length, total);
             container.innerHTML = items.map(sym => `
-                <div class="watchlist-item" onclick="viewWatchlistSymbol('${sym}')">
+                <div class="watchlist-item" data-symbol="${escapeHtml(sym)}" onclick="viewWatchlistSymbol(this.dataset.symbol)">
                     <div class="watchlist-item-main">
-                        <span class="watchlist-symbol">${sym}</span>
+                        <span class="watchlist-symbol">${escapeHtml(sym)}</span>
                         ${(() => {
                             const summary = getUiSummary(latestResultsMap[getSymbolKey(sym)]);
                             const confidenceText = typeof summary.confidence === 'number' ? ' | ' + formatPercent(summary.confidence, 1) : '';
@@ -602,7 +602,7 @@
                         })()}
                     </div>
                     <div class="watchlist-actions">
-                        <button type="button" class="watchlist-remove-btn" onclick="event.stopPropagation(); removeFromWatchlist('${sym}')">
+                        <button type="button" class="watchlist-remove-btn" data-symbol="${escapeHtml(sym)}" onclick="event.stopPropagation(); removeFromWatchlist(this.dataset.symbol)">
                             <i class="bi bi-x-circle"></i>
                         </button>
                     </div>
@@ -800,7 +800,7 @@
                 if (result.error) {
                     card.innerHTML = `
                         <div class="alert alert-danger" role="alert">
-                            <strong>${result.symbol}:</strong> ${result.error}
+                            <strong>${escapeHtml(result.symbol)}:</strong> ${escapeHtml(result.error)}
                         </div>
                     `;
                     resultsContainer.appendChild(card);
@@ -927,14 +927,14 @@
                 card.innerHTML = `
                     <div class="result-header d-flex justify-content-between align-items-center">
                         <div class="d-flex flex-column">
-                            <h2 class="result-title mb-1">${result.name} (${result.symbol})</h2>
+                            <h2 class="result-title mb-1">${escapeHtml(result.name || '')} (${escapeHtml(result.symbol || '')})</h2>
                             <div>
-                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="addToWatchlist('${result.symbol}')">
+                                <button type="button" class="btn btn-sm btn-outline-primary" data-symbol="${escapeHtml(result.symbol)}" onclick="addToWatchlist(this.dataset.symbol)">
                                     <i class="bi bi-star"></i> เพิ่มในรายการติดตาม
                                 </button>
                             </div>
                         </div>
-                        <span class="badge ${getSignalClass(result.signal)}">${result.signal}</span>
+                        <span class="badge ${getSignalClass(result.signal)}">${escapeHtml(result.signal || '')}</span>
                     </div>
                     <div class="result-grid">
                         <div class="result-item">
@@ -951,7 +951,7 @@
                         </div>
                         <div class="result-item">
                             <div class="result-label">Phase Status</div>
-                            <div class="result-value">${result.phase_status}</div>
+                            <div class="result-value">${escapeHtml(result.phase_status || '')}</div>
                         </div>
                         <div class="result-item">
                             <div class="result-label">RSI</div>
@@ -971,7 +971,7 @@
                         </div>
                         <div class="result-item">
                             <div class="result-label">สถานะวอลุ่ม</div>
-                            <div class="result-value">${result.volume_status}</div>
+                            <div class="result-value">${escapeHtml(result.volume_status || '')}</div>
                         </div>
                     </div>
                     ${essentialsHtml}
@@ -1180,12 +1180,12 @@
                 countBadge.style.display = 'inline-block';
             }
             alertsContainer.innerHTML = scored.map(item => `
-                <div class="alert-item" onclick="viewWatchlistSymbol('${item.symbol}')">
-                    <div class="alert-item-symbol">${item.symbol}</div>
+                <div class="alert-item" data-symbol="${escapeHtml(item.symbol)}" onclick="viewWatchlistSymbol(this.dataset.symbol)">
+                    <div class="alert-item-symbol">${escapeHtml(item.symbol)}</div>
                     <div class="alert-item-tags">
                         ${item.tags.map(t => `
-                            <span class="badge bg-warning text-dark alert-tag">${t.label}</span>
-                            <span class="badge bg-light text-dark alert-tag">${t.detail}</span>
+                            <span class="badge bg-warning text-dark alert-tag">${escapeHtml(t.label)}</span>
+                            <span class="badge bg-light text-dark alert-tag">${escapeHtml(t.detail)}</span>
                         `).join('')}
                     </div>
                 </div>

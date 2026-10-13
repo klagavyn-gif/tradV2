@@ -474,6 +474,37 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
      - ป้องกัน `UnicodeEncodeError: 'charmap'` บน Windows Thai Locale (CP874) ใน `trad.py`, `alert_engine.py`, และ `auto_tune_telegram_thresholds.py`
 - **ผลลัพธ์**: โค้ดกระชับลงกว่า 2,600 บรรทัด ปิดช่องโหว่ความปลอดภัยบนเว็บ 100% และระบบ Auto-Trading ผ่านการทดสอบ Live Simulation ครบ 7/7 Scenario อย่างสมบูรณ์แบบ
 
+## 21. นวัตกรรม Quant ระยะที่ 1: BTC Shockwave Barrier & Kinetic Half-Life Stop Engine (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+การพัฒนานวัตกรรมเชิงโครงสร้างแทนการเพิ่ม Technical Indicator ทั่วไป เพื่อสร้าง Edge ในระดับกลไกตลาดและบริหารความเสี่ยง:
+
+### 1. BTC Shockwave Barrier (การป้องกันการลามของความผันผวนข้ามสินทรัพย์)
+- **ปัญหา**: เมื่อ Bitcoin เกิดการระเบิดของราคาอย่างรุนแรง (Liquidation Flush / Squeeze) เหรียญ Altcoins ทั้งหมดจะถูกลากกระชากหลุด Stop Loss ทันทีแม้ว่าสัญญาณกราฟของ Altcoin ตัวนั้นจะดูสวยงามเพียงใดก็ตาม
+- **โครงสร้างโมดูล**: `infrastructure/binance/shockwave_barrier.py` (`BtcShockwaveBarrier`)
+- **กลไกการทำงาน**:
+  - ประเมินแท่งเทียน 15m ของ BTCUSDT แบบเรียลไทม์ เทียบกับ ATR 14 แท่ง
+  - หาก Range แท่งเทียนของ BTC $\ge 1.8\times \text{ATR}$ หรือราคาวิ่งรุนแรง $\ge 1.5\%$ (ครอบคลุมทั้งแท่งปัจจุบันและแท่งก่อนหน้าที่ยังมีคลื่นกระแทกตกค้าง):
+    - ระบบจะเปิดโหมด `BTC Shockwave Barrier ACTIVE`
+    - **Veto ระงับเปิดไม้ Altcoins ทั้งหมด 10 ตัวทันที** ป้องกันความเสียหายจาก Liquidation Cascade
+    - สัญญาณ BTC เองยังคงได้รับอนุญาตให้เข้าทำกำไรได้ตามปกติ (เนื่องจากเทรดตามโมเมนตัมตัวเอง)
+- **การเชื่อมต่อ**: ผนวกเข้ากับ `pipeline_hook.py` ก่อนการยิงออเดอร์ พร้อมแจ้งเตือน Telegram แสดง Badge ชีพจรตลาด `⚡ [BTC Shockwave Veto]` ชัดเจน
+
+### 2. Kinetic Half-Life Stop Engine (การตัดขาดทุนตามการสลายตัวของโมเมนตัมตามเวลา)
+- **ปัญหา**: Breakout ที่มีคุณภาพสูงจะต้องขยายตัวทำกำไรอย่างรวดเร็ว ไม้ที่เปิดแล้วแช่นิ่งเกิน 2 ชั่วโมง (8 แท่ง 15m) โดยทำกำไรไม่ถึง $+0.60R$ มีโอกาสกลับตัวลงมาชน Stop Loss เต็มไม้ $(-1.0R)$ สูงมาก (Profit Decay)
+- **กลไกการทำงาน**:
+  - ใน `alerts/reporting.py`: เมื่อไม้ถือครองเกิน 8 แท่ง (`idx >= kinetic_min_bars`) และยังไม่สามารถขยายกำไรเกิน `0.60R` ระบบจะขยับ Stop Loss มาที่จุดเข้าทันที และหากราคาย้อนกลับมาจะบันทึกผลเป็น `kinetic_stop_hit` (ผลลัพธ์ Flat 0% ไม่ขาดทุน)
+  - ใน `infrastructure/binance/order_manager.py`: อัปเดต `sync_breakeven_stops` ให้ตรวจสอบอายุของสถานะที่เปิดอยู่ หากเกิน 7,200 วินาที (2 ชม.) และ `gain_r < 0.60R` โดยที่ `mark_price >= entry_price` (ฝั่ง Long) หรือ `mark_price <= entry_price` (ฝั่ง Short) ระบบจะส่งคำสั่งยกเลิก SL เดิมและวาง SL ใหม่ที่จุดเข้าทุน (`kbe_{timestamp}`) อัตโนมัติบนกระดานเทรดจริง
+- **การทดสอบยืนยันผล**:
+  - สร้างชุดทดสอบ `scratch/test_phase1_innovations.py` ครอบคลุม:
+    1. Calmed market vs 4.0x ATR Shockwave Detection
+    2. Altcoins Vetoed vs BTC Allowed
+    3. Kinetic Breakeven Stop order migration บน Order Manager
+    4. Simulation เปรียบเทียบ: ไม้ที่ไม่มี Kinetic Stop โดนชน SL เต็มไม้ (-1.0R) -> ไม้ที่มี Kinetic Stop เซฟต้นทุนกลายเป็น Flat (0% Loss)
+    5. Pipeline Hook Integration Test ครบวงจร
+  - ผลการทดสอบ: **ผ่านฉลุย 100% (Passed)** พร้อมทั้ง Regression Test `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenario
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

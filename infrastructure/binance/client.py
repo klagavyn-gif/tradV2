@@ -158,6 +158,14 @@ class BinanceFuturesClient:
             return float(res.get("data", {}).get("price") or 0.0)
         return None
 
+    def get_klines(self, symbol: str, interval: str = "15m", limit: int = 30) -> List[List[Any]]:
+        """Fetch public candlestick / kline data."""
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        res = self._request("GET", "/fapi/v1/klines", params={"symbol": clean_sym, "interval": interval, "limit": limit})
+        if res.get("success") and isinstance(res.get("data"), list):
+            return res.get("data", [])
+        return []
+
     # --- Account & Positions ---
 
     def get_account_balance(self) -> List[Dict[str, Any]]:
@@ -204,6 +212,7 @@ class BinanceFuturesClient:
                     "leverage": int(p.get("leverage", 1)),
                     "marginType": p.get("marginType", "isolated"),
                     "side": "LONG" if amt > 0 else "SHORT",
+                    "updateTime": int(p.get("updateTime", 0)),
                 })
         return open_positions
 

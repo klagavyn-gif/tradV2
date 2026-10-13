@@ -129,6 +129,9 @@ def execute_binance_auto_trade_pipeline(
         trailing_dist_r=trail_dist_r,
         risk_manager=risk_mgr,
         max_entry_drift_pct=float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80)),
+        kinetic_enabled=bool(getattr(config, "BINANCE_FUTURES_KINETIC_STOP_ENABLED", True)),
+        kinetic_min_seconds=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_SECONDS", 7200.0)),
+        kinetic_min_r=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_R", 0.60)),
     )
 
     results = {
@@ -177,9 +180,9 @@ def execute_binance_auto_trade_pipeline(
     except Exception as e:
         logger.exception("Error executing Binance Watchdog: %s", e)
 
-    # 1.5. Sync Breakeven Stops on any existing open positions
+    # 1.5. Sync Breakeven Stops (Profit Target & Kinetic Half-Life Stop) on open positions
     try:
-        be_updates = order_mgr.sync_breakeven_stops()
+        be_updates = order_mgr.sync_breakeven_stops(executed_records=executed_records)
         results["be_updates"] = be_updates
         if be_updates and callable(send_telegram_alert):
             from infrastructure.notifications.telegram_gateway import (
@@ -205,8 +208,9 @@ def execute_binance_auto_trade_pipeline(
                                 new_stop_loss=u['new_sl'],
                                 updated_message=new_text,
                             )
+                be_type_label = "กันทุนตามเวลา (Kinetic Half-Life Stop ⏱️)" if u.get("reason") == "kinetic" else "กันทุน (Breakeven 🎯)"
                 msg = (
-                    f"🛡️ <b>[Auto-Trade] #{sym} ปรับกันทุน (Breakeven) สำเร็จ!</b>\n"
+                    f"🛡️ <b>[Auto-Trade] #{sym} ปรับ{be_type_label} สำเร็จ!</b>\n"
                     f"<b>เหรียญ:</b> {sym} | <b>ฝั่ง:</b> {u['side']}\n"
                     f"<b>Stop Loss ใหม่:</b> {u['new_sl']:,} (เลื่อนมาที่ทุนเพื่อกันความเสี่ยง 0%)"
                 )
@@ -277,6 +281,21 @@ def execute_binance_auto_trade_pipeline(
         else:
             logger.info("[Auto-Trade] Skipped non-entry candidate %s %s (%s): intent=%s (reason=%s)", sym, signal, strat, intent, intent_reason)
 
+    # 2.5. BTC Shockwave Barrier (Cross-asset volatility & liquidation protection)
+    from .shockwave_barrier import BtcShockwaveBarrier
+    shockwave_barrier = BtcShockwaveBarrier(
+        default_atr_mult=float(getattr(config, "BTC_SHOCKWAVE_ATR_MULT", 1.8)),
+        default_abs_pct=float(getattr(config, "BTC_SHOCKWAVE_ABS_PCT", 1.5)),
+    ) if bool(getattr(config, "BTC_SHOCKWAVE_BARRIER_ENABLED", True)) else None
+
+    shock_eval = None
+    if shockwave_barrier:
+        try:
+            shock_eval = shockwave_barrier.evaluate(client=client)
+            results["btc_shockwave_eval"] = shock_eval
+        except Exception as se:
+            logger.warning("BTC Shockwave Barrier evaluation error: %s", se)
+
     # 3. Execute actionable entries
     from .derivatives_filter import BinanceDerivativesFilter
     deriv_filter = BinanceDerivativesFilter() if bool(getattr(config, "BINANCE_DERIVATIVES_FILTER_ENABLED", True)) else None
@@ -286,6 +305,33 @@ def execute_binance_auto_trade_pipeline(
         if aid and aid in executed_records:
             logger.info("Alert %s already executed on Binance, skipping duplicate.", aid)
             continue
+
+        # Evaluate BTC Shockwave Barrier: Altcoins are strictly vetoed during systemic BTC shocks
+        if shockwave_barrier and shock_eval and shock_eval.get("shock_active"):
+            should_veto, veto_reason = shockwave_barrier.should_veto_candidate(c, shock_eval)
+            if should_veto:
+                logger.warning(
+                    "Auto-trade vetoed by BTC Shockwave Barrier for Altcoin %s %s: %s",
+                    c.get("symbol"), c.get("signal"), veto_reason
+                )
+                results["executed_entries"].append({
+                    "success": False,
+                    "reason": f"btc_shockwave_veto_{veto_reason}",
+                    "symbol": c.get("symbol"),
+                })
+                if callable(send_telegram_alert):
+                    msg = (
+                        f"⚡ <b>[BTC Shockwave Veto] สกัดการเปิดไม้ Altcoin!</b>\n"
+                        f"────────────────\n"
+                        f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
+                        f"<b>สาเหตุ:</b> ตรวจพบคู่เทียบ BTC ผันผวนรุนแรง ({shock_eval.get('range_atr')}x ATR | {shock_eval.get('abs_change_pct')}%) {shock_eval.get('direction', '')}\n"
+                        f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เหรียญ Altcoin ชั่วคราวเพื่อป้องกัน Liquidation Contagion"
+                    )
+                    try:
+                        send_telegram_alert(msg)
+                    except Exception:
+                        pass
+                continue
 
         # Evaluate positioning & leverage via Derivatives Filter
         deriv_eval = None
@@ -362,6 +408,7 @@ def execute_binance_auto_trade_pipeline(
                         bal_str = ""
 
                     deriv_badge_str = f"\n{deriv_eval.get('badge')}" if deriv_eval and deriv_eval.get("badge") else ""
+                    shock_badge_str = f"\n{shock_eval.get('badge')}" if shock_eval and shock_eval.get("badge") else ""
 
                     msg = (
                         f"🤖 <b>{env_badge} เปิดออเดอร์ Binance Futures สำเร็จ!</b>\n"
@@ -375,6 +422,7 @@ def execute_binance_auto_trade_pipeline(
                         f"{sizing_note}"
                         f"{bal_str}"
                         f"{deriv_badge_str}"
+                        f"{shock_badge_str}"
                     )
                     try:
                         send_res = send_telegram_alert(msg)

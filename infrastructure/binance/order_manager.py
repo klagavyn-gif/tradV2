@@ -7,6 +7,7 @@ and protective stop loss / trailing stop management on Binance USDT-M Futures.
 import math
 import time
 import logging
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 from .client import BinanceFuturesClient
 
@@ -64,6 +65,9 @@ class BinanceFuturesOrderManager:
         trailing_dist_r: float = 0.8,
         risk_manager: Optional[Any] = None,
         max_entry_drift_pct: float = 0.80,
+        kinetic_enabled: bool = True,
+        kinetic_min_seconds: float = 7200.0,
+        kinetic_min_r: float = 0.60,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -75,6 +79,9 @@ class BinanceFuturesOrderManager:
         self.trailing_dist_r = float(trailing_dist_r)
         self.risk_manager = risk_manager
         self.max_entry_drift_pct = float(max_entry_drift_pct)
+        self.kinetic_enabled = bool(kinetic_enabled)
+        self.kinetic_min_seconds = float(kinetic_min_seconds)
+        self.kinetic_min_r = float(kinetic_min_r)
 
     def execute_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -288,21 +295,62 @@ class BinanceFuturesOrderManager:
             "ts_success": bool(ts_res and ts_res.get("success")),
         }
 
-    def sync_breakeven_stops(self) -> List[Dict[str, Any]]:
+    def sync_breakeven_stops(
+        self,
+        executed_records: Optional[Dict[str, Any]] = None,
+        kinetic_enabled: Optional[bool] = None,
+        kinetic_min_seconds: Optional[float] = None,
+        kinetic_min_r: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """
-        Scan open positions and adjust STOP_MARKET to Entry (Breakeven)
-        if markPrice has reached breakeven_r.
+        Scan open positions and adjust STOP_MARKET to Entry (Breakeven):
+        1. When markPrice has reached breakeven_r (e.g. >= 1.2R) - Profit Target Breakeven.
+        2. When position age >= kinetic_min_seconds (e.g. 7200s / 2 hours) and gain_r < kinetic_min_r
+           (e.g. < 0.60R) and markPrice is safely at/above entry (for LONG) or at/below entry (for SHORT)
+           - Kinetic Half-Life Stop (protecting capital from temporal momentum decay).
         """
         updated = []
         open_positions = self.client.get_positions()
         if not open_positions:
             return updated
 
+        k_enabled = self.kinetic_enabled if kinetic_enabled is None else bool(kinetic_enabled)
+        k_sec = self.kinetic_min_seconds if kinetic_min_seconds is None else float(kinetic_min_seconds)
+        k_r = self.kinetic_min_r if kinetic_min_r is None else float(kinetic_min_r)
+
         for pos in open_positions:
             symbol = pos["symbol"]
             side = pos["side"]
             entry_price = pos["entryPrice"]
             mark_price = pos["markPrice"]
+
+            # Determine elapsed seconds for this position
+            elapsed_sec = None
+            if executed_records:
+                matching = [
+                    r for r in executed_records.values()
+                    if isinstance(r, dict) and normalize_futures_symbol(str(r.get("symbol", ""))) == symbol
+                ]
+                if matching:
+                    matching.sort(key=lambda r: str(r.get("executed_at") or ""), reverse=True)
+                    exec_at_str = matching[0].get("executed_at")
+                    if exec_at_str:
+                        try:
+                            exec_dt = datetime.fromisoformat(str(exec_at_str).replace("Z", "+00:00"))
+                            if exec_dt.tzinfo:
+                                elapsed_sec = max(0.0, (datetime.now(timezone.utc) - exec_dt).total_seconds())
+                            else:
+                                elapsed_sec = max(0.0, (datetime.utcnow() - exec_dt).total_seconds())
+                        except Exception:
+                            pass
+
+            if elapsed_sec is None and pos.get("updateTime"):
+                try:
+                    pos_ts = float(pos["updateTime"]) / 1000.0
+                    if pos_ts > 0:
+                        elapsed_sec = max(0.0, time.time() - pos_ts)
+                except Exception:
+                    pass
 
             # Query existing open algo orders (and fallback to regular orders)
             algo_orders = self.client.get_open_algo_orders(symbol)
@@ -329,7 +377,7 @@ class BinanceFuturesOrderManager:
                         close_position=True,
                         client_algo_id=f"be_{int(time.time())}",
                     )
-                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
+                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "reason": "naked_protection", "result": res})
                 elif side == "SHORT" and mark_price < entry_price:
                     new_sl = round_to_tick(entry_price, tick_size)
                     res = self.client.create_algo_order(
@@ -340,7 +388,7 @@ class BinanceFuturesOrderManager:
                         close_position=True,
                         client_algo_id=f"be_{int(time.time())}",
                     )
-                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
+                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "reason": "naked_protection", "result": res})
                 continue
 
             current_sl = float(sl_order.get("triggerPrice") or sl_order.get("stopPrice") or 0.0)
@@ -352,8 +400,17 @@ class BinanceFuturesOrderManager:
 
             if side == "LONG":
                 gain_r = (mark_price - entry_price) / risk
-                # If gain >= breakeven_r and SL is still below entry
-                if gain_r >= self.breakeven_r and current_sl < entry_price:
+                is_profit_be = (gain_r >= self.breakeven_r)
+                is_kinetic_be = (
+                    k_enabled
+                    and elapsed_sec is not None
+                    and elapsed_sec >= k_sec
+                    and gain_r < k_r
+                    and mark_price >= entry_price
+                )
+
+                if (is_profit_be or is_kinetic_be) and current_sl < entry_price:
+                    reason = "kinetic" if is_kinetic_be and not is_profit_be else "profit_target"
                     # Cancel old SL
                     if is_algo:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
@@ -361,32 +418,60 @@ class BinanceFuturesOrderManager:
                         self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
                     # Place new SL at Entry (Breakeven) via Algo Order API
                     new_sl = round_to_tick(entry_price, tick_size)
+                    client_id = f"{'kbe' if is_kinetic_be else 'be'}_{int(time.time())}"
                     res = self.client.create_algo_order(
                         symbol=symbol,
                         side="SELL",
                         order_type="STOP_MARKET",
                         trigger_price=new_sl,
                         close_position=True,
-                        client_algo_id=f"be_{int(time.time())}",
+                        client_algo_id=client_id,
                     )
-                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
-            else: # SHORT
+                    updated.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "new_sl": new_sl,
+                        "reason": reason,
+                        "gain_r": round(gain_r, 2),
+                        "elapsed_seconds": elapsed_sec,
+                        "result": res,
+                    })
+            else:  # SHORT
                 gain_r = (entry_price - mark_price) / risk
-                if gain_r >= self.breakeven_r and current_sl > entry_price:
+                is_profit_be = (gain_r >= self.breakeven_r)
+                is_kinetic_be = (
+                    k_enabled
+                    and elapsed_sec is not None
+                    and elapsed_sec >= k_sec
+                    and gain_r < k_r
+                    and mark_price <= entry_price
+                )
+
+                if (is_profit_be or is_kinetic_be) and current_sl > entry_price:
+                    reason = "kinetic" if is_kinetic_be and not is_profit_be else "profit_target"
                     if is_algo:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
                     else:
                         self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
                     new_sl = round_to_tick(entry_price, tick_size)
+                    client_id = f"{'kbe' if is_kinetic_be else 'be'}_{int(time.time())}"
                     res = self.client.create_algo_order(
                         symbol=symbol,
                         side="BUY",
                         order_type="STOP_MARKET",
                         trigger_price=new_sl,
                         close_position=True,
-                        client_algo_id=f"be_{int(time.time())}",
+                        client_algo_id=client_id,
                     )
-                    updated.append({"symbol": symbol, "side": side, "new_sl": new_sl, "result": res})
+                    updated.append({
+                        "symbol": symbol,
+                        "side": side,
+                        "new_sl": new_sl,
+                        "reason": reason,
+                        "gain_r": round(gain_r, 2),
+                        "elapsed_seconds": elapsed_sec,
+                        "result": res,
+                    })
 
         return updated
 

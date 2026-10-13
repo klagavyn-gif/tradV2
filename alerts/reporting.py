@@ -692,6 +692,9 @@ def _resolve_directional_alert_outcome(
     be_r=1.2,
     ts_r=2.0,
     trail_dist_r=0.8,
+    kinetic_stop_enabled=True,
+    kinetic_min_bars=8,
+    kinetic_min_r=0.60,
 ):
     signal = str((entry or {}).get("signal") or "").strip().upper()
     alert_time = _alert_timestamp_value((entry or {}).get("timestamp"))
@@ -722,6 +725,7 @@ def _resolve_directional_alert_outcome(
         "active_stop_loss": stop_loss,
         "trailing_stop_activated": False,
         "breakeven_activated": False,
+        "kinetic_stop_activated": False,
         "outcome_status": "unsupported",
         "outcome_result": None,
         "exit_reason": None,
@@ -795,6 +799,7 @@ def _resolve_directional_alert_outcome(
     active_sl = float(stop_loss)
     be_active = False
     ts_active = False
+    kinetic_active = False
     peak_price = float(entry_price)
     trough_price = float(entry_price)
     settled_row = None
@@ -822,6 +827,11 @@ def _resolve_directional_alert_outcome(
                 be_active = True
                 if float(entry_price) > active_sl:
                     active_sl = float(entry_price)
+            elif kinetic_stop_enabled and idx >= kinetic_min_bars and gain_r < kinetic_min_r:
+                be_active = True
+                kinetic_active = True
+                if float(entry_price) > active_sl:
+                    active_sl = float(entry_price)
 
             stop_hit = low <= active_sl
             tp_hit = isinstance(take_profit, (int, float)) and high >= float(take_profit)
@@ -832,7 +842,7 @@ def _resolve_directional_alert_outcome(
                     settled_reason = "trailing_stop_hit"
                 elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
                     settled_result = "flat"
-                    settled_reason = "breakeven_stop_hit"
+                    settled_reason = "kinetic_stop_hit" if kinetic_active else "breakeven_stop_hit"
                 else:
                     settled_price = float(stop_loss)
                     settled_result = "loss"
@@ -844,7 +854,7 @@ def _resolve_directional_alert_outcome(
                     settled_reason = "trailing_stop_hit"
                 elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
                     settled_result = "flat"
-                    settled_reason = "breakeven_stop_hit"
+                    settled_reason = "kinetic_stop_hit" if kinetic_active else "breakeven_stop_hit"
                 else:
                     settled_result = "loss"
                     settled_reason = "stop_loss_hit"
@@ -867,6 +877,11 @@ def _resolve_directional_alert_outcome(
                 be_active = True
                 if float(entry_price) < active_sl:
                     active_sl = float(entry_price)
+            elif kinetic_stop_enabled and idx >= kinetic_min_bars and gain_r < kinetic_min_r:
+                be_active = True
+                kinetic_active = True
+                if float(entry_price) < active_sl:
+                    active_sl = float(entry_price)
 
             stop_hit = high >= active_sl
             tp_hit = isinstance(take_profit, (int, float)) and low <= float(take_profit)
@@ -877,7 +892,7 @@ def _resolve_directional_alert_outcome(
                     settled_reason = "trailing_stop_hit"
                 elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
                     settled_result = "flat"
-                    settled_reason = "breakeven_stop_hit"
+                    settled_reason = "kinetic_stop_hit" if kinetic_active else "breakeven_stop_hit"
                 else:
                     settled_price = float(stop_loss)
                     settled_result = "loss"
@@ -889,7 +904,7 @@ def _resolve_directional_alert_outcome(
                     settled_reason = "trailing_stop_hit"
                 elif be_active and abs(active_sl - float(entry_price)) < 1e-6:
                     settled_result = "flat"
-                    settled_reason = "breakeven_stop_hit"
+                    settled_reason = "kinetic_stop_hit" if kinetic_active else "breakeven_stop_hit"
                 else:
                     settled_result = "loss"
                     settled_reason = "stop_loss_hit"
@@ -905,6 +920,7 @@ def _resolve_directional_alert_outcome(
     outcome["active_stop_loss"] = active_sl
     outcome["trailing_stop_activated"] = ts_active
     outcome["breakeven_activated"] = be_active
+    outcome["kinetic_stop_activated"] = kinetic_active
 
     # Compute MFE/MAE only up to the actual exit bar (or the full window on a
     # time-exit), so bars after the trade already closed do not inflate them.
@@ -993,6 +1009,9 @@ def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
     be_r = _safe_float(helpers.get("alert_realized_breakeven_r", lambda: 1.2)()) if callable(helpers.get("alert_realized_breakeven_r")) else 1.2
     ts_r = _safe_float(helpers.get("alert_realized_trailing_r", lambda: 2.0)()) if callable(helpers.get("alert_realized_trailing_r")) else 2.0
     trail_dist_r = _safe_float(helpers.get("alert_realized_trailing_distance_r", lambda: 0.8)()) if callable(helpers.get("alert_realized_trailing_distance_r")) else 0.8
+    kinetic_stop_enabled = bool(helpers.get("alert_kinetic_stop_enabled", lambda: True)()) if callable(helpers.get("alert_kinetic_stop_enabled")) else True
+    kinetic_min_bars = _safe_int(helpers.get("alert_kinetic_min_bars", lambda: 8)(), 8) if callable(helpers.get("alert_kinetic_min_bars")) else 8
+    kinetic_min_r = _safe_float(helpers.get("alert_kinetic_min_r", lambda: 0.60)()) if callable(helpers.get("alert_kinetic_min_r")) else 0.60
     for symbol, rows in by_symbol.items():
         history_df = _load_symbol_realized_history(symbol, rows, helpers=helpers, now_dt=now_dt)
         for entry in rows:
@@ -1005,6 +1024,9 @@ def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
                     be_r=be_r,
                     ts_r=ts_r,
                     trail_dist_r=trail_dist_r,
+                    kinetic_stop_enabled=kinetic_stop_enabled,
+                    kinetic_min_bars=kinetic_min_bars,
+                    kinetic_min_r=kinetic_min_r,
                 )
             )
     return directional, outcomes
@@ -1223,6 +1245,8 @@ def _trade_close_exit_reason_label(exit_reason):
         return "ล็อคกำไร (Trailing Stop)"
     if text in ("breakeven_stop", "breakeven_stop_hit", "breakeven"):
         return "กันทุน (Breakeven)"
+    if text in ("kinetic_stop", "kinetic_stop_hit", "kinetic_decay"):
+        return "กันทุน (Kinetic Decay)"
     if text in ("stop_loss", "sl", "stop_loss_hit"):
         return "กระทบหยุดขาดทุน (SL)"
     if text in ("time_exit", "time_stop", "time_stop_exit"):

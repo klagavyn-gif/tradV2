@@ -40,6 +40,41 @@ class BinanceFuturesWatchdog:
         self.min_liquidation_distance_pct = float(min_liquidation_distance_pct)
         self.default_stop_loss_pct = float(default_stop_loss_pct)
 
+    @staticmethod
+    def _find_active_executed_record(
+        executed_records: Optional[Dict[str, Any]],
+        sym: str,
+        side: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Find the most recent executed order record matching a given symbol and optional side.
+        """
+        if not executed_records or not isinstance(executed_records, dict):
+            return None
+
+        target_sym = normalize_futures_symbol(sym)
+        matching = []
+        for aid, rec in executed_records.items():
+            if not isinstance(rec, dict):
+                continue
+            rec_sym = normalize_futures_symbol(str(rec.get("symbol") or ""))
+            if rec_sym == target_sym:
+                if side:
+                    expected_sig = "BUY" if str(side).upper() == "LONG" else "SELL"
+                    rec_sig = str(rec.get("signal") or "").upper()
+                    if rec_sig and rec_sig != expected_sig:
+                        continue
+                matching.append(rec)
+
+        if not matching:
+            return None
+
+        matching.sort(
+            key=lambda r: str(r.get("executed_at") or r.get("timestamp") or ""),
+            reverse=True,
+        )
+        return matching[0]
+
     def audit_and_heal(
         self,
         *,
@@ -194,7 +229,7 @@ class BinanceFuturesWatchdog:
                 # Check if original Stop Loss exists in executed_records
                 recorded_sl = None
                 if executed_records and isinstance(executed_records, dict):
-                    rec = executed_records.get(sym) or executed_records.get(f"{sym}_{side}")
+                    rec = self._find_active_executed_record(executed_records, sym, side)
                     if rec and isinstance(rec, dict) and rec.get("stop_loss"):
                         try:
                             recorded_sl = float(rec["stop_loss"])
@@ -289,34 +324,74 @@ class BinanceFuturesWatchdog:
             report["healed_actions"].append(cleanup_msg)
 
         # 5. Settled Positions Cleanup Sync
-        # If an alert was settled in outcomes tracker, but position is still open on Binance -> Market Close!
-        if settled_outcomes and active_symbols:
-            settled_clean_symbols = {}
+        # Closes positions on Binance that have officially settled in the outcome tracker.
+        # CRITICAL SAFETY RULE:
+        # A position is ONLY settled if its SPECIFIC alert_id matching the executed order has settled!
+        # NEVER match by symbol alone, as historical outcomes contain past settled paper trades.
+        if settled_outcomes and active_symbols and executed_records:
+            settled_by_aid: Dict[str, Dict[str, Any]] = {}
+            open_by_aid: Dict[str, Dict[str, Any]] = {}
             for row in settled_outcomes:
                 if not isinstance(row, dict):
                     continue
-                if str(row.get("outcome_status") or "").strip().lower() == "settled":
-                    s_sym = normalize_futures_symbol(str(row.get("symbol") or ""))
-                    if s_sym:
-                        settled_clean_symbols[s_sym] = row
+                aid = str(row.get("alert_id") or "").strip()
+                if not aid:
+                    continue
+                st = str(row.get("outcome_status") or "").strip().lower()
+                if st == "settled":
+                    settled_by_aid[aid] = row
+                elif st == "open":
+                    open_by_aid[aid] = row
 
             for a_sym in list(active_symbols):
-                if a_sym in settled_clean_symbols:
-                    outcome_row = settled_clean_symbols[a_sym]
+                pos_entry = next((p for p in report["open_positions"] if p.get("symbol") == a_sym), None)
+                pos_side = pos_entry.get("side") if pos_entry else None
+
+                active_rec = self._find_active_executed_record(executed_records, a_sym, pos_side)
+                if not active_rec:
+                    logger.info(
+                        "[Watchdog] Active position on %s (%s) has no matching executed bot order (possibly manual/external). Skipping cleanup.",
+                        a_sym, pos_side or "UNKNOWN"
+                    )
+                    continue
+
+                active_aid = str(active_rec.get("alert_id") or "").strip()
+                if not active_aid:
+                    continue
+
+                # 1. If tracker explicitly says this alert is STILL OPEN -> KEEP OPEN!
+                if active_aid in open_by_aid:
+                    logger.info(
+                        "[Watchdog] Position %s (alert %s) is currently ACTIVE/OPEN in outcome tracker. Keeping position open.",
+                        a_sym, active_aid
+                    )
+                    continue
+
+                # 2. If tracker explicitly says this specific alert is SETTLED -> Close stuck position!
+                if active_aid in settled_by_aid:
+                    outcome_row = settled_by_aid[active_aid]
                     exit_reason = str(outcome_row.get("exit_reason") or "settled")
                     pnl_pct = outcome_row.get("pnl_pct")
                     pnl_str = f" ({pnl_pct:+.2f}%)" if isinstance(pnl_pct, (int, float)) else ""
 
-                    logger.info("[Watchdog] Position %s is settled in tracker (%s). Closing on Binance...", a_sym, exit_reason)
+                    logger.warning(
+                        "[Watchdog] Position %s (alert %s) has settled in tracker (%s) but position is still lingering on Binance. Executing market close...",
+                        a_sym, active_aid, exit_reason
+                    )
                     close_res = self.client.close_position_market(a_sym)
                     if close_res.get("success"):
-                        close_msg = f"🏁 [Auto-Close] ซิงค์ปิด Position {a_sym} บน Binance สำเร็จ ({exit_reason}){pnl_str}"
+                        close_msg = f"🏁 [Auto-Close] ซิงค์ปิด Position ค้าง {a_sym} ({active_aid[:8]}) บน Binance สำเร็จ ({exit_reason}){pnl_str}"
                         report["healed_actions"].append(close_msg)
                         # Remove from active positions report
                         report["open_positions"] = [p for p in report["open_positions"] if p["symbol"] != a_sym]
                         report["open_positions_count"] = len(report["open_positions"])
                     else:
                         report["warnings"].append(f"Failed to auto-close settled position {a_sym}: {close_res}")
+                else:
+                    logger.info(
+                        "[Watchdog] Position %s (alert %s) has no settled outcome record. Keeping position open.",
+                        a_sym, active_aid
+                    )
 
         return report
 

@@ -133,10 +133,10 @@ class BinanceFuturesOrderManager:
         if not filters:
             return {"success": False, "reason": "symbol_filters_unavailable", "symbol": symbol}
 
-        tick_size = filters["tickSize"]
-        step_size = filters["stepSize"]
-        min_qty = filters["minQty"]
-        min_notional = filters["minNotional"]
+        tick_size = float(filters.get("tickSize", 0.01))
+        step_size = float(filters.get("stepSize", 0.001))
+        min_qty = float(filters.get("minQty", 0.001))
+        min_notional = float(filters.get("minNotional", 5.0))
 
         # Calculate sizing via RiskManager (Dynamic Equity / Streak Throttle)
         sizing_info = None

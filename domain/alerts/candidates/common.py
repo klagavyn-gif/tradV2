@@ -1,3 +1,4 @@
+import html
 import math
 from collections import Counter
 from datetime import datetime, timedelta
@@ -661,6 +662,11 @@ def _candidate_source_count(candidate):
 
 
 def _bars_since_signal(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    value = _pick_numeric(candidate, ["bars_since_signal", "signal_age_bars_at_analysis", "bars_since_entry", "bars_since_cross"])
+    if isinstance(value, float):
+        return value
     value = _plan_numeric(candidate, ["bars_since_signal", "bars_since_entry", "bars_since_cross"])
     if isinstance(value, float):
         return value
@@ -794,12 +800,20 @@ def _candidate_dispatch_status(candidate, *, config):
             or any(phrase in plan_reason for phrase in _EXIT_REASON_PHRASES)
         )
     )
-    if exit_like:
+    if exit_like or intent in ("exit", "close") or "exit" in str(candidate.get("reason") or "").lower():
         return {
             "label": "ห้ามเข้า",
             "icon": "⛔",
             "reason_group": "สัญญาณปิดรอบ",
             "reason_detail": "เป็น exit/take-profit/time-stop ใช้ปิดสถานะเดิม ไม่ใช่จุดเปิดไม้ใหม่",
+        }
+    if intent == "avoid":
+        avoid_reason = str(candidate.get("alert_intent_reason") or "ข้ามสัญญาณนี้").strip()
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "ข้ามสัญญาณ",
+            "reason_detail": avoid_reason or "เงื่อนไขไม่ผ่านเกณฑ์เปิดไม้",
         }
 
     metrics = _plan_price_metrics(candidate)
@@ -823,7 +837,9 @@ def _candidate_dispatch_status(candidate, *, config):
 
     in_window, distance_pct, distance_r = _within_entry_window(candidate, config=config)
     if in_window is False:
-        if isinstance(distance_pct, float):
+        if isinstance(distance_pct, float) and isinstance(distance_r, float):
+            detail = f"ราคาห่างจากจุดเข้า {distance_pct:.2f}% ({distance_r:.2f}R) เกินกรอบ entry window"
+        elif isinstance(distance_pct, float):
             detail = f"ราคาห่าง entry {distance_pct:.2f}% แล้ว จึงไม่ควรไล่ราคา"
         elif isinstance(distance_r, float):
             detail = f"ราคาห่าง entry {distance_r:.2f}R แล้ว จึงควรรอราคากลับเข้าโซน"
@@ -856,6 +872,24 @@ def _candidate_dispatch_status(candidate, *, config):
     short_trade_bucket = str(candidate.get("short_trade_bucket") or "").strip().lower()
     short_trade_reason = str(candidate.get("short_trade_reason") or "").strip()
     short_play_watch_reason = str(candidate.get("short_play_watch_reason") or "").strip()
+    if short_trade_bucket == "avoid":
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "เกณฑ์เทรดปฏิเสธ",
+            "reason_detail": short_trade_reason or "ไม่ผ่านเกณฑ์เปิดไม้",
+        }
+
+    sltp_live_bucket = str(candidate.get("sltp_live_bucket") or "").strip().lower()
+    sltp_live_reason = str(candidate.get("sltp_live_reason") or "").strip()
+    if sltp_live_bucket == "avoid":
+        return {
+            "label": "ห้ามเข้า",
+            "icon": "⛔",
+            "reason_group": "SL/TP ไม่ผ่านเกณฑ์",
+            "reason_detail": sltp_live_reason or "Stop Loss หรือ Take Profit ไม่ผ่านเกณฑ์ความปลอดภัย",
+        }
+
     if bool(candidate.get("short_play_watch_candidate")) and intent == "watch":
         return {
             "label": "รอ",
@@ -907,6 +941,74 @@ def _attach_candidate_timing(candidate, *, analysis_dt=None):
     return candidate
 
 
+def _harmonize_rendered_message_with_status(message, status, candidate):
+    if not isinstance(message, str) or not message.strip():
+        return message
+    label = str(status.get("label") or "").strip()
+    if not label:
+        return message
+
+    icon = str(status.get("icon") or "").strip()
+    if not icon:
+        icon = "🟢" if label == "เข้าได้" else ("🟡" if label == "รอ" else "⛔")
+
+    reason_group = str(status.get("reason_group") or "").strip()
+    reason_detail = str(status.get("reason_detail") or "").strip()
+    signal_side = _signal_side(candidate) or "BUY"
+    signal_str = "BUY/Long" if signal_side == "BUY" else "SELL/Short"
+    intent = str(candidate.get("alert_intent") or "").strip().lower()
+
+    if label == "รอ":
+        summary_text = f"{icon} {label}"
+        primary_reason = reason_detail or reason_group or "ยังไม่ใช่จังหวะเปิดไม้ใหม่ทันที"
+        action_text = "ยังไม่เข้า รอราคาใกล้ entry zone หรือรอแท่งยืนยันเพิ่ม"
+        note_text = "ยังไม่ใช่จังหวะเปิดไม้ใหม่ทันที ให้รอจังหวะเข้าเพิ่ม"
+        target_plan_head = "📌 แผน:"
+    elif label == "ห้ามเข้า":
+        summary_text = f"{icon} {label}"
+        primary_reason = reason_detail or reason_group or "เงื่อนไขไม่ผ่านเกณฑ์เปิดไม้"
+        if intent in ("exit", "close") or "ปิดรอบ" in reason_group or "exit" in reason_group.lower():
+            action_text = "สัญญาณนี้ใช้ปิดกำไรหรือลดความเสี่ยง ไม่ใช่จุดเปิดไม้ใหม่"
+        else:
+            action_text = "สัญญาณนี้ใช้ลดความเสี่ยงหรือปิดสถานะเดิม ไม่ใช่จุดเปิดไม้ใหม่"
+        note_text = "ถ้าไม่มีสถานะอยู่แล้วให้ข้ามข้อความนี้"
+        target_plan_head = "📌 แผน:"
+    else:  # เข้าได้
+        summary_text = f"{icon} {label}"
+        primary_reason = "แผนยังใกล้จุดเข้าและมี SL/TP พร้อมใช้งาน"
+        action_text = f"เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด {signal_str} ตามแผนได้"
+        note_text = "วาง SL/TP ตามแผน และไม่ไล่ราคา"
+        target_plan_head = "📌 แผนเข้า:"
+
+    new_lines = []
+    original_has_note = any(l.strip().startswith("<b>⚠️ หมายเหตุ:</b>") for l in message.split("\n"))
+
+    for line in message.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("<b>🎯 สรุป:</b>"):
+            new_lines.append(f"<b>🎯 สรุป:</b> {html.escape(summary_text)}")
+        elif stripped.startswith("<b>📝 เหตุผล:</b>"):
+            new_lines.append(f"<b>📝 เหตุผล:</b> {html.escape(primary_reason)}")
+        elif stripped.startswith("<b>👉 การทำต่อ:</b>"):
+            new_lines.append(f"<b>👉 การทำต่อ:</b> {html.escape(action_text)}")
+            if not original_has_note and note_text:
+                new_lines.append(f"<b>⚠️ หมายเหตุ:</b> {html.escape(note_text)}")
+        elif stripped.startswith("<b>⚠️ หมายเหตุ:</b>"):
+            new_lines.append(f"<b>⚠️ หมายเหตุ:</b> {html.escape(note_text)}")
+        elif stripped.startswith("<b>📌 แผน:</b>") or stripped.startswith("<b>📌 แผนเข้า:</b>"):
+            suffix = stripped.split("</b>", 1)[1] if "</b>" in stripped else ""
+            new_lines.append(f"<b>{target_plan_head}</b>{suffix}")
+        elif stripped.startswith("<b>🧭 หมวดเหตุผล:</b>"):
+            reason_line = " ".join(part for part in (label, reason_group) if part).strip()
+            new_lines.append(f"<b>🧭 หมวดเหตุผล:</b> {html.escape(reason_line)}")
+        elif stripped.startswith("<b>📝 เหตุผลใช้งาน:</b>"):
+            new_lines.append(f"<b>📝 เหตุผลใช้งาน:</b> {html.escape(reason_detail)}")
+        else:
+            new_lines.append(line)
+
+    return "\n".join(new_lines)
+
+
 def _append_dispatch_readiness_lines(message, candidate, *, config):
     if not isinstance(message, str) or not message.strip() or not isinstance(candidate, dict):
         return message
@@ -933,17 +1035,20 @@ def _append_dispatch_readiness_lines(message, candidate, *, config):
             candidate["alert_intent"] = "entry"
             candidate["alert_intent_reason"] = f"dispatch_entry:{reason_group}"
 
+    # Harmonize the rendered message with authoritative dispatch status
+    message = _harmonize_rendered_message_with_status(message, status, candidate)
+
     if "<b>🧭 หมวดเหตุผล:</b>" not in message:
-        label = str(status.get("label") or "").strip()
-        reason_group = str(status.get("reason_group") or "").strip()
-        if label or reason_group:
-            reason_line = " ".join(part for part in (label, reason_group) if part).strip()
+        label_text = str(status.get("label") or "").strip()
+        group_text = str(status.get("reason_group") or "").strip()
+        if label_text or group_text:
+            reason_line = " ".join(part for part in (label_text, group_text) if part).strip()
             if reason_line:
                 message = _insert_message_line_before_footer(message, "<b>🧭 หมวดเหตุผล:</b> " + reason_line)
     if "<b>📝 เหตุผลใช้งาน:</b>" not in message:
-        reason_detail = str(status.get("reason_detail") or "").strip()
-        if reason_detail:
-            message = _insert_message_line_before_footer(message, "<b>📝 เหตุผลใช้งาน:</b> " + reason_detail)
+        detail_text = str(status.get("reason_detail") or "").strip()
+        if detail_text:
+            message = _insert_message_line_before_footer(message, "<b>📝 เหตุผลใช้งาน:</b> " + detail_text)
 
     metrics = _plan_price_metrics(candidate)
     entry_price = _safe_float(metrics.get("entry_price"), None)
@@ -1600,6 +1705,7 @@ def resolve_short_trade_profile(candidate, *, config):
     signal = _signal_side(candidate)
     if signal not in ("BUY", "SELL"):
         return None
+    signal_text = "BUY/Long" if signal == "BUY" else "SELL/Short"
 
     profile = {
         "bucket": "watch",
@@ -1691,7 +1797,7 @@ def resolve_short_trade_profile(candidate, *, config):
                 {
                     "bucket": "watch",
                     "label": "Watch Only",
-                    "reason": "AI ยังไม่มั่นใจพอสำหรับ short entry",
+                    "reason": f"AI ยังไม่มั่นใจพอสำหรับจังหวะ {signal_text}",
                     "score_adjustment": -abs(float(watch_penalty)),
                 }
             )
@@ -1725,11 +1831,20 @@ def resolve_short_trade_profile(candidate, *, config):
                 }
             )
         else:
+            timeframe_minutes = int(candidate.get("timeframe_minutes") or _candidate_timeframe_minutes(candidate) or 15)
+            if (not continuation_fresh) and isinstance(bars_since, float) and bars_since > float(standard_max_bars):
+                detail_reason = f"สัญญาณผ่านไปแล้ว {int(round(bars_since))} แท่ง (~{int(round(bars_since * timeframe_minutes))} นาที) เกินเกณฑ์เปิดไม้สด ({standard_max_bars} แท่ง)"
+            elif isinstance(source_count, (int, float)) and int(source_count) < int(standard_min_sources):
+                detail_reason = f"สัญญาณขาดการยืนยัน (มี {int(source_count)} แหล่ง ต้องการอย่างน้อย {standard_min_sources})"
+            elif isinstance(rr_value, float) and rr_value < float(rr_floor):
+                detail_reason = f"อัตราผลตอบแทนต่อความเสี่ยง (RR {rr_value:.2f}R) ต่ำกว่าเกณฑ์ ({rr_floor:.2f}R)"
+            else:
+                detail_reason = f"คุณภาพจังหวะเข้ายังไม่ครบเกณฑ์เทรดสั้นฝั่ง {signal_text}"
             profile.update(
                 {
                     "bucket": "watch",
                     "label": "Watch Only",
-                    "reason": "คุณภาพจังหวะเข้าไม่ครบสำหรับ short trade",
+                    "reason": detail_reason,
                     "score_adjustment": -abs(float(watch_penalty)),
                 }
             )

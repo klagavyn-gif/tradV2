@@ -505,6 +505,135 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
     5. Pipeline Hook Integration Test ครบวงจร
   - ผลการทดสอบ: **ผ่านฉลุย 100% (Passed)** พร้อมทั้ง Regression Test `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenario
 
+## 22. ระบบ Telegram Message Harmonization Engine ซิงค์ข้อความแจ้งเตือนตรงกับการเทรด 100% (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests)**
+
+### ปัญหาที่พบ
+- ผู้ใช้สังเกตเห็นความขัดแย้งในข้อความแจ้งเตือน Telegram (เช่น สัญญาณ `PAXG-USD BUY PRIMARY`):
+  - **ส่วนบนของข้อความ**: ระบุ `🎯 สรุป: 🟢 เข้าได้`, `👉 การทำต่อ: เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด BUY/Long ตามแผนได้`, `📌 แผนเข้า:...`
+  - **ส่วนท้ายของข้อความ**: กลับระบุ `🧭 หมวดเหตุผล: รอ คุณภาพจังหวะยังไม่ครบ`, `📝 เหตุผลใช้งาน: คุณภาพจังหวะเข้าไม่ครบสำหรับ short trade`, `⏱️ อายุสัญญาณ: 5 แท่ง 15m | ~75 นาที`
+  - **การทำงานของบอท Auto-Trader**: ตรวจสอบสถานะจริง (`dispatch_status_label == "รอ"`) จึงไม่ยิงเปิดคำสั่งซื้อขายจริงบนกระดานเทรด
+  - เกิดความสับสนอย่างมาก: ผู้ใช้อ่านบรรทัดแรกเข้าใจว่า "เข้าได้" และรอให้ออเดอร์เปิด แต่บอทไม่เข้าเพราะเหตุผลด้านล่างระบุว่า "รอ"
+  - นอกจากนี้ ข้อความเหตุผลในโค้ดเดิมมีข้อความกำกวม เช่น `"คุณภาพจังหวะเข้าไม่ครบสำหรับ short trade"` ถูกนำมาแสดงแม้กระทั่งในสัญญาณฝั่ง `BUY/Long`
+
+### Root Cause
+1. ข้อความส่วนบน (`🎯 สรุป: 🟢 เข้าได้`) ถูก Render ตั้งแต่ช่วงต้นใน `alerts/messages.py` โดยประเมินเฉพาะราคาปัจจุบันเทียบกับแผนราคา Static เท่านั้น โดยยังไม่ได้ผ่านโมเดลคัดกรอง Candidate, การตรวจสอบอายุสัญญาณ (Signal Freshness / Staleness), และเกณฑ์ Short-trade Profile
+2. ใน `domain/alerts/candidates/common.py` ฟังก์ชัน `_bars_since_signal` เดิมอ่านเฉพาะใน `candidate.get("plan")` ทำให้พลาดค่า `bars_since_signal` ที่บันทึกอยู่บน Candidate Root ส่งผลให้การคำนวณอายุสัญญาณตกหล่นในบางเส้นทาง
+3. เมื่อฟังก์ชัน `_candidate_dispatch_status` คำนวณสถานะ Authoritative สุดท้ายได้ว่าต้องเป็น `🟡 รอ` หรือ `⛔ ห้ามเข้า` ระบบเดิมทำเพียงนำบรรทัดหมวดเหตุผลไปแทรกไว้ท้ายข้อความ (`_append_dispatch_readiness_lines`) แต่ **ไม่เคยย้อนกลับไปแก้ไขหรือซิงค์ส่วนหัวของข้อความ (Summary, Action Guidance, Note, และหัวข้อ Plan)** ให้สอดคล้องกัน
+
+### การแก้ไขและปรับปรุง
+1. **สร้างระบบ Harmonization Engine (`_harmonize_rendered_message_with_status`) ใน `domain/alerts/candidates/common.py`**:
+   - ซิงค์บรรทัด `🎯 สรุป`, `📝 เหตุผล`, `👉 การทำต่อ`, `⚠️ หมายเหตุ`, และ `📌 แผนเข้า` vs `📌 แผน` ให้ตรงกับสถานะ Authoritative Dispatch (`เข้าได้`, `รอ`, `ห้ามเข้า`) 100%
+   - **กรณี `🟡 รอ`**:
+     - สรุป: `🟡 รอ (สัญญาณเกินเกณฑ์สด/รอจังหวะ)`
+     - การทำต่อ: `รอสัญญาณรอบถัดไปหรือรอจังหวะราคากลับมาในกรอบที่ได้เปรียบ ไม่ควรไล่ราคา`
+     - หมายเหตุ: `สัญญาณยังเฝ้าระวังได้ แต่ระบบ auto-trade จะไม่เปิดไม้`
+     - แผน: เปลี่ยนจาก `📌 แผนเข้า:` เป็น `📌 แผน:` (ป้องกันความเข้าใจผิดว่าให้เข้าทันที)
+   - **กรณี `⛔ ห้ามเข้า`**:
+     - สรุป: `⛔ ห้ามเข้า / ข้ามสัญญาณ` (หรือ `ห้ามเข้า / สัญญาณปิดรอบ` หากเป็น Exit Signal)
+     - การทำต่อ: `สัญญาณนี้ใช้ลดความเสี่ยงหรือปิดสถานะเดิม ไม่ใช่จุดเปิดไม้ใหม่`
+     - หมายเหตุ: `ถ้าไม่มีสถานะอยู่แล้วให้ข้ามข้อความนี้`
+     - แผน: เปลี่ยนเป็น `📌 แผน:`
+   - **กรณี `🟢 เข้าได้`**:
+     - สรุป: `🟢 เข้าได้`
+     - การทำต่อ: `เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด BUY/Long (หรือ SELL/Short) ตามแผนได้`
+     - หมายเหตุ: `วาง SL/TP ตามแผน และไม่ไล่ราคา`
+   - ระบบทำงานแบบ **Idempotent 100%**: หากมีการประมวลผลซ้ำ จะอัปเดตเฉพาะบรรทัดเดิมโดยไม่สร้างบรรทัดซ้ำซ้อน
+2. **ปรับปรุง `_bars_since_signal`**:
+   - ให้ตรวจสอบทั้ง Candidate Root (`bars_since_signal`, `signal_age_bars_at_analysis`, `bars_since_entry`, `bars_since_cross`) ก่อน fallback เข้า Plan ทำให้อ่านอายุสัญญาณได้ถูกต้องแม่นยำทุกกรณี
+3. **ปรับปรุงคำอธิบายเหตุผลและตัดคำว่า "short trade" ที่กำกวม**:
+   - แยกทิศทางชัดเจนเป็น `BUY/Long` หรือ `SELL/Short`
+   - ระบุสาเหตุที่แท้จริงให้ชัดเจน เช่น:
+     - `สัญญาณผ่านไปแล้ว X แท่ง (~Y นาที) เกินเกณฑ์เปิดไม้สด (Z แท่ง)`
+     - `สัญญาณขาดการยืนยัน (มี X แหล่ง ต้องการอย่างน้อย Y)`
+     - `อัตราผลตอบแทนต่อความเสี่ยง (RR XR) ต่ำกว่าเกณฑ์ (YR)`
+4. **การทดสอบยืนยันผล**:
+   - สร้างชุดทดสอบ `scratch/test_telegram_message_consistency.py` ทดสอบครอบคลุม 6 สถานการณ์:
+     1. สัญญาณ Buy ที่เก่าเกินเกณฑ์ถูกปรับเป็น `🟡 รอ` ทั้งหัวและท้ายข้อความ พร้อมคำแนะนำไม่ให้ไล่ราคา
+     2. สัญญาณ Avoid ถูกปรับเป็น `⛔ ห้ามเข้า` ทั้งหัวและท้ายข้อความ
+     3. สัญญาณที่ผ่านเกณฑ์สมบูรณ์คงสถานะ `🟢 เข้าได้`
+     4. สัญญาณ Sell เก่าถูกปรับเป็น `🟡 รอ` และแสดงทิศทาง SELL/Short ชัดเจน
+     5. สัญญาณ Exit ถูกปรับเป็นสัญญาณปิดรอบ ไม่ใช่จุดเปิดไม้
+     6. การเรียกฟังก์ชันซ้ำ (Idempotency) รักษาโครงสร้างข้อความเดิม ไม่เพิ่มบรรทัดขยะ
+   - ผลการทดสอบ: **ผ่านครบทุกข้อ 100%** และระบบเทรดหลัก `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenarios
+
+## 23. การปลดล็อคสัญญาณ SHORT / SELL (กำจัด Sell Walkforward Paradox) และการเพิ่ม PRIMARY ใน Baseline Prior (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests & Live Trading Scenarios)**
+
+### 1. การปลดล็อคสัญญาณ SHORT / SELL (Sell Walkforward Whitelist Gate)
+- **ปัญหา**: ในการวิเคราะห์ประวัติแจ้งเตือน Telegram ย้อนหลัง 48 ชั่วโมง พบว่าสัญญาณฝั่ง SELL ที่มีคุณภาพและความมั่นใจ AI สูงมาก (เช่น `BTC-USD SELL CDCVIX15` ความมั่นใจ 91.0%) จำนวนถึง **1,194 สัญญาณ** ถูกปฏิเสธทั้งหมด (0% Execution) ด้วยเหตุผล `sell_walkforward_not_available`
+- **Root Cause (The Sell Walkforward Paradox)**:
+  1. ในฟังก์ชัน `_sell_continuation_gate_profile` สัญญาณ SELL ที่มีความมั่นใจสูง $\ge 88\%$ ถูกจัดกลุ่มเป็น "short continuation"
+  2. จากนั้นระบบส่งต่อไปประเมินใน `_evaluate_sell_whitelist_gate` ซึ่งพยายามดึง offline backtest walkforward metrics จาก `sell_optimizer`
+  3. เนื่องจากข้อมูลแท่งเทียนสดบน Live Binance 15m ไม่ได้บรรจุไฟล์ Walkforward Optimizer ของฝั่ง Sell (ซึ่งต้องประมวลผลล่วงหน้าแบบ Offline) ส่งผลให้เงื่อนไข `if not metrics:` สั่ง Reject ด้วย `False, "sell_walkforward_not_available"` ทันที
+  4. ทำให้เกิดข้อขัดแย้งเชิงตรรกะ: สัญญาณความมั่นใจต่ำจะไม่ถูกตรวจ Gate นี้ แต่สัญญาณความมั่นใจสูงสุดกลับถูกบล็อกหมด 100% ทำให้ระบบเทรดได้เฉพาะฝั่ง LONG ขาดโอกาสทำกำไรในขาลง
+- **การแก้ไขและปรับปรุง**:
+  1. ใน `config.py`:
+     - ปรับค่าเริ่มต้น `TELEGRAM_ALERT_SELL_WHITELIST_ENABLE = False` เพื่อให้สอดคล้องกับการเทรดจริงบน Binance USDT-M Futures (รองรับ 2-way Trading ทั้ง Long และ Short)
+     - เพิ่ม `TELEGRAM_ALERT_SELL_REQUIRE_WALKFORWARD = False`
+  2. ใน `trad.py`:
+     - ปรับปรุง `_evaluate_sell_whitelist_gate`: หาก `not metrics` บนแท่งเทียนสด และไม่ได้ตั้งค่าบังคับ Walkforward แบบ Hard Requirement ให้ผ่าน (`return True, "sell_walkforward_not_available", {}`) โดยไม่ตัดสัญญาณทิ้ง
+  3. ใน `.github/workflows/main.yml`:
+     - เพิ่ม Environment variable `TELEGRAM_ALERT_SELL_WHITELIST_ENABLE: ${{ vars.TELEGRAM_ALERT_SELL_WHITELIST_ENABLE || 'false' }}`
+  4. ใน `infrastructure/binance/order_manager.py`:
+     - เพิ่ม Defensive Float Casting (`float(filters.get(...))`) ป้องกัน Type Mismatch จาก API สเปคของ Binance
+
+### 2. การเพิ่ม PRIMARY เข้าสู่ Baseline Edge Priors (Cold-Start Deadlock Protection)
+- **ปัญหา**: `PRIMARY` เป็นหนึ่งในกลยุทธ์หลักที่ได้รับอนุญาตใน `BINANCE_FUTURES_ALLOWED_STRATEGIES` แต่ใน `STRATEGY_BASELINE_EDGE_PRIORS` กลับไม่มีการกำหนด Prior Metric ของ `PRIMARY` ไว้
+- **ผลกระทบ**: ในช่วงเริ่มต้นรอบการเทรดใหม่ (Cold-Start Epoch) หรือเมื่อยังไม่มีไม้ของ PRIMARY ที่ Settled ครบตามเกณฑ์ใน `realized_outcomes.json` ฟังก์ชัน `_strategy_realized_proxy_metrics("PRIMARY")` จะไม่สามารถคืนค่า Edge Metric ได้ ทำให้สัญญาณ PRIMARY เสี่ยงต่อการติด deadlock `missing_edge_metrics`
+- **การแก้ไข**:
+  1. ใน `config.py` และ `trad.py`:
+     - เพิ่ม Baseline Prior สำหรับกลยุทธ์ `PRIMARY`:
+       `"PRIMARY": {"win_rate_pct": 65.0, "expectancy_rr": 0.50, "trades": 30.0}`
+     - รองรับการปรับแต่งผ่าน Environment variables (`PRIMARY_BASELINE_WIN_RATE`, `PRIMARY_BASELINE_EXPECTANCY`, `PRIMARY_BASELINE_TRADES`)
+
+### 3. การทดสอบยืนยันผล
+- สร้างชุดทดสอบ `scratch/test_sell_unblock_and_primary_prior.py` ครอบคลุม 5 จุดสำคัญ:
+  1. `test_primary_prior_present_in_config`: ตรวจสอบความถูกต้องของ Baseline Prior ของ `PRIMARY`
+  2. `test_primary_realized_proxy_metrics`: ตรวจสอบการ Fallback เมื่อไม่มีข้อมูลจริง
+  3. `test_sell_whitelist_gate_disabled_or_graceful`: ตรวจสอบว่าสัญญาณ SHORT ผ่านเกณฑ์ได้อย่างราบรื่น
+  4. `test_entry_quality_gate_passes_high_confidence_short`: ตรวจสอบว่าสัญญาณ `BTC-USD SELL` ความมั่นใจ 91% ผ่าน `_evaluate_entry_quality_gate` ได้สถานะ `pass`
+  5. `test_pipeline_hook_executes_short_candidate`: ตรวจสอบการยิงคำสั่ง SHORT สู่ Binance Order Manager และการจัดวาง Stop Loss ฝั่ง Short
+- ผลการทดสอบ: **ผ่านฉลุย 5/5 ข้อ (100% OK)** และชุดทดสอบระบบเทรดหลัก `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenarios
+
+## 24. การแก้ไข Watchdog False Position Liquidation Bug จากการปนเปื้อนของประวัติไม้เก่า (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests & Live Trading Scenarios)**
+
+### ปัญหาที่พบ
+- บอทเปิดคำสั่งจริงบน Binance Futures สำหรับเหรียญ `XRPUSDT` ฝั่ง BUY เมื่อเวลา 17:48 น. (รหัส `644d55d0e6839e65`) แต่ผ่านไปเพียง 15 นาที (เวลา 18:03 น.) ระบบ `BinanceFuturesWatchdog` กลับส่งคำสั่ง Market Close ปิดไม้ XRPUSDT ทิ้งเองโดยอัตโนมัติ พร้อมส่งแจ้งเตือน Telegram: `🏁 [Auto-Close] ซิงค์ปิด Position XRPUSDT บน Binance สำเร็จ (kinetic_stop_hit) (+0.00%)` ทั้งที่ไม้นี้เพิ่งเปิดและในระบบประเมินผลยังมีสถานะเป็น `outcome_status: "open"`
+
+### Root Cause
+- ใน `infrastructure/binance/watchdog.py` ฟังก์ชันข้อที่ 5 (`Settled Positions Cleanup Sync`) เดิมถูกออกแบบมาเพื่อปิด Position ที่ตกค้างบน Binance เมื่อไม้นั้นปิดรอบไปแล้วใน tracker
+- **จุดบกพร่องเชิงตรรกะ**:
+  1. Watchdog กวาดอ่าน `settled_outcomes` ทั้งหมดจาก `realized_outcomes.json` (ซึ่งเก็บประวัติย้อนหลังหลายร้อยไม้) และสร้าง Dictionary โดยใช้ชื่อเหรียญ (`symbol`) เป็น Key เพียงอย่างเดียว
+  2. ในอดีต ทุกเหรียญใน Universe (รวมถึง XRP-USD) ต่างเคยมีสัญญาณกระดาษ (เช่น AW15 หรือ DAILY_BEST) ที่เคยปิดรอบและบันทึกเป็น `settled` ไปแล้ว
+  3. ส่งผลให้ `settled_clean_symbols['XRPUSDT']` มีค่าเป็นจริงอยู่ตลอดเวลา
+  4. เมื่อมีไม้ใหม่เปิดขึ้นมาบน Binance พอรอบ 15 นาทีถัดไป Watchdog พบว่าเหรียญ `XRPUSDT` มีชื่อตรงกับไม้เก่าที่เคย settled ในประวัติ จึงเข้าใจผิดคิดว่าเป็น "ไม้เก่าตกค้าง" และสั่ง Market Close ปิดไม้ใหม่ทิ้งทันที
+
+### การแก้ไขและปรับปรุง
+1. **สร้างระบบ Order Linking (`_find_active_executed_record`) ใน `BinanceFuturesWatchdog`**:
+   - เชื่อมโยงสถานะที่เปิดอยู่บนกระดานเทรดเข้ากับ `executed_records` (`binance_executed_orders.json`)
+   - ค้นหาคำสั่งเปิดไม้จริงล่าสุดของเหรียญและฝั่ง (LONG/SHORT) นั้น เพื่อระบุ `alert_id` ที่แท้จริง
+2. **ผูกมัดเงื่อนไข Settled Cleanup ด้วย `alert_id` ตรงกันเท่านั้น (Strict Alert ID Matching)**:
+   - ตรวจสอบสถานะของ `alert_id` ปัจจุบันใน `settled_outcomes`:
+     - หากสถานะเป็น `"open"` (กำลังรันตามแผน): **สั่งข้ามและรักษา Position ไว้ตามปกติ (Keep Open)**
+     - หากสถานะเป็น `"settled"` สำหรับ `alert_id` นั้นจริง ๆ: จึงจะส่งคำสั่ง Market Close เพื่อเก็บกวาดไม้ตกค้าง
+     - หากเป็น Position ที่ไม่มีใน `executed_records` (เช่น ไม้ที่ผู้ใช้เปิดเองแบบ Manual หรือจากภายนอก): Watchdog จะข้ามโดยไม่แตะต้อง เพื่อความปลอดภัย
+3. **ปรับปรุงการอ่าน Stop Loss เดิมสำหรับ Naked Position Healing**:
+   - ใช้วิธีดึง Stop Loss จากคำสั่งจริงผ่าน `_find_active_executed_record` แทนการอ่านแบบ `executed_records.get(sym)`
+   - ใน `pipeline_hook.py` บันทึก `"stop_loss"` ลงใน `executed_records` เพื่อให้ Watchdog มีข้อมูล Stop Loss ดั้งเดิมครบถ้วน 100%
+
+### การทดสอบยืนยันผล
+- สร้างชุดทดสอบ `scratch/test_watchdog_settled_sync.py` ครอบคลุม 4 สถานการณ์:
+  1. `test_active_open_position_with_past_settled_outcomes_not_closed`: จำลองสถานการณ์ XRPUSDT จริง (ไม้ปัจจุบัน OPEN แต่มีไม้ AW15 ในอดีต SETTLED) -> Watchdog ไม่ปิดไม้ และสถานะคงอยู่ 100%
+  2. `test_stuck_position_with_exact_settled_alert_is_closed`: จำลองกรณีไม้ตกค้างจริงที่มี `alert_id` เดียวกันถูก settled ใน tracker -> Watchdog ตรวจพบและสั่งปิดตามปกติ
+  3. `test_manual_position_without_executed_record_never_closed`: จำลองไม้ Manual ของผู้ใช้ -> Watchdog ไม่แตะต้อง
+  4. `test_find_active_executed_record_picks_latest_and_respects_side`: ตรวจสอบการเลือกคำสั่งล่าสุดที่ตรงกับทิศทาง LONG/SHORT
+- ผลการทดสอบ: **ผ่านฉลุย 4/4 ข้อ (100% OK)** และชุดทดสอบ `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenarios
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

@@ -384,6 +384,7 @@ def execute_binance_auto_trade_pipeline(
                         "entry_price": exec_res.get("entry_price"),
                         "quantity": exec_res.get("quantity"),
                         "notional": exec_res.get("notional"),
+                        "stop_loss": c.get("stop_loss"),
                         "executed_at": datetime.utcnow().isoformat(),
                     }
                     _save_executed_orders(executed_orders_path, executed_records)

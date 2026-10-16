@@ -1288,6 +1288,7 @@ def _strategy_realized_proxy_metrics(strategy):
             "CDCVIX15": {"win_rate_pct": 60.0, "expectancy_rr": 0.45, "trades": 30.0},
             "PA15": {"win_rate_pct": 58.0, "expectancy_rr": 0.35, "trades": 25.0},
             "AW15": {"win_rate_pct": 60.0, "expectancy_rr": 0.45, "trades": 30.0},
+            "PRIMARY": {"win_rate_pct": 65.0, "expectancy_rr": 0.50, "trades": 30.0},
         },
     )
     if isinstance(priors, dict) and target_code in priors:
@@ -2620,7 +2621,7 @@ def _evaluate_walkforward_gate(plan, signal):
 
 
 def _evaluate_sell_whitelist_gate(plan):
-    enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_WHITELIST_ENABLE", True))
+    enabled = bool(getattr(config, "TELEGRAM_ALERT_SELL_WHITELIST_ENABLE", False))
     if not enabled:
         return True, "sell_whitelist_disabled", {}
     continuation_profile = _sell_continuation_gate_profile(plan, "SELL")
@@ -2628,6 +2629,8 @@ def _evaluate_sell_whitelist_gate(plan):
         return True, "sell_whitelist_not_applicable", {}
     metrics = _extract_walkforward_metrics(plan, optimizer_key="sell_optimizer")
     if not metrics:
+        if not bool(getattr(config, "TELEGRAM_ALERT_SELL_REQUIRE_WALKFORWARD", False)):
+            return True, "sell_walkforward_not_available", {}
         return False, "sell_walkforward_not_available", {}
     min_wr = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_WIN_RATE", 60.0)
     min_exp = getattr(config, "TELEGRAM_ALERT_SELL_WALKFORWARD_MIN_EXPECTANCY_RR", 0.05)

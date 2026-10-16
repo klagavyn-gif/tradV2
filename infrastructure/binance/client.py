@@ -216,6 +216,14 @@ class BinanceFuturesClient:
                 })
         return open_positions
 
+    def get_user_trades(self, symbol: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Fetch recently executed user trades for a symbol to retrieve exact fill price and realized PnL."""
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        res = self._request("GET", "/fapi/v1/userTrades", params={"symbol": clean_sym, "limit": limit}, signed=True)
+        if res.get("success") and isinstance(res.get("data"), list):
+            return res.get("data", [])
+        return []
+
     # --- Configuration ---
 
     def set_leverage(self, symbol: str, leverage: int = 1) -> Dict[str, Any]:

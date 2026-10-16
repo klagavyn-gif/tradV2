@@ -631,8 +631,40 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   1. `test_active_open_position_with_past_settled_outcomes_not_closed`: จำลองสถานการณ์ XRPUSDT จริง (ไม้ปัจจุบัน OPEN แต่มีไม้ AW15 ในอดีต SETTLED) -> Watchdog ไม่ปิดไม้ และสถานะคงอยู่ 100%
   2. `test_stuck_position_with_exact_settled_alert_is_closed`: จำลองกรณีไม้ตกค้างจริงที่มี `alert_id` เดียวกันถูก settled ใน tracker -> Watchdog ตรวจพบและสั่งปิดตามปกติ
   3. `test_manual_position_without_executed_record_never_closed`: จำลองไม้ Manual ของผู้ใช้ -> Watchdog ไม่แตะต้อง
-  4. `test_find_active_executed_record_picks_latest_and_respects_side`: ตรวจสอบการเลือกคำสั่งล่าสุดที่ตรงกับทิศทาง LONG/SHORT
+  4. `test_manual_position_without_executed_record_never_closed`: ตรวจสอบการเลือกคำสั่งล่าสุดที่ตรงกับทิศทาง LONG/SHORT
 - ผลการทดสอบ: **ผ่านฉลุย 4/4 ข้อ (100% OK)** และชุดทดสอบ `test_live_trading_edge_cases.py` ผ่านครบ 7/7 Scenarios
+
+## 25. การยกระดับระบบสรุปบัญชีการปิดไม้ (Full Trade Close Receipts & Reconciled Accounting)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified)**
+
+### ปัญหาเดิม
+- เมื่อไม้ถูกปิดโดย Watchdog (เช่น ซิงค์ไม้ตกค้าง หรือปิดฉุกเฉิน) หรือถูกปิดบนกระดาน Binance ระหว่างรอบ 15 นาที ระบบไม่มีการสรุปบัญชีการเงินที่ละเอียด
+- ผู้ใช้เห็นเพียงการแจ้งเตือนสั้นๆ 1 บรรทัดในกล่องรายงานการซ่อมว่า `• 🏁 [Auto-Close] ซิงค์ปิด Position ค้าง ... สำเร็จ` โดยไม่มีการแจกแจงราคาต้นทุนเข้า, ราคาปิดจริง, กำไร/ขาดทุนเป็นเงินดอลลาร์ USDT, อัตรา ROI %, ค่าธรรมเนียม, หรือยอดเงินคงเหลือในพอร์ต
+- หากไม้ปิดบนกระดาน Binance ผ่าน Exchange STOP_MARKET ระหว่างที่บอทหลับ ระบบหลักจะรอแท่งเทียนใน klines ส่งผลให้เกิดความล่าช้า หรือหาก klines ไม่แตะ SL สถิติจะค้างเป็น `open`
+
+### การแก้ไขและยกระดับ
+1. **เพิ่มฟังก์ชัน `get_user_trades` ใน `infrastructure/binance/client.py`**:
+   - รองรับการดึงข้อมูลการจับคู่คำสั่งจริง (`/fapi/v1/userTrades`) เพื่ออ่านราคาเฉลี่ยที่ปิดจริง (`price`), กำไร/ขาดทุนสะสมจริงจาก Matching Engine (`realizedPnl`), และค่าธรรมเนียม (`commission`)
+2. **ระบบออกใบเสร็จสรุปผลการปิดไม้แบบโปร่งใส (Full Financial Close Receipt)**:
+   - ฟังก์ชัน `format_position_close_receipt` ใน `infrastructure/binance/watchdog.py`:
+     - แจกแจงต้นทุนเข้า (`Entry Price`), ราคาปิดจริง (`Exit Price`), อัตราผลตอบแทน (`PnL %`)
+     - กำไร/ขาดทุนสุทธิเป็นเงินจริง (`dollar_pnl` ในหน่วย USDT)
+     - อัตราผลตอบแทนต่อเงินทุนค้ำประกัน (`ROI %` บน Margin)
+     - ประมาณการค่าธรรมเนียม Taker Fee (-0.10% round-trip) และ PnL สุทธิหลังหัก Fee
+     - ยอดเงินคงเหลือในพอร์ต Binance ล่าสุด (`Available` และ `Total USDT Balance`)
+     - ลิงก์ตรง TradingView และระบุสาเหตุการปิดอย่างชัดเจน
+3. **ระบบ Closed Position Reconciliation Sync (Step 5B ใน Watchdog)**:
+   - ตรวจจับไม้ใน `executed_records` ที่ไม่มี Position ค้างบน Binance แล้ว (ถูกปิดโดย Stop Loss/Trailing Stop หรือผู้ใช้ปิดมือบนแอป)
+   - ดึงข้อมูลการปิดจริงมาออกใบเสร็จและซิงค์สถานะเป็น `settled` ใน `realized_outcomes.json` และ `notified_closes.json` ทันที
+4. **เชื่อมต่อ LiveCardStore ใน `pipeline_hook.py`**:
+   - ส่งใบเสร็จปิดไม้แบบ Reply Thread เข้าใต้การ์ดแจ้งเตือนเปิดไม้เดิมบน Telegram ทันที เพื่อให้ประวัติการเทรดเป็นระเบียบสมบูรณ์
+
+### การทดสอบยืนยันผล
+- สร้างชุดทดสอบ `scratch/test_trade_close_receipts.py`:
+  1. `test_step5_market_close_produces_detailed_accounting_receipt`: ตรวจสอบการคำนวณและออกใบเสร็จสรุปผลเมื่อ Watchdog สั่งปิดไม้
+  2. `test_step5b_reconciles_externally_closed_position`: ตรวจสอบการตรวจจับและสรุปบัญชีไม้ที่ปิดบนกระดานจริงอัตโนมัติ
+- ผลการทดสอบ: **ผ่าน 100% ครบทุกกรณี**
 
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
@@ -643,3 +675,4 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+

@@ -98,6 +98,7 @@ class BinanceFuturesWatchdog:
             "available_balance": 0.0,
             "total_unrealized_pnl": 0.0,
             "margin_utilization_pct": 0.0,
+            "closed_positions_details": [],
         }
 
         # 0. Account Balances
@@ -374,12 +375,79 @@ class BinanceFuturesWatchdog:
                     pnl_pct = outcome_row.get("pnl_pct")
                     pnl_str = f" ({pnl_pct:+.2f}%)" if isinstance(pnl_pct, (int, float)) else ""
 
+                    entry_price = float(pos_entry.get("entry_price") or active_rec.get("entry_price") or 0.0) if pos_entry else float(active_rec.get("entry_price") or 0.0)
+                    pos_amt = float(pos_entry.get("amount") or active_rec.get("quantity") or 0.0) if pos_entry else float(active_rec.get("quantity") or 0.0)
+                    leverage = int(pos_entry.get("leverage") or self.target_leverage) if pos_entry else self.target_leverage
+
                     logger.warning(
                         "[Watchdog] Position %s (alert %s) has settled in tracker (%s) but position is still lingering on Binance. Executing market close...",
                         a_sym, active_aid, exit_reason
                     )
                     close_res = self.client.close_position_market(a_sym)
                     if close_res.get("success"):
+                        order_data = close_res.get("data", {})
+                        avg_price_raw = float(order_data.get("avgPrice") or 0.0)
+                        exec_qty = float(order_data.get("executedQty") or 0.0)
+                        cum_quote = float(order_data.get("cumQuote") or 0.0)
+
+                        if avg_price_raw > 0:
+                            exit_price = avg_price_raw
+                        elif exec_qty > 0 and cum_quote > 0:
+                            exit_price = cum_quote / exec_qty
+                        else:
+                            exit_price = float(pos_entry.get("mark_price") or 0.0) if pos_entry else 0.0
+                            if exit_price <= 0:
+                                try:
+                                    exit_price = float(self.client.get_symbol_price(a_sym) or entry_price)
+                                except Exception:
+                                    exit_price = entry_price
+
+                        if entry_price > 0 and exit_price > 0:
+                            if pos_side == "LONG":
+                                calc_pnl_pct = ((exit_price - entry_price) / entry_price) * 100.0
+                            else:
+                                calc_pnl_pct = ((entry_price - exit_price) / entry_price) * 100.0
+                        else:
+                            calc_pnl_pct = float(outcome_row.get("pnl_pct") or 0.0)
+
+                        notional = (pos_amt * exit_price) if (pos_amt > 0 and exit_price > 0) else float(active_rec.get("notional") or 400.0)
+                        margin = notional / max(1, leverage)
+                        dollar_pnl = (calc_pnl_pct / 100.0) * notional
+                        fee_est = notional * 0.001  # ~0.10% round-trip taker fee
+                        net_dollar_pnl = dollar_pnl - fee_est
+                        roi_pct = calc_pnl_pct * leverage
+
+                        try:
+                            fresh_bal = self.client.get_usdt_balance()
+                        except Exception:
+                            fresh_bal = {}
+
+                        close_detail = {
+                            "symbol": a_sym,
+                            "alert_id": active_aid,
+                            "side": pos_side or "LONG",
+                            "amount": pos_amt,
+                            "entry_price": entry_price,
+                            "exit_price": exit_price,
+                            "pnl_pct": calc_pnl_pct,
+                            "dollar_pnl": dollar_pnl,
+                            "margin": margin,
+                            "roi_pct": roi_pct,
+                            "fee_est": fee_est,
+                            "net_dollar_pnl": net_dollar_pnl,
+                            "exit_reason": exit_reason,
+                            "balance_after": fresh_bal,
+                            "order_id": order_data.get("orderId"),
+                            "is_reconciled": False,
+                        }
+                        report.setdefault("closed_positions_details", []).append(close_detail)
+
+                        # Update executed record status
+                        active_rec["status"] = "closed"
+                        active_rec["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                        active_rec["exit_price"] = exit_price
+                        active_rec["exit_reason"] = exit_reason
+
                         close_msg = f"🏁 [Auto-Close] ซิงค์ปิด Position ค้าง {a_sym} ({active_aid[:8]}) บน Binance สำเร็จ ({exit_reason}){pnl_str}"
                         report["healed_actions"].append(close_msg)
                         # Remove from active positions report
@@ -392,6 +460,120 @@ class BinanceFuturesWatchdog:
                         "[Watchdog] Position %s (alert %s) has no settled outcome record. Keeping position open.",
                         a_sym, active_aid
                     )
+
+        # 5B. Closed Position Reconciliation Sync
+        # Detect executed bot orders in executed_records that are no longer in active_symbols
+        # (i.e. position has closed on Binance via Stop Loss, Trailing Stop, or manual close).
+        if executed_records:
+            for aid, rec in list(executed_records.items()):
+                if not isinstance(rec, dict) or rec.get("status") == "closed":
+                    continue
+                rec_sym = str(rec.get("symbol") or "").replace("-", "").replace("/", "").upper()
+                if not rec_sym:
+                    continue
+                # If this symbol is NOT in active_symbols, the position is no longer open on Binance!
+                if rec_sym not in active_symbols:
+                    # Check if this aid was already included in this report
+                    if any(c.get("alert_id") == aid for c in report.get("closed_positions_details", [])):
+                        continue
+
+                    already_settled = False
+                    if settled_outcomes:
+                        already_settled = any(
+                            str(row.get("alert_id") or "").strip() == aid and str(row.get("outcome_status") or "").strip().lower() == "settled"
+                            for row in settled_outcomes if isinstance(row, dict)
+                        )
+
+                    if not already_settled:
+                        logger.info(
+                            "[Watchdog] Executed order %s (%s) is no longer an open position on Binance. Reconciling close...",
+                            rec_sym, aid[:8]
+                        )
+                        trades = []
+                        if hasattr(self.client, "get_user_trades"):
+                            try:
+                                trades = self.client.get_user_trades(rec_sym, limit=3)
+                            except Exception as e:
+                                logger.warning("[Watchdog] Failed to get user trades for %s: %s", rec_sym, e)
+
+                        exit_trade = None
+                        for t in trades:
+                            if float(t.get("realizedPnl") or 0.0) != 0:
+                                exit_trade = t
+                                break
+                        if not exit_trade and trades:
+                            exit_trade = trades[0]
+
+                        entry_p = float(rec.get("entry_price") or 0.0)
+                        qty = float(rec.get("quantity") or 0.0)
+                        notional = float(rec.get("notional") or (entry_p * qty if entry_p and qty else 400.0))
+                        leverage = self.target_leverage
+                        margin = notional / max(1, leverage)
+
+                        if exit_trade:
+                            exit_p = float(exit_trade.get("price") or 0.0)
+                            dollar_pnl = float(exit_trade.get("realizedPnl") or 0.0)
+                            fee = float(exit_trade.get("commission") or (notional * 0.0005))
+                        else:
+                            try:
+                                exit_p = float(self.client.get_symbol_price(rec_sym) or entry_p)
+                            except Exception:
+                                exit_p = entry_p
+                            dollar_pnl = 0.0
+                            fee = notional * 0.0005
+
+                        if entry_p > 0 and exit_p > 0:
+                            if str(rec.get("signal")).upper() == "BUY":
+                                pnl_pct = ((exit_p - entry_p) / entry_p) * 100.0
+                            else:
+                                pnl_pct = ((entry_p - exit_p) / entry_p) * 100.0
+                        else:
+                            pnl_pct = 0.0
+
+                        if dollar_pnl == 0.0 and pnl_pct != 0.0:
+                            dollar_pnl = (pnl_pct / 100.0) * notional
+
+                        roi_pct = pnl_pct * leverage
+                        net_dollar_pnl = dollar_pnl - fee
+
+                        # Infer reason
+                        sl_price = float(rec.get("stop_loss") or 0.0)
+                        if sl_price > 0 and abs(exit_p - sl_price) / sl_price < 0.01:
+                            reason = "stop_loss_hit"
+                        elif dollar_pnl > 0:
+                            reason = "take_profit_hit"
+                        elif dollar_pnl < 0:
+                            reason = "stop_loss_hit"
+                        else:
+                            reason = "breakeven_stop_hit"
+
+                        try:
+                            fresh_bal = self.client.get_usdt_balance()
+                        except Exception:
+                            fresh_bal = {}
+
+                        close_detail = {
+                            "symbol": rec_sym,
+                            "alert_id": aid,
+                            "side": "LONG" if str(rec.get("signal")).upper() == "BUY" else "SHORT",
+                            "amount": qty,
+                            "entry_price": entry_p,
+                            "exit_price": exit_p,
+                            "pnl_pct": pnl_pct,
+                            "dollar_pnl": dollar_pnl,
+                            "margin": margin,
+                            "roi_pct": roi_pct,
+                            "fee_est": fee,
+                            "net_dollar_pnl": net_dollar_pnl,
+                            "exit_reason": reason,
+                            "balance_after": fresh_bal,
+                            "is_reconciled": True,
+                        }
+                        report.setdefault("closed_positions_details", []).append(close_detail)
+
+                    # Mark record as closed
+                    rec["status"] = "closed"
+                    rec["closed_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         return report
 
@@ -447,3 +629,77 @@ class BinanceFuturesWatchdog:
 
         lines.append(f"🕒 <i>ตรวจสอบเมื่อ: {audit_result.get('timestamp')}</i>")
         return "\n".join(lines)
+
+    @staticmethod
+    def format_position_close_receipt(details: Dict[str, Any], testnet: bool = True) -> str:
+        """
+        Format a professional, transparent Trade Close Receipt on Telegram
+        accounting for Entry Price, Exit Price, PnL %, Net Dollar USDT, Margin, ROI %,
+        Commission, and live Binance Account Balance.
+        """
+        env_badge = "🧪 [Testnet Binance]" if testnet else "⚡ [พอร์ตจริง Binance]"
+        sym = str(details.get("symbol") or "—").upper()
+        side = str(details.get("side") or "—").upper()
+        aid = str(details.get("alert_id") or "—")[:8]
+        entry_p = details.get("entry_price")
+        exit_p = details.get("exit_price")
+        pnl_pct = details.get("pnl_pct")
+        dollar_pnl = details.get("dollar_pnl")
+        net_pnl = details.get("net_dollar_pnl")
+        roi_pct = details.get("roi_pct")
+        margin = details.get("margin")
+        fee_est = details.get("fee_est")
+        bal = details.get("balance_after", {})
+        raw_reason = str(details.get("exit_reason") or "settled")
+        is_reconciled = bool(details.get("is_reconciled", False))
+
+        # Import helper for exit reason translation if available
+        try:
+            from alerts.reporting import _trade_close_exit_reason_label
+            reason_label = _trade_close_exit_reason_label(raw_reason)
+            if reason_label == "—":
+                reason_label = raw_reason
+        except Exception:
+            reason_label = raw_reason
+
+        dp = float(dollar_pnl or 0.0)
+        icon = "🟢" if dp > 0 else "🔴" if dp < 0 else "🛡️"
+        res_label = "ชนะ (กำไร)" if dp > 0 else "ขาดทุน" if dp < 0 else "เสมอตัว (กันทุน)"
+
+        close_mode = "ปิดบนกระดาน/คำสั่งอัตโนมัติ" if is_reconciled else "ปิดด้วย MARKET (Watchdog Sync)"
+
+        lines = [
+            f"{icon} <b>{env_badge} ใบเสร็จสรุปผลการปิดไม้ — {res_label}</b>",
+            "────────────────",
+            f"<b>เหรียญ:</b> {sym} | <b>ฝั่ง:</b> {side} ({close_mode})",
+            f"<b>สาเหตุที่ปิด:</b> {reason_label}",
+            f"<b>Alert ID:</b> <code>{aid}</code>",
+        ]
+        if isinstance(entry_p, (int, float)) and entry_p > 0:
+            lines.append(f"<b>ต้นทุนเข้า (Entry):</b> {entry_p:,.6g}")
+        if isinstance(exit_p, (int, float)) and exit_p > 0:
+            lines.append(f"<b>ราคาปิดจริง (Exit):</b> {exit_p:,.6g}")
+        if isinstance(pnl_pct, (int, float)):
+            lines.append(f"<b>ผลตอบแทน (PnL):</b> {pnl_pct:+.2f}%")
+        if isinstance(dollar_pnl, (int, float)):
+            margin_str = f" บน Margin {margin:.1f} USDT" if isinstance(margin, (int, float)) and margin > 0 else ""
+            roi_str = f" ({roi_pct:+.1f}%{margin_str})" if isinstance(roi_pct, (int, float)) else ""
+            lines.append(f"<b>กำไร/ขาดทุนสุทธิ:</b> {dollar_pnl:+.2f} USDT{roi_str}")
+        if isinstance(fee_est, (int, float)) and fee_est > 0:
+            lines.append(f"<b>ค่าธรรมเนียมประมาณการ:</b> -{fee_est:.2f} USDT (Taker Fee)")
+            if isinstance(net_pnl, (int, float)):
+                lines.append(f"<b>PnL สุทธิหลังหัก Fee:</b> {net_pnl:+.2f} USDT")
+        if isinstance(bal, dict) and bal.get("total", 0) > 0:
+            lines.append(f"💰 <b>ยอดเงินคงเหลือในพอร์ต:</b> {bal.get('available', 0):,.2f} USDT (รวม {bal.get('total', 0):,.2f} USDT)")
+
+        lines.append("────────────────")
+        lines.append(f"🕒 <b>เวลา:</b> {time.strftime('%Y-%m-%d %H:%M')}")
+        tv_symbol = sym.replace("-", "").replace("/", "")
+        lines.append(f"<a href=\"https://th.tradingview.com/chart/?symbol=CRYPTO:{tv_symbol}\">📈 TradingView</a>")
+        return "\n".join(lines)
+
+
+def format_position_close_receipt(details: Dict[str, Any], testnet: bool = True) -> str:
+    """Module-level alias for BinanceFuturesWatchdog.format_position_close_receipt."""
+    return BinanceFuturesWatchdog.format_position_close_receipt(details, testnet=testnet)
+

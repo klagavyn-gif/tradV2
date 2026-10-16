@@ -169,6 +169,67 @@ def execute_binance_auto_trade_pipeline(
         )
         results["watchdog_report"] = watchdog_report
 
+        # 1.1 Process any closed position receipts from Watchdog (with full financial transparency)
+        closed_details = watchdog_report.get("closed_positions_details", [])
+        if closed_details:
+            from .watchdog import format_position_close_receipt
+            from infrastructure.notifications.telegram_gateway import LiveCardStore
+            live_store = LiveCardStore()
+
+            for d in closed_details:
+                aid = d.get("alert_id")
+                sym = d.get("symbol")
+
+                # Format and send close receipt
+                receipt_msg = format_position_close_receipt(d, testnet=testnet)
+                if callable(send_telegram_alert) and receipt_msg:
+                    try:
+                        card = live_store.get_card(symbol=sym)
+                        reply_id = card.get("message_id") if card else None
+                        send_telegram_alert(receipt_msg, reply_to_message_id=reply_id)
+                    except Exception as ex:
+                        logger.warning("Failed to send close receipt for %s: %s", sym, ex)
+
+                # Sync outcome status to realized_outcomes.json
+                try:
+                    if os.path.exists(outcomes_path):
+                        with open(outcomes_path, "r", encoding="utf-8") as f:
+                            pld = json.load(f)
+                        if isinstance(pld, dict) and "outcomes" in pld:
+                            for row in pld["outcomes"]:
+                                if str(row.get("alert_id") or "").strip() == aid:
+                                    row["outcome_status"] = "settled"
+                                    row["exit_reason"] = d.get("exit_reason", "settled")
+                                    row["exit_price"] = d.get("exit_price")
+                                    row["pnl_pct"] = d.get("pnl_pct")
+                                    row["settled_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                                    break
+                            with open(outcomes_path, "w", encoding="utf-8") as f:
+                                json.dump(pld, f, indent=2, ensure_ascii=False)
+                except Exception as ex:
+                    logger.warning("Failed to sync closed outcome to %s: %s", outcomes_path, ex)
+
+                # Add to notified_closes.json so regular reporting doesn't re-notify
+                try:
+                    notified_path = os.path.join(os.path.dirname(outcomes_path), "notified_closes.json")
+                    if os.path.exists(notified_path):
+                        with open(notified_path, "r", encoding="utf-8") as f:
+                            notif_pld = json.load(f)
+                    else:
+                        notif_pld = {"notified_alert_ids": []}
+                    if aid and aid not in notif_pld.get("notified_alert_ids", []):
+                        notif_pld.setdefault("notified_alert_ids", []).append(aid)
+                        with open(notified_path, "w", encoding="utf-8") as f:
+                            json.dump(notif_pld, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+
+                # Save updated executed_records (with status="closed")
+                try:
+                    _save_executed_orders(executed_orders_path, executed_records)
+                except Exception:
+                    pass
+
         # If any healing action, issue, or warning was discovered, send Telegram alert immediately!
         if (watchdog_report.get("healed_actions") or watchdog_report.get("issues_detected") or watchdog_report.get("warnings")) and callable(send_telegram_alert):
             tg_msg = watchdog.format_telegram_alert(watchdog_report)

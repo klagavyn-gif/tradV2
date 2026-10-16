@@ -1251,6 +1251,14 @@ def _trade_close_exit_reason_label(exit_reason):
         return "กระทบหยุดขาดทุน (SL)"
     if text in ("time_exit", "time_stop", "time_stop_exit"):
         return "หมดเวลา Hold Plan"
+    if text in ("opposite_signal", "opposite_close"):
+        return "ปิดตามสัญญาณกลับตัว (Opposite Signal)"
+    if text in ("watchdog_sync", "stuck_sync", "stuck_position", "stuck_position_sync"):
+        return "ระบบซิงค์ปิดสถานะค้าง (Watchdog Sync)"
+    if text in ("manual_close", "external_close"):
+        return "ปิดสถานะบนกระดาน/แอปภายนอก (Manual Close)"
+    if text in ("emergency_defense", "liquidation_defense"):
+        return "ปิดฉุกเฉินป้องกันความเสี่ยง (Emergency Defense)"
     if text in ("invalid_stop_direction",):
         return "ข้อมูล Stop ผิดด้าน"
     if text in ("missing_entry_or_stop",):

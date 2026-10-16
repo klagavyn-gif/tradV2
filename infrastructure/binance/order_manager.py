@@ -66,7 +66,7 @@ class BinanceFuturesOrderManager:
         risk_manager: Optional[Any] = None,
         max_entry_drift_pct: float = 0.80,
         kinetic_enabled: bool = True,
-        kinetic_min_seconds: float = 7200.0,
+        kinetic_min_seconds: float = 21600.0,
         kinetic_min_r: float = 0.60,
     ):
         self.client = client
@@ -305,7 +305,7 @@ class BinanceFuturesOrderManager:
         """
         Scan open positions and adjust STOP_MARKET to Entry (Breakeven):
         1. When markPrice has reached breakeven_r (e.g. >= 1.2R) - Profit Target Breakeven.
-        2. When position age >= kinetic_min_seconds (e.g. 7200s / 2 hours) and gain_r < kinetic_min_r
+        2. When position age >= kinetic_min_seconds (e.g. 21,600s / 6 hours, up to 28,800s / 8 hours) and gain_r < kinetic_min_r
            (e.g. < 0.60R) and markPrice is safely at/above entry (for LONG) or at/below entry (for SHORT)
            - Kinetic Half-Life Stop (protecting capital from temporal momentum decay).
         """

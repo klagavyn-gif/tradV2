@@ -130,7 +130,7 @@ def execute_binance_auto_trade_pipeline(
         risk_manager=risk_mgr,
         max_entry_drift_pct=float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80)),
         kinetic_enabled=bool(getattr(config, "BINANCE_FUTURES_KINETIC_STOP_ENABLED", True)),
-        kinetic_min_seconds=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_SECONDS", 7200.0)),
+        kinetic_min_seconds=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_SECONDS", 21600.0)),
         kinetic_min_r=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_R", 0.60)),
     )
 

@@ -372,11 +372,68 @@ def test_pipeline_hook_integration():
                 pass
 
 
+def test_extended_holding_window():
+    print("\n--- [Test 5] Testing Extended Holding Window (6-8h, 24-32 bars) ---")
+    mock_client = MagicMock()
+
+    # 1. Verify default values in Order Manager
+    mgr_default = BinanceFuturesOrderManager(client=mock_client)
+    assert mgr_default.kinetic_min_seconds == 21600.0, f"Expected 21600.0s (6h), got {mgr_default.kinetic_min_seconds}"
+
+    # 2. Position held for 3.5 hours (12,600s) -> should NOT trigger kinetic stop
+    pos_mid = [{
+        "symbol": "ETHUSDT",
+        "side": "LONG",
+        "entryPrice": 2472.60,
+        "markPrice": 2480.00,  # small gain (< 0.60R)
+        "amount": 0.5,
+    }]
+    mock_client.get_positions.return_value = pos_mid
+    mock_client.get_open_algo_orders.return_value = [
+        {"orderType": "STOP_MARKET", "triggerPrice": 2435.0, "algoId": 1001, "clientAlgoId": "trad_sl_1"}
+    ]
+    mock_client.get_symbol_filters.return_value = {"tickSize": 0.01, "stepSize": 0.001}
+
+    rec_3_5h = {
+        "alert_eth": {
+            "symbol": "ETHUSDT",
+            "executed_at": (datetime.now(timezone.utc) - timedelta(seconds=12600)).isoformat(),
+        }
+    }
+    updates_3_5h = mgr_default.sync_breakeven_stops(executed_records=rec_3_5h)
+    assert len(updates_3_5h) == 0, "Position held for 3.5h should NOT be cut short by Kinetic stop under 6h default"
+    print("  [Pass] Position held for 3.5h (12,600s) allowed to develop without premature stop.")
+
+    # 3. Position held for 6.5 hours (23,400s) with low gain (< 0.60R) -> triggers Kinetic Stop
+    mock_client.create_algo_order.return_value = {"success": True, "data": {"algoId": 2002}}
+    mock_client.cancel_algo_order.return_value = {"success": True}
+
+    rec_6_5h = {
+        "alert_eth": {
+            "symbol": "ETHUSDT",
+            "executed_at": (datetime.now(timezone.utc) - timedelta(seconds=23400)).isoformat(),
+        }
+    }
+    updates_6_5h = mgr_default.sync_breakeven_stops(executed_records=rec_6_5h)
+    assert len(updates_6_5h) == 1, "Position held > 6h with stalled momentum should trigger Kinetic Stop"
+    assert updates_6_5h[0]["reason"] == "kinetic"
+    assert updates_6_5h[0]["new_sl"] == 2472.60
+    print(f"  [Pass] Position held for 6.5h successfully triggers Kinetic Stop at Entry ({updates_6_5h[0]['new_sl']}).")
+
+    # 4. Verify 8h configurable override (28,800s)
+    mgr_8h = BinanceFuturesOrderManager(client=mock_client, kinetic_min_seconds=28800.0)
+    updates_override = mgr_8h.sync_breakeven_stops(executed_records=rec_6_5h)
+    assert len(updates_override) == 0, "6.5h position should NOT trigger when configured for 8 hours (28,800s)"
+    print("  [Pass] 8-hour override (28,800s) respected correctly.")
+
+
 if __name__ == "__main__":
     test_btc_shockwave_barrier()
     test_kinetic_stop_order_manager()
     test_kinetic_stop_reporting_simulation()
     test_pipeline_hook_integration()
+    test_extended_holding_window()
     print("\n=======================================================")
     print("ALL PHASE 1 QUANT INNOVATION TESTS PASSED PERFECTLY!")
     print("=======================================================")
+

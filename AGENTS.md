@@ -666,6 +666,35 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   2. `test_step5b_reconciles_externally_closed_position`: ตรวจสอบการตรวจจับและสรุปบัญชีไม้ที่ปิดบนกระดานจริงอัตโนมัติ
 - ผลการทดสอบ: **ผ่าน 100% ครบทุกกรณี**
 
+## 26. การขยายเวลาการถือครองสถานะและปรับจูน Kinetic Momentum Decay Stop (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบ (Verified with Unit Tests)**
+
+### ปัญหาที่พบ
+- บนกราฟกรอบเวลา 15 นาที (M15) การฟอร์มตัวของรอบแนวโน้ม (Trend Swing Cycle) ของเหรียญหลักและ Altcoins มักใช้เวลาเฉลี่ย 6 - 8 ชั่วโมง (24 - 32 แท่งเทียน) เพื่อวิ่งเข้าหาเป้าหมาย Take Profit (1.5R - 3.0R)
+- การตั้งค่าเดิมของ Kinetic Half-Life Stop กำหนดกรอบไว้เพียง **2 ชั่วโมง (8 แท่งเทียน / 7,200 วินาที)**:
+  - หากผ่านไป 2 ชั่วโมงแล้วกำไรยังไม่ถึง +0.60R ระบบจะขยับ Stop Loss ไปที่ทุนทันที
+  - ส่งผลให้ไม้ที่มีคุณภาพ (เช่น ETHUSDT, SUIUSDT) ที่กำลังสะสมพลังหรือพักฐานตามปกติ ถูกชน Breakeven หรือถูก Watchdog สั่งปิดไปก่อนเวลาอันควร ทำให้เสียโอกาสทำกำไรก้อนใหญ่ในรอบเทรนด์
+
+### การแก้ไขและปรับปรุง
+1. **ขยายกรอบเวลาถือครองมาตรฐาน (Default Holding Window)**:
+   - `TELEGRAM_ALERT_REALIZED_KINETIC_MIN_BARS`: ขยายจาก 8 แท่ง เป็น **24 แท่ง (6 ชั่วโมง)**
+   - `BINANCE_FUTURES_KINETIC_MIN_SECONDS`: ขยายจาก 7,200 วินาที เป็น **21,600 วินาที (6 ชั่วโมง)**
+   - รองรับการปรับแต่งยืดหยุ่นได้ถึง **8 ชั่วโมง (32 แท่ง / 28,800 วินาที)** ผ่าน environment variable
+2. **ซิงค์โค้ดทุกส่วนให้ตรงกัน 100%**:
+   - `config.py`: อัปเดตค่าเริ่มต้นทั้งสองตัวแปร พร้อมคอมเมนต์กำกับ
+   - `trad.py`: อัปเดต lambda fallback `alert_kinetic_min_bars` เป็น 24
+   - `infrastructure/binance/order_manager.py`: อัปเดตพารามิเตอร์เริ่มต้น `kinetic_min_seconds = 21600.0`
+   - `infrastructure/binance/pipeline_hook.py`: อัปเดต fallback `BINANCE_FUTURES_KINETIC_MIN_SECONDS` เป็น 21600.0
+   - `alerts/reporting.py`: อัปเดต default ใน `_resolve_directional_alert_outcome` และ `helpers` fallback เป็น 24
+3. **การทดสอบยืนยันผล**:
+   - เพิ่มชุดทดสอบ `test_extended_holding_window` ใน `scratch/test_phase1_innovations.py`:
+     1. ตรวจสอบ Default Parameter ของ Order Manager = 21,600.0s (6h) ถูกต้อง
+     2. จำลองไม้ที่ถือครอง 3.5 ชั่วโมง (12,600s) -> ไม้เปิดต่อเนื่อง ไม่ถูก Kinetic Stop รบกวน
+     3. จำลองไม้ที่แช่นิ่งเกิน 6.5 ชั่วโมง (23,400s) และกำไรไม่ถึง 0.60R -> ขยับ SL ไปที่ทุนตามแผน
+     4. จำลองการตั้งค่า Override 8 ชั่วโมง (28,800s) -> ทำงานถูกต้อง
+   - ผลการทดสอบ: **ผ่านฉลุย 100% (All Tests Passed)**
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

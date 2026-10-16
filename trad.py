@@ -7044,7 +7044,7 @@ def _reporting_module_helpers():
         "alert_realized_trailing_r": _alert_realized_trailing_r,
         "alert_realized_trailing_distance_r": _alert_realized_trailing_distance_r,
         "alert_kinetic_stop_enabled": lambda: bool(getattr(config, "TELEGRAM_ALERT_REALIZED_KINETIC_STOP_ENABLED", True)),
-        "alert_kinetic_min_bars": lambda: int(getattr(config, "TELEGRAM_ALERT_REALIZED_KINETIC_MIN_BARS", 8)),
+        "alert_kinetic_min_bars": lambda: int(getattr(config, "TELEGRAM_ALERT_REALIZED_KINETIC_MIN_BARS", 24)),
         "alert_kinetic_min_r": lambda: float(getattr(config, "TELEGRAM_ALERT_REALIZED_KINETIC_MIN_R", 0.60)),
         "binance_executed_orders_path": lambda: getattr(config, "BINANCE_FUTURES_EXECUTED_ORDERS_PATH", os.path.join(_alert_history_dir(), "binance_executed_orders.json")),
     }

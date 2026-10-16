@@ -693,7 +693,7 @@ def _resolve_directional_alert_outcome(
     ts_r=2.0,
     trail_dist_r=0.8,
     kinetic_stop_enabled=True,
-    kinetic_min_bars=8,
+    kinetic_min_bars=24,
     kinetic_min_r=0.60,
 ):
     signal = str((entry or {}).get("signal") or "").strip().upper()
@@ -1010,7 +1010,7 @@ def _resolve_directional_alert_outcomes(entries, *, helpers, get_now):
     ts_r = _safe_float(helpers.get("alert_realized_trailing_r", lambda: 2.0)()) if callable(helpers.get("alert_realized_trailing_r")) else 2.0
     trail_dist_r = _safe_float(helpers.get("alert_realized_trailing_distance_r", lambda: 0.8)()) if callable(helpers.get("alert_realized_trailing_distance_r")) else 0.8
     kinetic_stop_enabled = bool(helpers.get("alert_kinetic_stop_enabled", lambda: True)()) if callable(helpers.get("alert_kinetic_stop_enabled")) else True
-    kinetic_min_bars = _safe_int(helpers.get("alert_kinetic_min_bars", lambda: 8)(), 8) if callable(helpers.get("alert_kinetic_min_bars")) else 8
+    kinetic_min_bars = _safe_int(helpers.get("alert_kinetic_min_bars", lambda: 24)(), 24) if callable(helpers.get("alert_kinetic_min_bars")) else 24
     kinetic_min_r = _safe_float(helpers.get("alert_kinetic_min_r", lambda: 0.60)()) if callable(helpers.get("alert_kinetic_min_r")) else 0.60
     for symbol, rows in by_symbol.items():
         history_df = _load_symbol_realized_history(symbol, rows, helpers=helpers, now_dt=now_dt)

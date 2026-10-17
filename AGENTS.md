@@ -922,5 +922,45 @@ TRADING_COUNCIL_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberation
 - `tools/send_daily_summary_only.py`: เชื่อมต่อการรันสภา Debrief เข้ากับรอบสรุปประจำวัน 09:00 น. อัตโนมัติ
 - เครื่องมือรันคำสั่งอิสระ: `python tools/run_council_debrief.py`
 
+## 26. หน่วยสำรวจและคิดต่าง (ContrarianScout) และระบบจัดสรรไม้ทดลอง (Exploration Sandbox Mode) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+### แนวคิดและที่มา
+เพื่อแก้ไขกับดักของการทำตามกรอบเดิมจนพลาดโอกาสใหญ่ (Stagnation Trap) ในระบบเทรดคริปโต สภาได้เปิดรับสมาชิกใหม่ผู้ทำหน้าที่เป็น "Devil's Advocate / Asymmetric Alpha Hunter": **ContrarianScout (หน่วยสำรวจและคิดต่าง)** 
+โดยเปิดโอกาสให้ระบบสามารถวางเดิมพันในสถานการณ์ที่ "คุ้มเสี่ยงอย่างอสมมาตร" (Asymmetric Payoff: เสี่ยงต่ำ กำไรมหาศาล) แม้ระบบการกรองแบบอนุรักษนิยมดั้งเดิมจะลังเล โดยควบคุมความเสี่ยงด้วย **Exploration Sandbox Mode**
+
+### 1. Contrarian Scout (`infrastructure/council/contrarian_scout.py`)
+- **หน้าที่**: ผู้เชี่ยวชาญฝ่ายที่ 7 ของสภา คอยสแกนหาจังหวะที่ผลตอบแทนต่อความเสี่ยงคุ้มค่าอย่างโดดเด่น:
+  1. **Asymmetric Payoff**: $R:R \ge 2.8R$ (หรือ $\ge 3.5R$ ในช่วง Caution Mode)
+  2. **Short Squeeze Setup**: สัญญาณ BUY ในจังหวะที่ Funding Rate ติดลบลึก $\le -0.015\%$ (มวลชน Short แน่น เสี่ยงโดนบีบพอร์ตแตก)
+  3. **Long Flush Setup**: สัญญาณ SELL ในจังหวะที่ Funding Rate บวมเป่ง $\ge +0.03\%$ (มวลชน Long อัดเลเวอเรจ เสี่ยงโดนกวาดล้าง)
+- **โควตาจำกัด (Strict Exploration Quota)**:
+  - จำกัดให้มีไม้ทดลองเปิดได้พร้อมกัน **ไม่เกิน 1 ไม้เสมอ** (`max_explorations_allowed = 1`)
+  - หากมีไม้ทดลองค้างอยู่ สเกาต์จะไม่เสนอไม้ใหม่ เพื่อป้องกันไม่ให้กระทบเงินทุนหลัก
+
+### 2. Exploration Sandbox Mode (`arbiter.py` & `order_manager.py`)
+- **Micro-Position Sizing**: ไม้ทดลองจะถูกสเกลขนาดสัญญาลงเหลือเพียง **35% ของขนาดปกติ** (`SANDBOX_EXPLORATION_SIZE_MULTIPLIER = 0.35`)
+  - ตัวอย่าง: หากไม้ปกติเทรด 400 USDT (Margin 20 USDT) ไม้ Sandbox จะเทรดเพียง ~140 USDT (Margin ~7 USDT ที่ 20x Isolated)
+  - หากแพ้ ชน Stop Loss จะเสียเงินเพียง ~$2 - $3 แต่หากชนะ $3.5R - 4.5R$ จะสร้างผลตอบแทนกำไรก้อนใหญ่
+- **Hard Stop Loss บนกระดานเทรดจริง**: วางคำสั่ง `STOP_MARKET` บน Binance ทันทีที่เข้าออเดอร์ ป้องกันความเสี่ยงพอร์ตแตก 100%
+- **Exploration Override ใน Arbiter**:
+  - เมื่อคะแนนสภาโดยรวมอยู่ที่ $50.0\% - 64.9\%$ (ซึ่งปกติจะติด STANDBY) แต่ ContrarianScout ตรวจพบจังหวะอสมมาตรและยังมีโควตา สภาจะอนุมัติไม้ในฐานะ **`🧪 [Sandbox Exploration]`**
+  - ติดป้าย `🧪 <b>[Sandbox Exploration Bet]</b> ไม้ทดลองความเสี่ยงต่ำ (35%) | โอกาสอสมมาตร R:R สูง` ในใบเสร็จ Telegram
+
+### 3. การเชื่อมต่อสู่วงจรการเรียนรู้ใน Daily Council Debrief
+- **Dialogue Turn**: ContrarianScout เข้าร่วมการประชุมโต๊ะกลมในฐานะผู้เชี่ยวชาญคนที่ 7
+- **Elevation**: เมื่อมีการเปิดไม้ Sandbox ในรอบ 24 ชม. บทสนทนาของ ContrarianScout จะถูกยกขึ้นมาแสดงในไฮไลท์ Telegram Daily Debrief ทันที เพื่อให้ผู้ใช้และคณะกรรมการสภาติดตามผลการทดลองอย่างใกล้ชิด
+- **Data Persistence**: บันทึกสถานะ `is_sandbox_exploration` และ `exploration_metadata` ลงใน `binance_executed_orders.json` และนำผลลัพธ์เข้าสู่ `council_memory.json` เพื่อประเมินว่าควรบรรจุเป็นกลยุทธ์หลักในอนาคตหรือไม่
+
+### การตั้งค่า (`config.py`):
+```python
+CONTRARIAN_SCOUT_ENABLED = True             # เปิดใช้งานหน่วยสำรวจและคิดต่าง
+SANDBOX_EXPLORATION_ENABLED = True          # เปิดใช้งานระบบไม้ทดลอง Sandbox
+SANDBOX_EXPLORATION_MAX_POSITIONS = 1       # ถือไม้ทดลองพร้อมกันได้สูงสุด 1 ไม้
+SANDBOX_EXPLORATION_SIZE_MULTIPLIER = 0.35  # ขนาดไม้ทดลอง 35% ของปกติ
+SANDBOX_EXPLORATION_MIN_RR = 2.8            # R:R ขั้นต่ำสำหรับไม้ทดลอง (2.8 เท่า)
+```
+
 
 

@@ -19,7 +19,7 @@ def round_to_step(value: float, step: float) -> float:
     if not isinstance(value, (int, float)) or not isinstance(step, (int, float)) or step <= 0:
         return float(value)
     precision = max(0, int(round(-math.log10(step)))) if step < 1.0 else 0
-    stepped = math.floor(float(value) / float(step)) * float(step)
+    stepped = math.floor((float(value) / float(step)) + 1e-9) * float(step)
     return round(stepped, precision)
 
 
@@ -87,10 +87,13 @@ class BinanceFuturesOrderManager:
         self.harvester_trigger_r = float(harvester_trigger_r)
         self.harvester_dist_r = float(harvester_dist_r)
 
-    def execute_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
+    def execute_candidate(
+        self, candidate: Dict[str, Any], sizing_override: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
         """
         Execute an entry candidate on Binance Futures with Stop Loss and Trailing Stop.
         Performs pre-flight checks: circuit breaker, balance, existing positions, max concurrent positions.
+        Supports sizing_override for Sandbox Exploration bets.
         """
         # 0. Risk Pre-flight: Check Circuit Breaker
         if self.risk_manager:
@@ -142,9 +145,12 @@ class BinanceFuturesOrderManager:
         min_qty = float(filters.get("minQty", 0.001))
         min_notional = float(filters.get("minNotional", 5.0))
 
-        # Calculate sizing via RiskManager (Dynamic Equity / Streak Throttle)
+        # Calculate sizing via sizing_override (e.g. Sandbox Exploration micro-bet) or RiskManager
         sizing_info = None
-        if self.risk_manager:
+        if sizing_override and isinstance(sizing_override, dict) and sizing_override.get("final_notional"):
+            target_notional = float(sizing_override["final_notional"])
+            sizing_info = dict(sizing_override)
+        elif self.risk_manager:
             usdt_bal = self.client.get_usdt_balance()
             total_equity = float(usdt_bal.get("total", 0.0))
             sizing_info = self.risk_manager.calculate_trade_sizing(

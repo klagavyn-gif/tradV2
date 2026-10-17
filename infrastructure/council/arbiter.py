@@ -16,6 +16,7 @@ from .specialists import (
     RiskSpecialist,
     OpsSpecialist,
 )
+from .contrarian_scout import ContrarianScout
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,8 @@ class ConsensusVerdict:
         opinions: Optional[Dict[str, Any]] = None,
         summary: str = "",
         telegram_badge: str = "",
+        is_sandbox_exploration: bool = False,
+        exploration_metadata: Optional[Dict[str, Any]] = None,
     ):
         self.decision = decision.upper()
         self.approved = bool(approved)
@@ -44,6 +47,8 @@ class ConsensusVerdict:
         self.opinions = opinions or {}
         self.summary = summary
         self.telegram_badge = telegram_badge
+        self.is_sandbox_exploration = bool(is_sandbox_exploration)
+        self.exploration_metadata = exploration_metadata or {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -55,11 +60,14 @@ class ConsensusVerdict:
             "sizing_info": self.sizing_info,
             "summary": self.summary,
             "telegram_badge": self.telegram_badge,
+            "is_sandbox_exploration": self.is_sandbox_exploration,
+            "exploration_metadata": self.exploration_metadata,
             "opinions": self.opinions,
         }
 
     def __repr__(self) -> str:
-        return f"<ConsensusVerdict {self.decision} (Score: {self.composite_score:.1f}%) approved={self.approved}>"
+        sandbox_tag = " [SANDBOX EXPLORATION]" if self.is_sandbox_exploration else ""
+        return f"<ConsensusVerdict {self.decision} (Score: {self.composite_score:.1f}%){sandbox_tag} approved={self.approved}>"
 
 
 class TradingCouncil:
@@ -69,14 +77,15 @@ class TradingCouncil:
     and returns authoritative execution verdicts.
     """
 
-    # Consensus Weights: Sums to 1.0 (6-Specialist Board)
+    # Consensus Weights: Sums to 1.0 (7-Specialist Board)
     WEIGHTS = {
         "alpha_specialist": 0.25,
-        "derivatives_specialist": 0.20,
+        "derivatives_specialist": 0.18,
         "macro_specialist": 0.15,
         "news_specialist": 0.15,
         "risk_specialist": 0.15,
-        "ops_specialist": 0.10,
+        "ops_specialist": 0.07,
+        "contrarian_scout": 0.05,
     }
 
     def __init__(
@@ -88,6 +97,7 @@ class TradingCouncil:
         news_specialist: Optional[Any] = None,
         risk_specialist: Optional[RiskSpecialist] = None,
         ops_specialist: Optional[OpsSpecialist] = None,
+        contrarian_scout: Optional[Any] = None,
         min_composite_score: float = 65.0,
     ):
         self.blackboard = blackboard or CentralBlackboard()
@@ -104,6 +114,14 @@ class TradingCouncil:
             self.news_specialist = news_specialist
         self.risk_specialist = risk_specialist or RiskSpecialist()
         self.ops_specialist = ops_specialist or OpsSpecialist()
+        if contrarian_scout is None:
+            try:
+                from .contrarian_scout import ContrarianScout
+                self.contrarian_scout = ContrarianScout()
+            except Exception:
+                self.contrarian_scout = None
+        else:
+            self.contrarian_scout = contrarian_scout
         self.min_composite_score = float(min_composite_score)
 
     def deliberate(
@@ -113,13 +131,14 @@ class TradingCouncil:
         client=None,
         total_equity: float = 0.0,
         open_positions_count: int = 0,
+        open_explorations_count: int = 0,
         live_price: Optional[float] = None,
         shock_eval: Optional[Dict[str, Any]] = None,
         deriv_filter_kwargs: Optional[Dict[str, Any]] = None,
     ) -> ConsensusVerdict:
         """
         Conduct a full council deliberation round for a candidate trade.
-        Collects opinions from all 6 specialists, posts to blackboard, and renders verdict.
+        Collects opinions from all 7 specialists, posts to blackboard, and renders verdict.
         """
         symbol = str(candidate.get("symbol") or "")
         signal = str(candidate.get("signal") or "")
@@ -159,6 +178,13 @@ class TradingCouncil:
             live_price=live_price,
             directives=directives,
         )
+        if self.contrarian_scout:
+            opinions["contrarian_scout"] = _safe_call(
+                self.contrarian_scout.evaluate,
+                candidate,
+                directives=directives,
+                open_explorations_count=open_explorations_count,
+            )
 
         # 2. Check for VETO
         veto_specialist = None
@@ -178,21 +204,47 @@ class TradingCouncil:
 
         sizing_info = opinions["risk_specialist"].metrics or {}
 
-        # 4. Formulate Verdict
+        # 4. Check for Exploration Sandbox Opportunity
+        contrarian_op = opinions.get("contrarian_scout")
+        is_exploration = bool(contrarian_op and contrarian_op.metrics.get("is_exploration"))
+        exploration_meta = contrarian_op.metrics if is_exploration else {}
+
+        # 5. Formulate Verdict
         effective_min_score = float(directives.get("min_composite_score") or self.min_composite_score)
         caution_tag = " [⚠️ Caution Mode]" if directives.get("caution_mode") else ""
+        is_sandbox_exploration = False
+
         if veto_specialist:
             decision = "VETO"
             approved = False
             summary = f"ยับยั้งโดย {veto_specialist} ({veto_reason}): {opinions[veto_specialist].note}"
             telegram_badge = f"🏛️ <b>[Council Veto]</b> สภายับยั้งโดย {veto_specialist} ({veto_reason})"
+        elif is_exploration and (candidate.get("is_exploration_candidate") or composite_score < effective_min_score) and composite_score >= 50.0:
+            # Exploration Sandbox Override!
+            # Micro-position sizing: only 35% of regular notional to explore asymmetric setup
+            sandbox_mult = float(exploration_meta.get("sandbox_size_multiplier", 0.35))
+            base_notional = float(sizing_info.get("final_notional") or sizing_info.get("base_notional") or 400.0)
+            sizing_info["multiplier"] = sandbox_mult
+            sizing_info["multiplier_reason"] = f"sandbox_exploration_bet_{sandbox_mult:.2f}x"
+            sizing_info["final_notional"] = base_notional * sandbox_mult
+
+            decision = "EXECUTE"
+            approved = True
+            is_sandbox_exploration = True
+            thesis = exploration_meta.get("thesis") or "Asymmetric R:R Opportunity"
+            summary = f"สภาอนุมัติไม้ทดลอง Sandbox ({thesis}) ขนาด {sandbox_mult*100:.0f}%"
+            telegram_badge = f"🧪 <b>[Sandbox Exploration]</b> สภาอนุมัติไม้ทดลองขนาด {sandbox_mult*100:.0f}% | {thesis}"
         elif composite_score >= effective_min_score:
             decision = "EXECUTE"
             approved = True
             total_specialists = len(opinions)
             approvals_count = sum(1 for op in opinions.values() if op.status == "APPROVED")
-            summary = f"สภาเห็นชอบ ({approvals_count}/{total_specialists} เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
-            telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/{total_specialists} เสียง ({composite_score:.1f}%){caution_tag}"
+            if is_exploration:
+                summary = f"สภาเห็นชอบไม้หลัก + เข้าข่ายโอกาสอสมมาตร ({approvals_count}/{total_specialists} เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
+                telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/{total_specialists} เสียง ({composite_score:.1f}%) 🚀 [Asymmetric Edge]{caution_tag}"
+            else:
+                summary = f"สภาเห็นชอบ ({approvals_count}/{total_specialists} เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
+                telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/{total_specialists} เสียง ({composite_score:.1f}%){caution_tag}"
         else:
             decision = "STANDBY"
             approved = False
@@ -209,6 +261,8 @@ class TradingCouncil:
             opinions={k: v.to_dict() for k, v in opinions.items()},
             summary=summary,
             telegram_badge=telegram_badge,
+            is_sandbox_exploration=is_sandbox_exploration,
+            exploration_metadata=exploration_meta,
         )
 
         # 5. Record round onto Central Blackboard (Hot Memory) & update system status

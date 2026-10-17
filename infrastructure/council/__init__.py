@@ -13,6 +13,7 @@ from .specialists import (
     OpsSpecialist,
 )
 from .news_sentinel import NewsSentinel
+from .contrarian_scout import ContrarianScout
 from .arbiter import ConsensusVerdict, TradingCouncil
 from .daily_debrief import DailyCouncilDebrief
 
@@ -25,6 +26,7 @@ __all__ = [
     "RiskSpecialist",
     "OpsSpecialist",
     "NewsSentinel",
+    "ContrarianScout",
     "ConsensusVerdict",
     "TradingCouncil",
     "DailyCouncilDebrief",

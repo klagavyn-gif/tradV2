@@ -90,10 +90,12 @@ class DailyCouncilDebrief:
         config=None,
         gemini_api_key: Optional[str] = None,
         gemini_model: Optional[str] = None,
+        memory_path: Optional[str] = None,
+        deliberations_path: Optional[str] = None,
     ):
         self.data_dir = data_dir
-        self.memory_path = os.path.join(data_dir, DEFAULT_MEMORY_FILE)
-        self.deliberations_path = os.path.join(data_dir, DEFAULT_DELIBERATIONS_FILE)
+        self.memory_path = memory_path or os.path.join(data_dir, DEFAULT_MEMORY_FILE)
+        self.deliberations_path = deliberations_path or os.path.join(data_dir, DEFAULT_DELIBERATIONS_FILE)
         self.outcomes_path = os.path.join(data_dir, DEFAULT_OUTCOMES_FILE)
         self.risk_state_path = os.path.join(data_dir, DEFAULT_RISK_STATE_FILE)
         self.executed_orders_path = os.path.join(data_dir, DEFAULT_EXECUTED_ORDERS_FILE)
@@ -257,6 +259,17 @@ class DailyCouncilDebrief:
         daily_loss_pct = _safe_float(risk_state.get("daily_loss_pct"), 0.0)
         circuit_breaker_active = bool(risk_state.get("circuit_breaker_active", False))
 
+        # Check exploration sandbox orders
+        sandbox_executed = 0
+        if isinstance(executed_orders, dict):
+            sandbox_executed = sum(
+                1 for rec in executed_orders.values() if isinstance(rec, dict) and rec.get("is_sandbox_exploration")
+            )
+        elif isinstance(executed_orders, list):
+            sandbox_executed = sum(
+                1 for rec in executed_orders if isinstance(rec, dict) and rec.get("is_sandbox_exploration")
+            )
+
         return {
             "lookback_hours": lookback_hours,
             "total_settled": total_settled,
@@ -279,7 +292,8 @@ class DailyCouncilDebrief:
             "consecutive_wins": consecutive_wins,
             "daily_loss_pct": round(daily_loss_pct, 2),
             "circuit_breaker_active": circuit_breaker_active,
-            "executed_orders_count": len(executed_orders) if isinstance(executed_orders, list) else 0,
+            "executed_orders_count": len(executed_orders) if isinstance(executed_orders, (list, dict)) else 0,
+            "sandbox_executed_count": sandbox_executed,
         }
 
     def _generate_deterministic_dialogue(self, stats: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
@@ -288,24 +302,24 @@ class DailyCouncilDebrief:
         when Gemini LLM is offline or not configured.
         """
         dialogue = []
-        wins = stats["wins"]
-        losses = stats["losses"]
-        wr = stats["win_rate_pct"]
-        net_r = stats["net_r"]
-        net_pnl = stats["net_pnl_pct"]
-        loss_details = stats["loss_details"]
-        win_details = stats["win_details"]
-        veto_count = stats["delib_vetoed"]
-        vetoes_by_spec = stats["vetoes_by_spec"]
-        consec_losses = stats["consecutive_losses"]
+        wins = stats.get("wins", 0)
+        losses = stats.get("losses", 0)
+        wr = stats.get("win_rate_pct", 0.0)
+        net_r = stats.get("net_r", 0.0)
+        net_pnl = stats.get("net_pnl_pct", 0.0)
+        loss_details = stats.get("loss_details") or []
+        win_details = stats.get("win_details") or []
+        veto_count = stats.get("delib_vetoed", 0)
+        vetoes_by_spec = stats.get("vetoes_by_spec") or {}
+        consec_losses = stats.get("consecutive_losses", 0)
 
         # 1. Council Arbiter Opening
         dialogue.append({
             "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
             "text": (
                 f"เปิดการประชุมสภาประจำวันเพื่อทบทวนผลงานในรอบ 24 ชม. ที่ผ่านมาครับ "
-                f"ระบบมีออเดอร์ปิดรอบ {stats['total_settled']} ไม้: ชนะ {wins} ไม้, แพ้ {losses} ไม้, "
-                f"กันทุน {stats['breakevens']} ไม้ (Win Rate {wr:.1f}%, Net PnL {net_pnl:+.2f}%, Net {net_r:+.2f}R) "
+                f"ระบบมีออเดอร์ปิดรอบ {stats.get('total_settled', 0)} ไม้: ชนะ {wins} ไม้, แพ้ {losses} ไม้, "
+                f"กันทุน {stats.get('breakevens', 0)} ไม้ (Win Rate {wr:.1f}%, Net PnL {net_pnl:+.2f}%, Net {net_r:+.2f}R) "
                 f"และสภาได้ออกคำสั่งยับยั้ง (VETO) ความเสี่ยงไปทั้งหมด {veto_count} ครั้ง "
                 f"ขอให้แต่ละฝ่ายเริ่มรายงานการชันสูตรครับ"
             ),
@@ -315,7 +329,7 @@ class DailyCouncilDebrief:
         if loss_details:
             l0 = loss_details[0]
             alpha_note = (
-                f"สำหรับไม้ที่ชน SL ({l0['symbol']} {l0['pnl_pct']}%): จากการตรวจย้อนหลังพบว่า "
+                f"สำหรับไม้ที่ชน SL ({l0.get('symbol', '?')} {l0.get('pnl_pct', 0.0)}%): จากการตรวจย้อนหลังพบว่า "
                 f"สัญญาณ CDC เขียวเกิดขึ้นที่ขอบบนของกรอบไซด์เวย์ มีไส้เทียนบน (Upper Wick) ต้านแรงซื้อ "
                 f"และโมเมนตัมไม่ต่อเนื่อง ทำให้การเบรกเอาต์กลายเป็น False Break "
                 f"ผมเสนอให้เพิ่มเกณฑ์ระวังแท่งเทียนที่มีไส้บนเกิน 35% ของขนาดแท่งครับ"
@@ -352,8 +366,8 @@ class DailyCouncilDebrief:
         # 4. Risk Specialist on Drawdown & Stop Management
         risk_note = (
             f"ฝ่ายบริหารความเสี่ยงขอเน้นย้ำเรื่องวินัย: "
-            f"ปัจจุบันแพ้สะสมติดกัน {consec_losses} ไม้ (สถิติดึงกลับสะสมรายวัน {stats['daily_loss_pct']}%) "
-            f"ระบบ Breakeven Stop ทำงานยอดเยี่ยม ช่วยล็อคเสมอ {stats['breakevens']} ไม้ "
+            f"ปัจจุบันแพ้สะสมติดกัน {consec_losses} ไม้ (สถิติดึงกลับสะสมรายวัน {stats.get('daily_loss_pct', 0.0):.2f}%) "
+            f"ระบบ Breakeven Stop ทำงานยอดเยี่ยม ช่วยล็อคเสมอ {stats.get('breakevens', 0)} ไม้ "
             f"และ Momentum Harvester ช่วยขยับ Trailing Stop ล็อคกำไรที่วิ่งเกิน +3.0R "
             f"เงินต้นได้รับการคุ้มกันอย่างปลอดภัยตามมาตรฐานความเสี่ยง"
         )
@@ -389,7 +403,25 @@ class DailyCouncilDebrief:
             "text": ops_note,
         })
 
-        # 7. Arbiter Closing & Directives
+        # 7. Contrarian Scout on Asymmetric Exploration
+        sandbox_count = stats.get("sandbox_executed_count", 0)
+        if sandbox_count > 0:
+            scout_note = (
+                f"ฝ่ายสำรวจและคิดต่าง: ใน 24 ชม. ที่ผ่านมา เราได้ปล่อยไม้ทดลอง Sandbox ไป {sandbox_count} ไม้ "
+                f"(ด้วยขนาด Micro-size 35% พร้อม Hard SL บนกระดาน) เพื่อเสาะหาจุดเข้าไม่สมมาตร (Asymmetric Edge) "
+                f"ผลลัพธ์กำลังถูกนำเข้าสู่คลังความจำสภา เพื่อเรียนรู้ว่าจังหวะ Squeeze หรือ Divergence นี้คุ้มค่าที่จะพัฒนาเป็นกลยุทธ์หลักหรือไม่"
+            )
+        else:
+            scout_note = (
+                "ฝ่ายสำรวจและคิดต่าง: รอบ 24 ชม. ที่ผ่านมา ไม่พบจังหวะ Asymmetric ที่มี R:R >= 2.8R หรือเกิด Squeeze ชัดเจน "
+                "จึงสงวนโควตาและไม่มีการเปิดไม้ Sandbox เพื่อคุ้มครองเงินทุนตามระเบียบสภา"
+            )
+        dialogue.append({
+            "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
+            "text": scout_note,
+        })
+
+        # 8. Arbiter Closing & Directives
         # Determine regime & risk stance (Risk-First Hierarchy)
         if consec_losses >= 2 or stats.get("daily_loss_pct", 0.0) >= 2.5 or stats.get("circuit_breaker_active"):
             regime = "SIDEWAY_CHOP"
@@ -441,10 +473,10 @@ class DailyCouncilDebrief:
 
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent"
         system_instruction = (
-            "คุณคือประธานและคณะผู้เชี่ยวชาญ 6 ฝ่ายของ Trading Council สำหรับระบบเทรดคริปโตอัตโนมัติ tradV2 "
+            "คุณคือประธานและคณะผู้เชี่ยวชาญ 7 ฝ่ายของ Trading Council สำหรับระบบเทรดคริปโตอัตโนมัติ tradV2 "
             "หน้าที่ของคุณคือประชุมโต๊ะกลมจำลอง (Debrief) เพื่อทบทวนผลงานรอบ 24 ชั่วโมงที่ผ่านมา "
-            "โดยมีผู้พูด: 👨‍⚖️ ประธานสภา, 🎯 Alpha Specialist, 📊 Derivatives Specialist, 🛡️ Risk Specialist, 🌍 Macro & News Sentinel, ⚡ Ops Specialist "
-            "ให้ผู้เชี่ยวชาญพูดคุยแลกเปลี่ยน ชันสูตรไม้ที่แพ้ ชื่นชมกลไกกันทุน (Breakeven) และการระงับความเสี่ยง (Veto) "
+            "โดยมีผู้พูด: 👨‍⚖️ ประธานสภา, 🎯 Alpha Specialist, 📊 Derivatives Specialist, 🛡️ Risk Specialist, 🌍 Macro & News Sentinel, ⚡ Ops Specialist, 🔭 Contrarian Scout "
+            "ให้ผู้เชี่ยวชาญพูดคุยแลกเปลี่ยน ชันสูตรไม้ที่แพ้ ชื่นชมกลไกกันทุน (Breakeven) และการระงับความเสี่ยง (Veto) รวมถึงวิเคราะห์ผลลัพธ์ของไม้ทดลอง Sandbox Exploration "
             "แล้วสรุปมติเป็น JSON รูปแบบ: "
             "{\n"
             '  "market_regime": "SIDEWAY_CHOP" | "TRENDING_HEALTHY" | "HIGH_VOLATILITY",\n'
@@ -615,13 +647,25 @@ class DailyCouncilDebrief:
             f"• ไม้ปิดรอบ: <b>{stats.get('total_settled', 0)} ไม้</b> (ชนะ {stats.get('wins', 0)} | แพ้ {stats.get('losses', 0)} | กันทุน 🛡️ {stats.get('breakevens', 0)})",
             f"• Win Rate สุทธิ: <b>{stats.get('win_rate_pct', 0.0):.1f}%</b> | Profit Factor: <b>{stats.get('profit_factor', 0.0):.2f}</b>",
             f"• ผลตอบแทนรวม: <b>{stats.get('net_pnl_pct', 0.0):+.2f}%</b> (<b>{stats.get('net_r', 0.0):+.2f}R</b>)",
-            f"• สภายับยั้งความเสี่ยง (VETO): <b>{stats.get('delib_vetoed', 0)} ครั้ง</b>",
+            f"• สภายับยั้งความเสี่ยง (VETO): <b>{stats.get('delib_vetoed', 0)} ครั้ง</b>"
+            + (
+                f" | ไม้ทดลอง 🧪: <b>{stats.get('sandbox_executed_count', 0)} ไม้</b>"
+                if stats.get("sandbox_executed_count", 0) > 0
+                else ""
+            ),
             "",
             "💬 <b>ไฮไลท์การอภิปรายโต๊ะกลม (Board Dialogue):</b>",
         ]
 
-        # Include up to 4 key dialogue turns
-        for turn in dialogue[:4]:
+        # Select key dialogue turns (prioritize Contrarian Scout when sandbox trades occurred)
+        if stats.get("sandbox_executed_count", 0) > 0:
+            scout_turns = [t for t in dialogue if "Contrarian Scout" in t.get("speaker", "")]
+            other_turns = [t for t in dialogue if "Contrarian Scout" not in t.get("speaker", "")]
+            selected_turns = other_turns[:4] + scout_turns[:1]
+        else:
+            selected_turns = dialogue[:5]
+
+        for turn in selected_turns:
             spk = turn.get("speaker", "Specialist")
             txt = turn.get("text", "")
             if len(txt) > 220:

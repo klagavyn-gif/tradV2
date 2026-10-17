@@ -480,11 +480,17 @@ def execute_binance_auto_trade_pipeline(
             except Exception:
                 live_price = None
 
+            open_explorations = sum(
+                1 for r in executed_records.values()
+                if isinstance(r, dict) and r.get("status") == "open" and r.get("is_sandbox_exploration")
+            )
+
             verdict = trading_council.deliberate(
                 c,
                 client=client,
                 total_equity=total_equity,
                 open_positions_count=open_count,
+                open_explorations_count=open_explorations,
                 live_price=live_price,
                 shock_eval=shock_eval,
                 deriv_filter_kwargs=deriv_kwargs,
@@ -642,7 +648,9 @@ def execute_binance_auto_trade_pipeline(
                     logger.warning("Derivatives filter evaluation skipped due to error: %s", de)
 
         try:
-            exec_res = order_mgr.execute_candidate(c)
+            is_sandbox = bool(verdict and getattr(verdict, "is_sandbox_exploration", False))
+            sizing_override = verdict.sizing_info if is_sandbox else None
+            exec_res = order_mgr.execute_candidate(c, sizing_override=sizing_override)
             results["executed_entries"].append(exec_res)
             if exec_res.get("success"):
                 if aid:
@@ -658,16 +666,21 @@ def execute_binance_auto_trade_pipeline(
                         "status": "open",
                         "executed_at": datetime.utcnow().isoformat(),
                         "council_round_id": getattr(verdict, "round_id", None) if verdict else None,
+                        "is_sandbox_exploration": is_sandbox,
+                        "exploration_metadata": getattr(verdict, "exploration_metadata", {}) if verdict else {},
                     }
                     _save_executed_orders(executed_orders_path, executed_records)
-                logger.info("Auto-traded on Binance: %s %s @ %s", exec_res["symbol"], exec_res["signal"], exec_res["entry_price"])
+                logger.info("Auto-traded on Binance: %s %s @ %s (Sandbox=%s)", exec_res["symbol"], exec_res["signal"], exec_res["entry_price"], is_sandbox)
                 if callable(send_telegram_alert):
                     env_badge = "🧪 [Testnet]" if testnet else "⚡ [Real Money]"
                     margin_used = float(exec_res.get('notional') or 0.0) / max(1, leverage)
                     sizing_info = exec_res.get("sizing_info") or {}
                     sizing_note = ""
                     mult_reason = str(sizing_info.get("multiplier_reason") or "")
-                    if mult_reason.startswith("loss_streak_throttle"):
+                    if mult_reason.startswith("sandbox"):
+                        mult_pct = float(sizing_info.get("multiplier", 0.35)) * 100.0
+                        sizing_note = f"\n🧪 <b>[Sandbox Exploration Bet]</b> ไม้ทดลองความเสี่ยงต่ำ ({mult_pct:.0f}%) | โอกาสอสมมาตร R:R สูง"
+                    elif mult_reason.startswith("loss_streak_throttle"):
                         streak = sizing_info.get("loss_streak", 2)
                         sizing_note = f"\n⚠️ <b>[Risk Throttle]</b> ลดขนาดไม้ลง 50% เนื่องจากผลแพ้ {streak} ไม้ล่าสุด"
                     elif mult_reason.startswith("win_streak_scale"):

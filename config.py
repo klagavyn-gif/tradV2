@@ -1474,3 +1474,12 @@ COUNCIL_DEBRIEF_LOOKBACK_HOURS = _env_float("COUNCIL_DEBRIEF_LOOKBACK_HOURS", 24
 COUNCIL_DEBRIEF_NOTIFY_TELEGRAM = _env_bool("COUNCIL_DEBRIEF_NOTIFY_TELEGRAM", True)
 COUNCIL_MEMORY_PATH = _env_str("COUNCIL_MEMORY_PATH", ".data/telegram_alerts/council_memory.json")
 
+# ==============================================================================
+# Contrarian Scout & Exploration Sandbox Mode (Asymmetric Innovation)
+# ==============================================================================
+CONTRARIAN_SCOUT_ENABLED = _env_bool("CONTRARIAN_SCOUT_ENABLED", True)
+SANDBOX_EXPLORATION_ENABLED = _env_bool("SANDBOX_EXPLORATION_ENABLED", True)
+SANDBOX_EXPLORATION_MAX_POSITIONS = _env_int("SANDBOX_EXPLORATION_MAX_POSITIONS", 1)
+SANDBOX_EXPLORATION_SIZE_MULTIPLIER = _env_float("SANDBOX_EXPLORATION_SIZE_MULTIPLIER", 0.35)
+SANDBOX_EXPLORATION_MIN_RR = _env_float("SANDBOX_EXPLORATION_MIN_RR", 2.8)
+

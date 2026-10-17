@@ -327,6 +327,11 @@ def execute_binance_auto_trade_pipeline(
     else:
         allowed_syms = set()
 
+    open_explorations = sum(
+        1 for r in executed_records.values()
+        if isinstance(r, dict) and r.get("status") == "open" and r.get("is_sandbox_exploration")
+    )
+
     for c in (sent_candidates or []):
         signal = str(c.get("signal") or "").strip().upper()
         sym = str(c.get("symbol") or "")
@@ -353,15 +358,35 @@ def execute_binance_auto_trade_pipeline(
 
         dispatch_label = str(c.get("dispatch_status_label") or "").strip()
         msg = str(c.get("message") or "")
-        if dispatch_label in ("ห้ามเข้า", "รอ"):
+
+        # Contrarian Scout Pre-Check: Rescue high-conviction Asymmetric / Squeeze candidates
+        # even if labeled "ห้ามเข้า" or "รอ" by legacy statistical gates, subject to strict quota.
+        is_contrarian_candidate = False
+        if bool(getattr(config, "SANDBOX_EXPLORATION_ENABLED", True)) and open_explorations < int(getattr(config, "SANDBOX_EXPLORATION_MAX_POSITIONS", 1)):
+            try:
+                from infrastructure.council.contrarian_scout import ContrarianScout
+                scout = ContrarianScout(
+                    min_asymmetric_rr=float(getattr(config, "SANDBOX_EXPLORATION_MIN_RR", 2.8)),
+                    sandbox_size_multiplier=float(getattr(config, "SANDBOX_EXPLORATION_SIZE_MULTIPLIER", 0.35)),
+                )
+                op = scout.evaluate(c, open_explorations_count=open_explorations)
+                if op and op.metrics and op.metrics.get("is_exploration"):
+                    is_contrarian_candidate = True
+                    c["is_exploration_candidate"] = True
+                    c["contrarian_thesis"] = op.metrics.get("thesis")
+                    logger.info("[ContrarianScout] Rescued candidate %s %s for Sandbox Exploration! Thesis: %s", sym, signal, c["contrarian_thesis"])
+            except Exception as ce:
+                logger.debug("Contrarian scout pre-check error: %s", ce)
+
+        if not is_contrarian_candidate and dispatch_label in ("ห้ามเข้า", "รอ"):
             logger.info("[Auto-Trade] Skipping candidate %s %s (%s): dispatch_status=%s", sym, signal, strat, dispatch_label)
             continue
         intent, intent_reason = infer_alert_intent(c)
-        if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg:
+        if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg or is_contrarian_candidate:
             intent = "entry"
         if intent == "entry":
             actionable.append(c)
-            logger.info("[Auto-Trade] Approved candidate %s %s (%s) for auto-trade (intent=%s, reason=%s)", sym, signal, strat, intent, intent_reason)
+            logger.info("[Auto-Trade] Approved candidate %s %s (%s) for auto-trade (intent=%s, reason=%s, contrarian=%s)", sym, signal, strat, intent, intent_reason, is_contrarian_candidate)
         else:
             logger.info("[Auto-Trade] Skipped non-entry candidate %s %s (%s): intent=%s (reason=%s)", sym, signal, strat, intent, intent_reason)
 

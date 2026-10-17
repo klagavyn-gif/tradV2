@@ -78,17 +78,22 @@ class AlphaSpecialist:
 
         # 2. Dispatch status check
         if dispatch_label in ("ห้ามเข้า", "รอ"):
-            return CouncilOpinion(
-                specialist_name=self.name,
-                status="VETOED",
-                confidence=10.0,
-                veto=True,
-                veto_reason=f"dispatch_label_{dispatch_label}",
-                note=f"Dispatch label is '{dispatch_label}' - signal filtered by candidate rules",
-            )
+            if candidate.get("is_exploration_candidate"):
+                # In sandbox exploration, don't hard veto on dispatch label; assign low confidence to test thesis
+                confidence = 35.0
+            else:
+                return CouncilOpinion(
+                    specialist_name=self.name,
+                    status="VETOED",
+                    confidence=10.0,
+                    veto=True,
+                    veto_reason=f"dispatch_label_{dispatch_label}",
+                    note=f"Dispatch label is '{dispatch_label}' - signal filtered by candidate rules",
+                )
+        else:
+            confidence = 75.0
 
         # 3. Assess R:R and conviction
-        confidence = 75.0
         entry_p = float(candidate.get("entry_price") or plan.get("entry_price") or 0.0)
         stop_p = float(candidate.get("stop_loss") or plan.get("stop_loss") or 0.0)
         tp_p = float(candidate.get("take_profit") or plan.get("take_profit") or 0.0)

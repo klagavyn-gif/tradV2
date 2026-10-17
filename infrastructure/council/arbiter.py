@@ -69,11 +69,12 @@ class TradingCouncil:
     and returns authoritative execution verdicts.
     """
 
-    # Consensus Weights: Sums to 1.0
+    # Consensus Weights: Sums to 1.0 (6-Specialist Board)
     WEIGHTS = {
-        "alpha_specialist": 0.30,
-        "derivatives_specialist": 0.25,
-        "macro_specialist": 0.20,
+        "alpha_specialist": 0.25,
+        "derivatives_specialist": 0.20,
+        "macro_specialist": 0.15,
+        "news_specialist": 0.15,
         "risk_specialist": 0.15,
         "ops_specialist": 0.10,
     }
@@ -84,6 +85,7 @@ class TradingCouncil:
         alpha_specialist: Optional[AlphaSpecialist] = None,
         macro_specialist: Optional[MacroSpecialist] = None,
         derivatives_specialist: Optional[DerivativesSpecialist] = None,
+        news_specialist: Optional[Any] = None,
         risk_specialist: Optional[RiskSpecialist] = None,
         ops_specialist: Optional[OpsSpecialist] = None,
         min_composite_score: float = 65.0,
@@ -92,6 +94,14 @@ class TradingCouncil:
         self.alpha_specialist = alpha_specialist or AlphaSpecialist()
         self.macro_specialist = macro_specialist or MacroSpecialist()
         self.derivatives_specialist = derivatives_specialist or DerivativesSpecialist()
+        if news_specialist is None:
+            try:
+                from .news_sentinel import NewsSentinel
+                self.news_specialist = NewsSentinel()
+            except Exception:
+                self.news_specialist = None
+        else:
+            self.news_specialist = news_specialist
         self.risk_specialist = risk_specialist or RiskSpecialist()
         self.ops_specialist = ops_specialist or OpsSpecialist()
         self.min_composite_score = float(min_composite_score)
@@ -109,7 +119,7 @@ class TradingCouncil:
     ) -> ConsensusVerdict:
         """
         Conduct a full council deliberation round for a candidate trade.
-        Collects opinions from all 5 specialists, posts to blackboard, and renders verdict.
+        Collects opinions from all 6 specialists, posts to blackboard, and renders verdict.
         """
         symbol = str(candidate.get("symbol") or "")
         signal = str(candidate.get("signal") or "")
@@ -135,6 +145,10 @@ class TradingCouncil:
         opinions["derivatives_specialist"] = _safe_call(
             self.derivatives_specialist.evaluate, candidate, directives=directives, **(deriv_filter_kwargs or {})
         )
+        if self.news_specialist:
+            opinions["news_specialist"] = _safe_call(
+                self.news_specialist.evaluate, candidate, directives=directives
+            )
         opinions["risk_specialist"] = _safe_call(
             self.risk_specialist.evaluate, candidate, total_equity=total_equity, directives=directives
         )
@@ -174,9 +188,10 @@ class TradingCouncil:
         elif composite_score >= self.min_composite_score:
             decision = "EXECUTE"
             approved = True
+            total_specialists = len(opinions)
             approvals_count = sum(1 for op in opinions.values() if op.status == "APPROVED")
-            summary = f"สภาเห็นชอบเอกฉันท์ ({approvals_count}/5 เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
-            telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/5 เสียง ({composite_score:.1f}%){caution_tag}"
+            summary = f"สภาเห็นชอบ ({approvals_count}/{total_specialists} เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
+            telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/{total_specialists} เสียง ({composite_score:.1f}%){caution_tag}"
         else:
             decision = "STANDBY"
             approved = False

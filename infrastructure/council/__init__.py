@@ -12,6 +12,7 @@ from .specialists import (
     RiskSpecialist,
     OpsSpecialist,
 )
+from .news_sentinel import NewsSentinel
 from .arbiter import ConsensusVerdict, TradingCouncil
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "DerivativesSpecialist",
     "RiskSpecialist",
     "OpsSpecialist",
+    "NewsSentinel",
     "ConsensusVerdict",
     "TradingCouncil",
 ]

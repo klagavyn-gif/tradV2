@@ -1,0 +1,41 @@
+{
+  "updated_at": "2026-10-17T09:00:00Z",
+  "note": "Standard High-Impact Economic Calendar for NewsSentinel (UTC)",
+  "events": [
+    {
+      "event": "US CPI (Consumer Price Index)",
+      "time_utc": "2026-10-14T12:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "event": "US Core PPI",
+      "time_utc": "2026-10-15T12:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "event": "US Non-Farm Payrolls (NFP)",
+      "time_utc": "2026-11-06T13:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "event": "US FOMC Interest Rate Decision",
+      "time_utc": "2026-11-05T19:00:00Z",
+      "impact": "CRITICAL"
+    },
+    {
+      "event": "US CPI (Consumer Price Index)",
+      "time_utc": "2026-11-12T13:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "event": "US Non-Farm Payrolls (NFP)",
+      "time_utc": "2026-12-04T13:30:00Z",
+      "impact": "HIGH"
+    },
+    {
+      "event": "US FOMC Interest Rate Decision",
+      "time_utc": "2026-12-16T19:00:00Z",
+      "impact": "CRITICAL"
+    }
+  ]
+}

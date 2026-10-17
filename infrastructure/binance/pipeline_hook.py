@@ -132,6 +132,8 @@ def execute_binance_auto_trade_pipeline(
         kinetic_enabled=bool(getattr(config, "BINANCE_FUTURES_KINETIC_STOP_ENABLED", True)),
         kinetic_min_seconds=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_SECONDS", 21600.0)),
         kinetic_min_r=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_R", 0.60)),
+        harvester_trigger_r=float(getattr(config, "BINANCE_MOMENTUM_HARVESTER_TRIGGER_R", 3.0)),
+        harvester_dist_r=float(getattr(config, "BINANCE_MOMENTUM_HARVESTER_DIST_R", 0.4)),
     )
 
     results = {
@@ -294,21 +296,36 @@ def execute_binance_auto_trade_pipeline(
     actionable = []
 
     # Strategy Whitelist & Symbol Filters (Enforces clean focus on core high-conviction strategies)
-    allowed_strats_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_STRATEGIES", "CDCVIX15,PA15,PRIMARY")
+    allowed_strats_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_STRATEGIES", "CDCVIX15")
     if isinstance(allowed_strats_raw, str):
         allowed_strats = {s.strip().upper() for s in allowed_strats_raw.split(",") if s.strip()}
     elif isinstance(allowed_strats_raw, (list, tuple, set)):
         allowed_strats = {str(s).strip().upper() for s in allowed_strats_raw if str(s).strip()}
     else:
-        allowed_strats = {"CDCVIX15", "PA15", "PRIMARY"}
+        allowed_strats = {"CDCVIX15"}
 
-    blocked_syms_raw = getattr(config, "BINANCE_FUTURES_BLOCKED_SYMBOLS", "NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT")
+    blocked_syms_raw = getattr(
+        config,
+        "BINANCE_FUTURES_BLOCKED_SYMBOLS",
+        "BTC-USD,BTCUSDT,XRP-USD,XRPUSDT,SOL-USD,SOLUSDT,TRX-USD,TRXUSDT,DOGE-USD,DOGEUSDT,PAXG-USD,PAXGUSDT",
+    )
     if isinstance(blocked_syms_raw, str):
         blocked_syms = {s.strip().upper() for s in blocked_syms_raw.split(",") if s.strip()}
     elif isinstance(blocked_syms_raw, (list, tuple, set)):
         blocked_syms = {str(s).strip().upper() for s in blocked_syms_raw if str(s).strip()}
     else:
-        blocked_syms = {"NEAR-USD", "LINK-USD", "NEARUSDT", "LINKUSDT"}
+        blocked_syms = {
+            "BTC-USD", "BTCUSDT", "XRP-USD", "XRPUSDT", "SOL-USD", "SOLUSDT",
+            "TRX-USD", "TRXUSDT", "DOGE-USD", "DOGEUSDT", "PAXG-USD", "PAXGUSDT",
+        }
+
+    allowed_syms_raw = getattr(config, "BINANCE_FUTURES_ALLOWED_SYMBOLS", "")
+    if isinstance(allowed_syms_raw, str) and allowed_syms_raw.strip():
+        allowed_syms = {s.strip().upper() for s in allowed_syms_raw.split(",") if s.strip()}
+    elif isinstance(allowed_syms_raw, (list, tuple, set)) and allowed_syms_raw:
+        allowed_syms = {str(s).strip().upper() for s in allowed_syms_raw if str(s).strip()}
+    else:
+        allowed_syms = set()
 
     for c in (sent_candidates or []):
         signal = str(c.get("signal") or "").strip().upper()
@@ -322,8 +339,14 @@ def execute_binance_auto_trade_pipeline(
             logger.info("[Auto-Trade] Skipping candidate %s %s: strategy %s not in allowed_strategies %s", sym, signal, strat, allowed_strats)
             continue
 
-        # Blocked Symbol Check: Exclude deprecated/unreliable symbols
         sym_clean = sym.upper().replace("-", "").replace("_", "")
+
+        # Allowed Symbol Check: If allowed_symbols specified, must match
+        if allowed_syms and (sym.upper() not in allowed_syms and sym_clean not in allowed_syms):
+            logger.info("[Auto-Trade] Skipping candidate %s %s (%s): symbol is not in allowed_symbols", sym, signal, strat)
+            continue
+
+        # Blocked Symbol Check: Exclude deprecated/unreliable/toxic symbols
         if sym.upper() in blocked_syms or sym_clean in blocked_syms:
             logger.info("[Auto-Trade] Skipping candidate %s %s (%s): symbol is blocked from auto-trading", sym, signal, strat)
             continue
@@ -373,6 +396,7 @@ def execute_binance_auto_trade_pipeline(
             DerivativesSpecialist,
             RiskSpecialist,
             OpsSpecialist,
+            NewsSentinel,
             TradingCouncil,
         )
         raw_delib = helpers.get(
@@ -393,11 +417,18 @@ def execute_binance_auto_trade_pipeline(
             max_hot_hours=hot_hours,
             max_hot_rounds=hot_rounds,
         )
+        news_sentinel = NewsSentinel(
+            freeze_minutes_before=float(getattr(config, "NEWS_SENTINEL_FREEZE_MINS_BEFORE", 30.0)),
+            freeze_minutes_after=float(getattr(config, "NEWS_SENTINEL_FREEZE_MINS_AFTER", 30.0)),
+            events_calendar_path=getattr(config, "NEWS_SENTINEL_CALENDAR_PATH", None),
+        ) if bool(getattr(config, "NEWS_SENTINEL_ENABLED", True)) else None
+
         trading_council = TradingCouncil(
             blackboard=blackboard,
             alpha_specialist=AlphaSpecialist(allowed_strategies=allowed_strats),
             macro_specialist=MacroSpecialist(barrier=shockwave_barrier),
             derivatives_specialist=DerivativesSpecialist(deriv_filter=deriv_filter),
+            news_specialist=news_sentinel,
             risk_specialist=RiskSpecialist(
                 risk_manager=risk_mgr,
                 default_notional=trade_notional,

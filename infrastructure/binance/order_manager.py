@@ -68,6 +68,8 @@ class BinanceFuturesOrderManager:
         kinetic_enabled: bool = True,
         kinetic_min_seconds: float = 21600.0,
         kinetic_min_r: float = 0.60,
+        harvester_trigger_r: float = 3.0,
+        harvester_dist_r: float = 0.4,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -82,6 +84,8 @@ class BinanceFuturesOrderManager:
         self.kinetic_enabled = bool(kinetic_enabled)
         self.kinetic_min_seconds = float(kinetic_min_seconds)
         self.kinetic_min_r = float(kinetic_min_r)
+        self.harvester_trigger_r = float(harvester_trigger_r)
+        self.harvester_dist_r = float(harvester_dist_r)
 
     def execute_candidate(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -326,6 +330,7 @@ class BinanceFuturesOrderManager:
 
             # Determine elapsed seconds for this position
             elapsed_sec = None
+            initial_risk = None
             if executed_records:
                 matching = [
                     r for r in executed_records.values()
@@ -343,6 +348,10 @@ class BinanceFuturesOrderManager:
                                 elapsed_sec = max(0.0, (datetime.utcnow() - exec_dt).total_seconds())
                         except Exception:
                             pass
+                    rec_sl = float(matching[0].get("stop_loss") or 0.0)
+                    rec_ent = float(matching[0].get("entry_price") or entry_price)
+                    if rec_sl > 0 and rec_ent > 0 and abs(rec_ent - rec_sl) > 0:
+                        initial_risk = abs(rec_ent - rec_sl)
 
             if elapsed_sec is None and pos.get("updateTime"):
                 try:
@@ -363,7 +372,7 @@ class BinanceFuturesOrderManager:
                 is_algo = False
 
             filters = self.client.get_symbol_filters(symbol)
-            tick_size = filters["tickSize"] if filters else 0.01
+            tick_size = float(filters.get("tickSize") or filters.get("tick_size") or 0.01) if filters else 0.01
 
             if not sl_order:
                 # If no SL order exists on Binance at all, place one immediately!
@@ -393,13 +402,17 @@ class BinanceFuturesOrderManager:
 
             current_sl = float(sl_order.get("triggerPrice") or sl_order.get("stopPrice") or 0.0)
 
-            # Estimate initial risk from entry and current SL
-            risk = abs(entry_price - current_sl)
+            # Estimate initial risk from executed_records if available, otherwise from entry and current SL
+            if initial_risk is not None and initial_risk > 0:
+                risk = initial_risk
+            else:
+                risk = abs(entry_price - current_sl)
             if risk <= 0:
                 continue
 
             if side == "LONG":
                 gain_r = (mark_price - entry_price) / risk
+                is_trailing = (gain_r >= self.trailing_r)
                 is_profit_be = (gain_r >= self.breakeven_r)
                 is_kinetic_be = (
                     k_enabled
@@ -409,14 +422,63 @@ class BinanceFuturesOrderManager:
                     and mark_price >= entry_price
                 )
 
-                if (is_profit_be or is_kinetic_be) and current_sl < entry_price:
+                # 1. Trailing Stop & Momentum Exhaustion Harvester
+                if is_trailing:
+                    # If extended profit or exhaustion (>= harvester_trigger_r), tighten trailing distance
+                    if gain_r >= self.harvester_trigger_r:
+                        eff_dist_r = self.harvester_dist_r
+                        reason = "momentum_exhaustion_tightened"
+                    else:
+                        eff_dist_r = self.trailing_dist_r
+                        reason = "trailing_stop"
+
+                    trail_sl = mark_price - (eff_dist_r * risk)
+                    candidate_sl = max(entry_price, trail_sl)
+                    new_sl = round_to_tick(candidate_sl, tick_size)
+
+                    if new_sl > current_sl:
+                        if is_algo:
+                            self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
+                        else:
+                            self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
+
+                        client_id = f"ts_{int(time.time())}"
+                        res = self.client.create_algo_order(
+                            symbol=symbol,
+                            side="SELL",
+                            order_type="STOP_MARKET",
+                            trigger_price=new_sl,
+                            close_position=True,
+                            client_algo_id=client_id,
+                        )
+                        if not res.get("success"):
+                            logger.error("[OrderManager] Failed to update trailing SL for %s (%s). Restoring SL @ %s", symbol, res, current_sl)
+                            self.client.create_algo_order(
+                                symbol=symbol,
+                                side="SELL",
+                                order_type="STOP_MARKET",
+                                trigger_price=current_sl,
+                                close_position=True,
+                                client_algo_id=f"restore_sl_{int(time.time())}",
+                            )
+                        updated.append({
+                            "symbol": symbol,
+                            "side": side,
+                            "new_sl": new_sl,
+                            "reason": reason,
+                            "gain_r": round(gain_r, 2),
+                            "trailing_distance_r": eff_dist_r,
+                            "elapsed_seconds": elapsed_sec,
+                            "result": res,
+                        })
+
+                # 2. Breakeven / Kinetic Stop
+                elif (is_profit_be or is_kinetic_be) and current_sl < entry_price:
                     reason = "kinetic" if is_kinetic_be and not is_profit_be else "profit_target"
-                    # Cancel old SL
                     if is_algo:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
                     else:
                         self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
-                    # Place new SL at Entry (Breakeven) via Algo Order API
                     new_sl = round_to_tick(entry_price, tick_size)
                     client_id = f"{'kbe' if is_kinetic_be else 'be'}_{int(time.time())}"
                     res = self.client.create_algo_order(
@@ -448,6 +510,7 @@ class BinanceFuturesOrderManager:
                     })
             else:  # SHORT
                 gain_r = (entry_price - mark_price) / risk
+                is_trailing = (gain_r >= self.trailing_r)
                 is_profit_be = (gain_r >= self.breakeven_r)
                 is_kinetic_be = (
                     k_enabled
@@ -457,7 +520,57 @@ class BinanceFuturesOrderManager:
                     and mark_price <= entry_price
                 )
 
-                if (is_profit_be or is_kinetic_be) and current_sl > entry_price:
+                # 1. Trailing Stop & Momentum Exhaustion Harvester (SHORT)
+                if is_trailing:
+                    if gain_r >= self.harvester_trigger_r:
+                        eff_dist_r = self.harvester_dist_r
+                        reason = "momentum_exhaustion_tightened"
+                    else:
+                        eff_dist_r = self.trailing_dist_r
+                        reason = "trailing_stop"
+
+                    trail_sl = mark_price + (eff_dist_r * risk)
+                    candidate_sl = min(entry_price, trail_sl)
+                    new_sl = round_to_tick(candidate_sl, tick_size)
+
+                    if new_sl < current_sl:
+                        if is_algo:
+                            self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
+                        else:
+                            self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
+
+                        client_id = f"ts_{int(time.time())}"
+                        res = self.client.create_algo_order(
+                            symbol=symbol,
+                            side="BUY",
+                            order_type="STOP_MARKET",
+                            trigger_price=new_sl,
+                            close_position=True,
+                            client_algo_id=client_id,
+                        )
+                        if not res.get("success"):
+                            logger.error("[OrderManager] Failed to update trailing SL for %s (%s). Restoring SL @ %s", symbol, res, current_sl)
+                            self.client.create_algo_order(
+                                symbol=symbol,
+                                side="BUY",
+                                order_type="STOP_MARKET",
+                                trigger_price=current_sl,
+                                close_position=True,
+                                client_algo_id=f"restore_sl_{int(time.time())}",
+                            )
+                        updated.append({
+                            "symbol": symbol,
+                            "side": side,
+                            "new_sl": new_sl,
+                            "reason": reason,
+                            "gain_r": round(gain_r, 2),
+                            "trailing_distance_r": eff_dist_r,
+                            "elapsed_seconds": elapsed_sec,
+                            "result": res,
+                        })
+
+                # 2. Breakeven / Kinetic Stop (SHORT)
+                elif (is_profit_be or is_kinetic_be) and current_sl > entry_price:
                     reason = "kinetic" if is_kinetic_be and not is_profit_be else "profit_target"
                     if is_algo:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))

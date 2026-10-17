@@ -8,7 +8,7 @@ on:
       symbols:
         description: Symbols separated by comma
         required: true
-        default: "BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD"
+        default: "BTC-USD,BNB-USD,SUI-USD,ONDO-USD,ADA-USD,ETH-USD"
       period:
         description: Period (15m, 1h, 1d, 5d, 1mo, 3mo, 6mo, 1y, ytd)
         required: true
@@ -57,8 +57,9 @@ jobs:
       BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS: ${{ vars.BINANCE_FUTURES_CIRCUIT_BREAKER_HOURS || '6.0' }}
       BINANCE_FUTURES_DAILY_MAX_LOSS_PCT: ${{ vars.BINANCE_FUTURES_DAILY_MAX_LOSS_PCT || '4.0' }}
       BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE: ${{ vars.BINANCE_FUTURES_WIN_STREAK_SCALE_ENABLE || 'true' }}
-      BINANCE_FUTURES_ALLOWED_STRATEGIES: ${{ vars.BINANCE_FUTURES_ALLOWED_STRATEGIES || 'CDCVIX15,PA15,PRIMARY' }}
-      BINANCE_FUTURES_BLOCKED_SYMBOLS: ${{ vars.BINANCE_FUTURES_BLOCKED_SYMBOLS || 'NEAR-USD,LINK-USD,NEARUSDT,LINKUSDT' }}
+      BINANCE_FUTURES_ALLOWED_STRATEGIES: ${{ vars.BINANCE_FUTURES_ALLOWED_STRATEGIES || 'CDCVIX15' }}
+      BINANCE_FUTURES_BLOCKED_SYMBOLS: ${{ vars.BINANCE_FUTURES_BLOCKED_SYMBOLS || 'BTC-USD,BTCUSDT,XRP-USD,XRPUSDT,SOL-USD,SOLUSDT,TRX-USD,TRXUSDT,DOGE-USD,DOGEUSDT,PAXG-USD,PAXGUSDT' }}
+      BINANCE_FUTURES_ALLOWED_SYMBOLS: ${{ vars.BINANCE_FUTURES_ALLOWED_SYMBOLS || 'BNB-USD,BNBUSDT,SUI-USD,SUIUSDT,ONDO-USD,ONDOUSDT,ADA-USD,ADAUSDT,ETH-USD,ETHUSDT' }}
       BINANCE_FUTURES_RISK_ONLY_EXECUTED: ${{ vars.BINANCE_FUTURES_RISK_ONLY_EXECUTED || 'true' }}
       TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED: ${{ vars.TELEGRAM_ALERT_TRADE_CLOSE_ONLY_EXECUTED || 'true' }}
       BINANCE_DERIVATIVES_FILTER_ENABLED: ${{ vars.BINANCE_DERIVATIVES_FILTER_ENABLED || 'true' }}
@@ -70,7 +71,7 @@ jobs:
       BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT: ${{ vars.BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT || '-2.0' }}
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PIP_PROGRESS_BAR: "off"
-      SYMBOLS: ${{ github.event.inputs.symbols || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD' }}
+      SYMBOLS: ${{ github.event.inputs.symbols || 'BTC-USD,BNB-USD,SUI-USD,ONDO-USD,ADA-USD,ETH-USD' }}
       PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
       MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'yahoo' }}
       MARKET_HISTORY_STORE_DIR: ${{ vars.MARKET_HISTORY_STORE_DIR || '' }}
@@ -233,7 +234,7 @@ jobs:
       TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_WIN_RATE || '55.0' }}
       TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_HIST_TRADES || '4' }}
       TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR: ${{ vars.TELEGRAM_DAILY_BEST_PICK_RELAXED_MIN_EXPECTANCY_RR || '0.0' }}
-      TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST: ${{ vars.TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST || 'BTC-USD,DOGE-USD,ETH-USD,ADA-USD,XRP-USD,BNB-USD,SOL-USD,TRX-USD,PAXG-USD,ONDO-USD,SUI-USD' }}
+      TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST: ${{ vars.TELEGRAM_DAILY_BEST_PICK_SYMBOL_ALLOWLIST || 'BNB-USD,SUI-USD,ONDO-USD,ADA-USD,ETH-USD' }}
       TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_ENABLE || 'true' }}
       TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_MIN_RED_TO_GREEN_SCORE || '68.0' }}
       TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP: ${{ vars.TELEGRAM_DAILY_BEST_PICK_CDC_MAX_BARS_SINCE_GREEN_FLIP || '3' }}
@@ -306,7 +307,7 @@ jobs:
       EMA_CROSS_15M_OPT_TARGET_EXPECTANCY_RR: ${{ vars.EMA_CROSS_15M_OPT_TARGET_EXPECTANCY_RR || '0.10' }}
       ACTIONZONE_15M_TP_MULT: ${{ vars.ACTIONZONE_15M_TP_MULT || '2.0' }}
       ACTIONZONE_15M_STOP_ATR_MULT: ${{ vars.ACTIONZONE_15M_STOP_ATR_MULT || '1.8' }}
-      PRICE_ACTION_15M_ENABLED: ${{ vars.PRICE_ACTION_15M_ENABLED || 'true' }}
+      PRICE_ACTION_15M_ENABLED: ${{ vars.PRICE_ACTION_15M_ENABLED || 'false' }}
       PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE: ${{ vars.PRICE_ACTION_15M_MIN_ALERT_CONFIDENCE || '63.0' }}
       PRICE_ACTION_15M_MIN_SCORE: ${{ vars.PRICE_ACTION_15M_MIN_SCORE || '64.0' }}
       PRICE_ACTION_15M_SWING_LOOKBACK: ${{ vars.PRICE_ACTION_15M_SWING_LOOKBACK || '3' }}
@@ -414,7 +415,9 @@ jobs:
       - name: Restore Telegram alert history cache
         uses: actions/cache/restore@v5
         with:
-          path: .data/telegram_alerts
+          path: |
+            .data/telegram_alerts
+            .data/macro
           key: telegram-alert-history-v2-${{ github.ref_name }}-${{ github.run_id }}
           restore-keys: |
             telegram-alert-history-v2-${{ github.ref_name }}-
@@ -504,6 +507,7 @@ jobs:
           name: telegram-alert-data
           path: |
             .data/telegram_alerts/**
+            .data/macro/**
             ${{ env.VERIFY_OUTPUT_PATH }}
           if-no-files-found: ignore
           retention-days: 14
@@ -511,7 +515,9 @@ jobs:
         if: always()
         uses: actions/cache/save@v5
         with:
-          path: .data/telegram_alerts
+          path: |
+            .data/telegram_alerts
+            .data/macro
           key: telegram-alert-history-v2-${{ github.ref_name }}-${{ github.run_id }}
       - name: Save live AI model cache
         if: ${{ always() && (env.TELEGRAM_ALERT_AI_LIVE_ENABLE == 'true' || env.TELEGRAM_ALERT_ENTRY_AI_LIVE_ENABLE == 'true') }}

@@ -6254,7 +6254,7 @@ def _notify_telegram_from_results(results, runtime_context=None):
         try:
             recent_sent = _read_telegram_alert_history(days=1)
             now_dt = get_thai_now()
-            cutoff = now_dt - timedelta(minutes=16)
+            cutoff = now_dt - timedelta(minutes=25)
             fresh_entries = []
             for row in (recent_sent or []):
                 ts = _alert_timestamp_value(row.get("timestamp"))

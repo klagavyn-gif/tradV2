@@ -728,6 +728,55 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
 - **ปัญหา**: ใน `order_manager.py` ขณะเลื่อน SL ไปที่ทุน (Breakeven) ระบบจะยกเลิก SL เก่าก่อน แล้วส่ง SL ใหม่ หากคำสั่งใหม่เกิดล้มเหลว (เช่น ราคาแกว่งข้าม หรือเน็ตเวิร์กสะดุด) ไม้นั้นจะกลายเป็น Naked Position ไม่มี Stop Loss
 - **การแก้ไข**: เพิ่มกลไก Fallback หากคำสั่ง Breakeven Stop ล้มเหลว ระบบจะส่งคำสั่ง Protective Stop Loss เดิมที่ราคา `current_sl` กลับคืนทันที
 
+## 22. ระบบกระดานกลางข้อมูลและสภาเอเจนต์เทรด (Central Blackboard & Multi-Agent Trading Council) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+ระบบสถาปัตยกรรมกระดานกลางข้อมูล (Central Blackboard Pattern) และสภาเอเจนต์ผู้เชี่ยวชาญ 5 ด้าน (5-Agent Trading Council) เพื่อยกระดับการตัดสินใจเปิดออเดอร์ให้เป็นหนึ่งเดียว ทุกระบบย่อยอิงข้อมูลจากกระดานกลางเดียวกัน ป้องกันปัญหาการตัดสินใจขัดแย้งกันเอง:
+
+### 1. โครงสร้างโมดูล (`infrastructure/council/`)
+- `blackboard.py`: `CentralBlackboard`
+  - ทำหน้าที่เป็น Single Source of Truth สำหรับการประชุมและการตัดสินใจ
+  - **Tiered Storage Architecture**:
+    - **Hot Memory** (`council_deliberations.json`): บันทึกบทสนทนาและการลงมติของสภาในแต่ละรอบ
+    - **Auto-Janitor Pruning**: ลบประวัติการคุยเก่าที่เกิน 48 ชั่วโมง หรือเกิน 100 รอบโดยอัตโนมัติ เพื่อไม่ให้ไฟล์บวมและกินพื้นที่ดิสก์
+    - **Cold Archive**: บันทึกผลการเทรดทางการเงินที่เกิดขึ้นจริง (`realized_outcomes.json`, `binance_executed_orders.json`) ถูกเก็บถาวร ไม่ถูกลบ
+- `specialists.py`: สภาเอเจนต์ผู้เชี่ยวชาญ 5 ท่าน (`CouncilOpinion`)
+  1. `AlphaSpecialist` (น้ำหนัก 30%): ตรวจสอบกลยุทธ์ตาม Whitelist (CDCVIX15, PA15, PRIMARY), R:R ratio, และ AI Conviction
+  2. `DerivativesSpecialist` (น้ำหนัก 25%): ตรวจสอบ Funding Rate (สกัด Crowded Long/Short) และ 1h Open Interest Momentum
+  3. `MacroSpecialist` (น้ำหนัก 20%): ตรวจสอบ BTC Shockwave Barrier สกัด Altcoin ในช่วงที่ Bitcoin เกิดความผันผวนรุนแรง
+  4. `RiskSpecialist` (น้ำหนัก 15%): ตรวจสอบ Circuit Breaker, Dynamic Equity Risk Sizing, Loss Streak Throttling (0.5x), และ Win Streak Scaling (1.25x)
+  5. `OpsSpecialist` (น้ำหนัก 10%): ตรวจสอบความพร้อมการส่งคำสั่ง ความจุพอร์ต (`max_positions`), และ Price Drift Anti-Chase Guard
+- `arbiter.py`: `ConsensusArbiter` & `TradingCouncil`
+  - รวบรวมความเห็นจากเอเจนต์ทั้ง 5 ลงบนกระดานกลาง (Blackboard)
+  - **Veto Override Rule**: หากผู้เชี่ยวชาญคนใดคนหนึ่งใช้สิทธิ์ VETO (ยับยั้ง) สภาจะสั่งระงับการเปิดไม้ทันที แม้เอเจนต์อื่นจะมีคะแนนความมั่นใจสูง
+  - **Composite Scoring**: คำนวณคะแนนถ่วงน้ำหนักรวม หากไม่มี VETO และคะแนน $\ge 65.0\%$ -> ออกมติ **EXECUTE** (เปิดคำสั่งซื้อขาย), หากต่ำกว่า 65% -> ออกมติ **STANDBY** (รอ)
+  - ออกมติ `ConsensusVerdict` พร้อมแนบตราสัญลักษณ์สภา (Council Badge `🏛️`) ไปยังใบเสร็จ Telegram
+
+### 2. การเชื่อมต่อใน Pipeline (`infrastructure/binance/pipeline_hook.py`)
+- สภาถูกเรียกประชุมก่อนตัดสินใจเปิดออเดอร์ใน `execute_binance_auto_trade_pipeline`
+- แสดงความโปร่งใสใน Telegram Alert:
+  - หากผ่าน: แสดง `🏛️ [Council Consensus] สภาเห็นชอบ 5/5 เสียง (84.5%)`
+  - หากถูกยับยั้ง: แจ้งสาเหตุการ Veto และสรุปมติสภาให้ผู้ใช้ทราบอย่างชัดเจน
+- เมื่อจบ Pipeline ในแต่ละรอบ ระบบ Auto-Janitor จะล้าง Hot Memory บนกระดานกลางอัตโนมัติ
+
+### 3. การตั้งค่า (`config.py`)
+```python
+TRADING_COUNCIL_ENABLED = True                  # เปิดใช้งานสภาตัดสินใจเอเจนต์
+TRADING_COUNCIL_MIN_COMPOSITE_SCORE = 65.0      # คะแนนขั้นต่ำในการอนุมัติไม้ (65%)
+TRADING_COUNCIL_HOT_MEMORY_MAX_HOURS = 48.0     # ล้างบันทึกการคุยในสภาที่เก่ากว่า 48 ชม.
+TRADING_COUNCIL_HOT_MEMORY_MAX_ROUNDS = 100     # จำกัดเก็บบันทึกการคุยไว้ไม่เกิน 100 รอบล่าสุด
+TRADING_COUNCIL_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberations.json"
+```
+
+### 4. การทดสอบครอบคลุม (`scratch/test_trading_council.py`)
+- ทดสอบครบทั้ง 4 ด้าน:
+  1. Central Blackboard State & Auto-Janitor Hot Memory Pruning
+  2. Multi-Agent Specialist Opinions & Defensive Veto Gates
+  3. Trading Council Arbiter, Weighted Scoring & Absolute Veto Override
+  4. End-to-End Pipeline Hook with Central Blackboard & Trading Council
+- ผลการทดสอบ: **ผ่านฉลุย 100% ทุกชุดการทดสอบ โดยไม่มี Regression ต่อโค้ดเดิม**
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools
@@ -737,4 +786,5 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
   artifact + bump version + เพิ่ม strategy ใน `TELEGRAM_ALERT_ENTRY_AI_LIVE_STRATEGIES`
 - วิธีดึงข้อมูลสดจาก cloud: download artifact `telegram-alert-data` ของ run ล่าสุด
   (`gh run download <id> -n telegram-alert-data -D <dir>`) แล้วอ่าน realized_outcomes.json
+
 

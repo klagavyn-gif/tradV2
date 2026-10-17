@@ -357,9 +357,68 @@ def execute_binance_auto_trade_pipeline(
         except Exception as se:
             logger.warning("BTC Shockwave Barrier evaluation error: %s", se)
 
-    # 3. Execute actionable entries
+    # 3. Setup Derivatives Filter & Trading Council
     from .derivatives_filter import BinanceDerivativesFilter
     deriv_filter = BinanceDerivativesFilter() if bool(getattr(config, "BINANCE_DERIVATIVES_FILTER_ENABLED", True)) else None
+
+    council_enabled = bool(getattr(config, "TRADING_COUNCIL_ENABLED", True))
+    trading_council = None
+    blackboard = None
+
+    if council_enabled:
+        from infrastructure.council import (
+            CentralBlackboard,
+            AlphaSpecialist,
+            MacroSpecialist,
+            DerivativesSpecialist,
+            RiskSpecialist,
+            OpsSpecialist,
+            TradingCouncil,
+        )
+        raw_delib = helpers.get(
+            "council_deliberations_path",
+            lambda: getattr(config, "TRADING_COUNCIL_DELIBERATIONS_PATH", ".data/telegram_alerts/council_deliberations.json")
+        )()
+        deliberations_file = str(raw_delib) if (isinstance(raw_delib, str) and not hasattr(raw_delib, "_mock_return_value")) else ".data/telegram_alerts/council_deliberations.json"
+
+        raw_hot_hours = getattr(config, "TRADING_COUNCIL_HOT_MEMORY_MAX_HOURS", 48.0)
+        hot_hours = float(raw_hot_hours) if isinstance(raw_hot_hours, (int, float)) else 48.0
+        raw_hot_rounds = getattr(config, "TRADING_COUNCIL_HOT_MEMORY_MAX_ROUNDS", 100)
+        hot_rounds = int(raw_hot_rounds) if isinstance(raw_hot_rounds, (int, float)) else 100
+        raw_min_score = getattr(config, "TRADING_COUNCIL_MIN_COMPOSITE_SCORE", 65.0)
+        min_score = float(raw_min_score) if isinstance(raw_min_score, (int, float)) else 65.0
+
+        blackboard = CentralBlackboard(
+            file_path=deliberations_file,
+            max_hot_hours=hot_hours,
+            max_hot_rounds=hot_rounds,
+        )
+        trading_council = TradingCouncil(
+            blackboard=blackboard,
+            alpha_specialist=AlphaSpecialist(allowed_strategies=allowed_strats),
+            macro_specialist=MacroSpecialist(barrier=shockwave_barrier),
+            derivatives_specialist=DerivativesSpecialist(deriv_filter=deriv_filter),
+            risk_specialist=RiskSpecialist(
+                risk_manager=risk_mgr,
+                default_notional=trade_notional,
+                leverage=leverage,
+            ),
+            ops_specialist=OpsSpecialist(
+                max_positions=max_positions,
+                max_drift_pct=float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80)),
+            ),
+            min_composite_score=min_score,
+        )
+        results["council_verdicts"] = []
+
+    deriv_kwargs = {
+        "max_long_funding": float(getattr(config, "BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004)),
+        "min_short_funding": float(getattr(config, "BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003)),
+        "oi_lookback_bars": int(getattr(config, "BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4)),
+        "oi_confirm_min_pct": float(getattr(config, "BINANCE_DERIVATIVES_OI_CONFIRMATION_MIN_PCT", 1.0)),
+        "oi_contract_max_pct": float(getattr(config, "BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT", -2.0)),
+        "veto_enabled": bool(getattr(config, "BINANCE_DERIVATIVES_VETO_ENABLED", True)),
+    }
 
     for c in actionable:
         aid = str(c.get("alert_id") or "").strip()
@@ -367,61 +426,89 @@ def execute_binance_auto_trade_pipeline(
             logger.info("Alert %s already executed on Binance, skipping duplicate.", aid)
             continue
 
-        # Evaluate BTC Shockwave Barrier: Altcoins are strictly vetoed during systemic BTC shocks
-        if shockwave_barrier and shock_eval and shock_eval.get("shock_active"):
-            should_veto, veto_reason = shockwave_barrier.should_veto_candidate(c, shock_eval)
-            if should_veto:
-                logger.warning(
-                    "Auto-trade vetoed by BTC Shockwave Barrier for Altcoin %s %s: %s",
-                    c.get("symbol"), c.get("signal"), veto_reason
-                )
-                results["executed_entries"].append({
-                    "success": False,
-                    "reason": f"btc_shockwave_veto_{veto_reason}",
-                    "symbol": c.get("symbol"),
-                })
-                if callable(send_telegram_alert):
-                    msg = (
-                        f"⚡ <b>[BTC Shockwave Veto] สกัดการเปิดไม้ Altcoin!</b>\n"
-                        f"────────────────\n"
-                        f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
-                        f"<b>สาเหตุ:</b> ตรวจพบคู่เทียบ BTC ผันผวนรุนแรง ({shock_eval.get('range_atr')}x ATR | {shock_eval.get('abs_change_pct')}%) {shock_eval.get('direction', '')}\n"
-                        f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เหรียญ Altcoin ชั่วคราวเพื่อป้องกัน Liquidation Contagion"
-                    )
-                    try:
-                        send_telegram_alert(msg)
-                    except Exception:
-                        pass
-                continue
-
-        # Evaluate positioning & leverage via Derivatives Filter
+        verdict = None
         deriv_eval = None
-        if deriv_filter:
+        if trading_council:
             try:
-                deriv_eval = deriv_filter.evaluate_candidate(
-                    c,
-                    max_long_funding=float(getattr(config, "BINANCE_DERIVATIVES_MAX_LONG_FUNDING_RATE", 0.0004)),
-                    min_short_funding=float(getattr(config, "BINANCE_DERIVATIVES_MIN_SHORT_FUNDING_RATE", -0.0003)),
-                    oi_lookback_bars=int(getattr(config, "BINANCE_DERIVATIVES_OI_LOOKBACK_BARS", 4)),
-                    oi_confirm_min_pct=float(getattr(config, "BINANCE_DERIVATIVES_OI_CONFIRMATION_MIN_PCT", 1.0)),
-                    oi_contract_max_pct=float(getattr(config, "BINANCE_DERIVATIVES_OI_CONTRACTION_MAX_PCT", -2.0)),
-                    veto_enabled=bool(getattr(config, "BINANCE_DERIVATIVES_VETO_ENABLED", True)),
-                )
-                if not deriv_eval.get("approved"):
-                    veto_r = str(deriv_eval.get("veto_reason") or "derivatives_risk")
-                    logger.warning("Auto-trade vetoed by Derivatives Filter for %s %s: %s", c.get("symbol"), c.get("signal"), veto_r)
-                    results["executed_entries"].append({"success": False, "reason": f"derivatives_veto_{veto_r}", "symbol": c.get("symbol")})
+                open_positions = client.get_positions()
+                open_count = len(open_positions) if isinstance(open_positions, list) else 0
+            except Exception:
+                open_count = 0
+
+            try:
+                usdt_bal = client.get_usdt_balance()
+                total_equity = float(usdt_bal.get("total", 0.0)) if isinstance(usdt_bal, dict) else 0.0
+            except Exception:
+                total_equity = 0.0
+
+            try:
+                from .order_manager import normalize_futures_symbol
+                clean_sym = normalize_futures_symbol(c.get("symbol"))
+                raw_p = client.get_symbol_price(clean_sym)
+                live_price = float(raw_p) if (isinstance(raw_p, (int, float)) or (isinstance(raw_p, str) and raw_p.replace(".", "", 1).isdigit())) else None
+            except Exception:
+                live_price = None
+
+            verdict = trading_council.deliberate(
+                c,
+                client=client,
+                total_equity=total_equity,
+                open_positions_count=open_count,
+                live_price=live_price,
+                shock_eval=shock_eval,
+                deriv_filter_kwargs=deriv_kwargs,
+            )
+            results["council_verdicts"].append(verdict.to_dict())
+
+            if not verdict.approved:
+                # 1. Macro / BTC Shockwave Veto
+                if verdict.veto_specialist == "macro_specialist" or (verdict.veto_reason and "btc_shockwave_veto" in verdict.veto_reason):
+                    logger.warning(
+                        "Auto-trade vetoed by Trading Council (MacroSpecialist) for %s %s: %s",
+                        c.get("symbol"), c.get("signal"), verdict.veto_reason
+                    )
+                    results["executed_entries"].append({
+                        "success": False,
+                        "reason": verdict.veto_reason,
+                        "symbol": c.get("symbol"),
+                    })
                     if callable(send_telegram_alert):
+                        range_atr = shock_eval.get("range_atr") if shock_eval else "?"
+                        abs_chg = shock_eval.get("abs_change_pct") if shock_eval else "?"
+                        direct = shock_eval.get("direction", "") if shock_eval else ""
+                        msg = (
+                            f"⚡ <b>[BTC Shockwave Veto] สกัดการเปิดไม้ Altcoin!</b>\n"
+                            f"────────────────\n"
+                            f"<b>เหรีย่ง:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
+                            f"<b>สาเหตุ:</b> ตรวจพบคู่เทียบ BTC ผันผวนรุนแรง ({range_atr}x ATR | {abs_chg}%) {direct}\n"
+                            f"<b>มติสภา:</b> {verdict.summary}\n"
+                            f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เหรียญ Altcoin ชั่วคราวเพื่อป้องกัน Liquidation Contagion"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                        except Exception:
+                            pass
+                    continue
+
+                # 2. Derivatives Veto
+                elif verdict.veto_specialist == "derivatives_specialist" or (verdict.veto_reason and "derivatives" in verdict.veto_reason):
+                    veto_r = verdict.veto_reason or "derivatives_risk"
+                    logger.warning("Auto-trade vetoed by Trading Council (DerivativesSpecialist) for %s %s: %s", c.get("symbol"), c.get("signal"), veto_r)
+                    results["executed_entries"].append({"success": False, "reason": veto_r, "symbol": c.get("symbol")})
+                    if callable(send_telegram_alert):
+                        deriv_metrics = verdict.opinions.get("derivatives_specialist", {}).get("metrics", {})
                         veto_text = "Funding Rate สูงเกินเกณฑ์ (เสี่ยงโดนกวาด Long)" if "crowded_long" in veto_r else (
                             "Funding Rate ติดลบลึกเกินเกณฑ์ (เสี่ยงโดน Short Squeeze)" if "crowded_short" in veto_r else
                             "Open Interest ร่วงผิดปกติ (เข้าข่ายเบรกหลอก Fakeout)"
                         )
+                        badge_str = deriv_metrics.get("badge", "")
                         msg = (
                             f"🛡️ <b>[Derivatives Veto] สกัดการเปิดไม้โดยระบบป้องกันความเสี่ยง!</b>\n"
                             f"────────────────\n"
                             f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
                             f"<b>สาเหตุ:</b> {veto_text}\n"
-                            f"{deriv_eval.get('badge')}\n"
+                            f"<b>มติสภา:</b> {verdict.summary}\n"
+                            f"{badge_str}\n"
                             f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เพื่อปกป้องเงินทุนตามวินัยระบบอนุพันธ์"
                         )
                         try:
@@ -429,8 +516,99 @@ def execute_binance_auto_trade_pipeline(
                         except Exception:
                             pass
                     continue
-            except Exception as de:
-                logger.warning("Derivatives filter evaluation skipped due to error: %s", de)
+
+                # 3. Risk / Circuit Breaker Veto
+                elif verdict.veto_specialist == "risk_specialist":
+                    logger.warning("Auto-trade vetoed by Trading Council (RiskSpecialist) for %s: %s", c.get("symbol"), verdict.veto_reason)
+                    results["executed_entries"].append({
+                        "success": False,
+                        "reason": "circuit_breaker_active",
+                        "symbol": c.get("symbol"),
+                    })
+                    if callable(send_telegram_alert) and not results.get("cb_alerted"):
+                        msg = (
+                            f"🚨 <b>[Risk Control] บอทอยู่ในโหมด Circuit Breaker พักการเทรด!</b>\n"
+                            f"────────────────\n"
+                            f"<b>สาเหตุ:</b> สภาระงับการเทรดจากเกณฑ์ควบคุมความเสี่ยง ({verdict.veto_reason})\n"
+                            f"<b>มติสภา:</b> {verdict.summary}\n"
+                            f"<b>คำแนะนำ:</b> รอให้สภาวะตลาดหลุดพ้นช่วงสับขาหลอก ระบบจะกลับมาเทรดอัตโนมัติ"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                            results["cb_alerted"] = True
+                        except Exception:
+                            pass
+                    continue
+
+                # 4. Ops Veto / Low Composite Score Standby
+                else:
+                    logger.warning(
+                        "Auto-trade not approved by Trading Council for %s: %s (%s)",
+                        c.get("symbol"), verdict.decision, verdict.summary
+                    )
+                    results["executed_entries"].append({
+                        "success": False,
+                        "reason": verdict.veto_reason or "council_standby",
+                        "symbol": c.get("symbol"),
+                        "composite_score": verdict.composite_score,
+                    })
+                    continue
+        else:
+            # Fallback legacy checks if Trading Council disabled
+            if shockwave_barrier and shock_eval and shock_eval.get("shock_active"):
+                should_veto, veto_reason = shockwave_barrier.should_veto_candidate(c, shock_eval)
+                if should_veto:
+                    logger.warning(
+                        "Auto-trade vetoed by BTC Shockwave Barrier for Altcoin %s %s: %s",
+                        c.get("symbol"), c.get("signal"), veto_reason
+                    )
+                    results["executed_entries"].append({
+                        "success": False,
+                        "reason": f"btc_shockwave_veto_{veto_reason}",
+                        "symbol": c.get("symbol"),
+                    })
+                    if callable(send_telegram_alert):
+                        msg = (
+                            f"⚡ <b>[BTC Shockwave Veto] สกัดการเปิดไม้ Altcoin!</b>\n"
+                            f"────────────────\n"
+                            f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
+                            f"<b>สาเหตุ:</b> ตรวจพบคู่เทียบ BTC ผันผวนรุนแรง ({shock_eval.get('range_atr')}x ATR | {shock_eval.get('abs_change_pct')}%) {shock_eval.get('direction', '')}\n"
+                            f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เหรียญ Altcoin ชั่วคราวเพื่อป้องกัน Liquidation Contagion"
+                        )
+                        try:
+                            send_telegram_alert(msg)
+                        except Exception:
+                            pass
+                    continue
+
+            deriv_eval = None
+            if deriv_filter:
+                try:
+                    deriv_eval = deriv_filter.evaluate_candidate(c, **deriv_kwargs)
+                    if not deriv_eval.get("approved"):
+                        veto_r = str(deriv_eval.get("veto_reason") or "derivatives_risk")
+                        logger.warning("Auto-trade vetoed by Derivatives Filter for %s %s: %s", c.get("symbol"), c.get("signal"), veto_r)
+                        results["executed_entries"].append({"success": False, "reason": f"derivatives_veto_{veto_r}", "symbol": c.get("symbol")})
+                        if callable(send_telegram_alert):
+                            veto_text = "Funding Rate สูงเกินเกณฑ์ (เสี่ยงโดนกวาด Long)" if "crowded_long" in veto_r else (
+                                "Funding Rate ติดลบลึกเกินเกณฑ์ (เสี่ยงโดน Short Squeeze)" if "crowded_short" in veto_r else
+                                "Open Interest ร่วงผิดปกติ (เข้าข่ายเบรกหลอก Fakeout)"
+                            )
+                            msg = (
+                                f"🛡️ <b>[Derivatives Veto] สกัดการเปิดไม้โดยระบบป้องกันความเสี่ยง!</b>\n"
+                                f"────────────────\n"
+                                f"<b>เหรียญ:</b> {c.get('symbol')} | <b>ฝั่ง:</b> {c.get('signal')}\n"
+                                f"<b>สาเหตุ:</b> {veto_text}\n"
+                                f"{deriv_eval.get('badge')}\n"
+                                f"<b>การคุ้มครอง:</b> ระงับการเปิดไม้เพื่อปกป้องเงินทุนตามวินัยระบบอนุพันธ์"
+                            )
+                            try:
+                                send_telegram_alert(msg)
+                            except Exception:
+                                pass
+                        continue
+                except Exception as de:
+                    logger.warning("Derivatives filter evaluation skipped due to error: %s", de)
 
         try:
             exec_res = order_mgr.execute_candidate(c)
@@ -470,8 +648,11 @@ def execute_binance_auto_trade_pipeline(
                     except Exception:
                         bal_str = ""
 
-                    deriv_badge_str = f"\n{deriv_eval.get('badge')}" if deriv_eval and deriv_eval.get("badge") else ""
-                    shock_badge_str = f"\n{shock_eval.get('badge')}" if shock_eval and shock_eval.get("badge") else ""
+                    deriv_metrics = (verdict.opinions.get("derivatives_specialist", {}).get("metrics", {}) if verdict else {}) or (deriv_eval or {})
+                    deriv_badge_str = f"\n{deriv_metrics.get('badge')}" if deriv_metrics.get("badge") else ""
+                    shock_metrics = (verdict.opinions.get("macro_specialist", {}).get("metrics", {}) if verdict else {}) or (shock_eval or {})
+                    shock_badge_str = f"\n{shock_metrics.get('badge')}" if shock_metrics.get("badge") else ""
+                    council_badge_str = f"\n{verdict.telegram_badge}" if verdict and verdict.telegram_badge else ""
 
                     msg = (
                         f"🤖 <b>{env_badge} เปิดออเดอร์ Binance Futures สำเร็จ!</b>\n"
@@ -484,6 +665,7 @@ def execute_binance_auto_trade_pipeline(
                         f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
                         f"{sizing_note}"
                         f"{bal_str}"
+                        f"{council_badge_str}"
                         f"{deriv_badge_str}"
                         f"{shock_badge_str}"
                     )
@@ -524,5 +706,11 @@ def execute_binance_auto_trade_pipeline(
                 logger.warning("Auto-trade skipped/failed for %s: %s", c.get("symbol"), reason)
         except Exception as e:
             logger.exception("Exception executing auto-trade candidate: %s", e)
+
+    if blackboard:
+        try:
+            blackboard.prune_hot_memory()
+        except Exception as pe:
+            logger.warning("Failed to prune blackboard hot memory: %s", pe)
 
     return results

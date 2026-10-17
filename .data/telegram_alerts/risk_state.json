@@ -8,5 +8,7 @@
   "daily_pnl_usdt": 0.0,
   "daily_loss_pct": 0.0,
   "daily_trades_count": 0,
-  "history": []
+  "history": [],
+  "current_date_utc": "2026-10-17",
+  "updated_at": "2026-10-17 02:57:51 UTC"
 }

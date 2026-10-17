@@ -427,6 +427,16 @@ class BinanceFuturesOrderManager:
                         close_position=True,
                         client_algo_id=client_id,
                     )
+                    if not res.get("success"):
+                        logger.error("[OrderManager] Failed to place BE stop for %s (%s). Restoring protective SL @ %s", symbol, res, current_sl)
+                        self.client.create_algo_order(
+                            symbol=symbol,
+                            side="SELL",
+                            order_type="STOP_MARKET",
+                            trigger_price=current_sl,
+                            close_position=True,
+                            client_algo_id=f"restore_sl_{int(time.time())}",
+                        )
                     updated.append({
                         "symbol": symbol,
                         "side": side,
@@ -463,6 +473,16 @@ class BinanceFuturesOrderManager:
                         close_position=True,
                         client_algo_id=client_id,
                     )
+                    if not res.get("success"):
+                        logger.error("[OrderManager] Failed to place BE stop for %s (%s). Restoring protective SL @ %s", symbol, res, current_sl)
+                        self.client.create_algo_order(
+                            symbol=symbol,
+                            side="BUY",
+                            order_type="STOP_MARKET",
+                            trigger_price=current_sl,
+                            close_position=True,
+                            client_algo_id=f"restore_sl_{int(time.time())}",
+                        )
                     updated.append({
                         "symbol": symbol,
                         "side": side,

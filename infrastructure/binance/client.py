@@ -412,7 +412,7 @@ class BinanceFuturesClient:
         params: Dict[str, Any] = {"symbol": clean_sym}
         if algo_id:
             params["algoId"] = int(algo_id)
-        if client_algo_id:
+        elif client_algo_id:
             params["clientAlgoId"] = str(client_algo_id)[:32]
         return self._request("DELETE", "/fapi/v1/algoOrder", params=params, signed=True)
 

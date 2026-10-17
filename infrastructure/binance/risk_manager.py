@@ -141,10 +141,11 @@ class BinanceFuturesRiskManager:
                 reason = state.get("circuit_breaker_reason") or "circuit_breaker_active"
                 return True, reason, cb_until_str
             else:
-                # Expired -> clear circuit breaker
+                # Expired -> clear circuit breaker and reset streak
                 state["circuit_breaker_active"] = False
                 state["circuit_breaker_until"] = None
                 state["circuit_breaker_reason"] = None
+                state["consecutive_losses"] = 0
                 self.save_state(state)
                 return False, None, None
         except Exception as e:
@@ -253,6 +254,9 @@ class BinanceFuturesRiskManager:
                         real_today_loss_pct += abs(pnl_pct)
 
                 if result == "loss":
+                    if real_consecutive_losses >= self.loss_streak_max:
+                        # Prior streak already triggered a circuit breaker; start fresh cycle
+                        real_consecutive_losses = 0
                     real_consecutive_losses += 1
                     real_consecutive_wins = 0
                 elif result == "win":
@@ -266,6 +270,10 @@ class BinanceFuturesRiskManager:
                 state["daily_loss_pct"] = real_today_loss_pct
                 state["consecutive_losses"] = real_consecutive_losses
                 state["consecutive_wins"] = real_consecutive_wins
+
+                # If circuit breaker is not active but streak is at or above max, reset streak
+                if not state.get("circuit_breaker_active") and state.get("consecutive_losses", 0) >= self.loss_streak_max:
+                    state["consecutive_losses"] = 0
 
                 # Clear false circuit breaker triggered by paper trades
                 if state.get("circuit_breaker_active"):
@@ -331,6 +339,9 @@ class BinanceFuturesRiskManager:
             state["daily_pnl_usdt"] = state.get("daily_pnl_usdt", 0.0) + dollar_pnl
 
             if result == "loss":
+                if state.get("consecutive_losses", 0) >= self.loss_streak_max:
+                    # Reset if prior cycle already hit max and cooldown elapsed
+                    state["consecutive_losses"] = 0
                 state["consecutive_losses"] = state.get("consecutive_losses", 0) + 1
                 state["consecutive_wins"] = 0
                 state["daily_loss_pct"] = state.get("daily_loss_pct", 0.0) + abs(pnl_pct)

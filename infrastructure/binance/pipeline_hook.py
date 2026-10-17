@@ -224,11 +224,11 @@ def execute_binance_auto_trade_pipeline(
                 except Exception:
                     pass
 
-                # Save updated executed_records (with status="closed")
-                try:
-                    _save_executed_orders(executed_orders_path, executed_records)
-                except Exception:
-                    pass
+        # Always persist any executed_records updates (such as status="closed") from Watchdog
+        try:
+            _save_executed_orders(executed_orders_path, executed_records)
+        except Exception as ex:
+            logger.warning("Failed to save executed records after watchdog: %s", ex)
 
         # If any healing action, issue, or warning was discovered, send Telegram alert immediately!
         if (watchdog_report.get("healed_actions") or watchdog_report.get("issues_detected") or watchdog_report.get("warnings")) and callable(send_telegram_alert):
@@ -446,6 +446,7 @@ def execute_binance_auto_trade_pipeline(
                         "quantity": exec_res.get("quantity"),
                         "notional": exec_res.get("notional"),
                         "stop_loss": c.get("stop_loss"),
+                        "status": "open",
                         "executed_at": datetime.utcnow().isoformat(),
                     }
                     _save_executed_orders(executed_orders_path, executed_records)

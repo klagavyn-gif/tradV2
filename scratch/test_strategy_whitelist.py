@@ -124,7 +124,7 @@ def test_strategy_whitelist_and_blocked_symbols():
     class MockOrderManager:
         def __init__(self, *args, **kwargs):
             pass
-        def sync_breakeven_stops(self):
+        def sync_breakeven_stops(self, *args, **kwargs):
             return []
         def execute_candidate(self, candidate):
             executed.append(candidate["alert_id"])
@@ -149,6 +149,8 @@ def test_strategy_whitelist_and_blocked_symbols():
         def get_open_orders(self):
             return []
         def get_open_algo_orders(self):
+            return []
+        def get_klines(self, *args, **kwargs):
             return []
 
     import infrastructure.binance.order_manager as om

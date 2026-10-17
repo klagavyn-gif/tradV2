@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 logger = logging.getLogger(__name__)
 
 DEFAULT_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberations.json"
+DEFAULT_COUNCIL_MEMORY_PATH = ".data/telegram_alerts/council_memory.json"
 
 
 def _utc_now() -> datetime:
@@ -38,10 +39,15 @@ class CentralBlackboard:
         max_rounds: int = 100,
         *,
         file_path: Optional[str] = None,
+        memory_file_path: Optional[str] = None,
         max_hot_hours: Optional[float] = None,
         max_hot_rounds: Optional[int] = None,
     ):
         self.file_path = file_path or deliberations_file_path or DEFAULT_DELIBERATIONS_PATH
+        self.memory_path = (
+            memory_file_path
+            or os.path.join(os.path.dirname(os.path.abspath(self.file_path)), DEFAULT_COUNCIL_MEMORY_PATH.split("/")[-1])
+        )
         self.max_age_hours = float(max_hot_hours if max_hot_hours is not None else max_age_hours)
         self.max_rounds = int(max_hot_rounds if max_hot_rounds is not None else max_rounds)
 
@@ -148,10 +154,57 @@ class CentralBlackboard:
         state = self.load_full_state()
         return state.get("daily_health_briefing")
 
+    def load_council_memory(self) -> Dict[str, Any]:
+        """Load the authoritative Council Memory document from disk."""
+        if not os.path.exists(self.memory_path) or os.path.getsize(self.memory_path) == 0:
+            return {}
+        try:
+            with open(self.memory_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning("Failed to load council memory from %s: %s", self.memory_path, e)
+            return {}
+
+    def save_council_memory(self, memory: Dict[str, Any]) -> None:
+        """Atomically persist Council Memory document to disk."""
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(self.memory_path)), exist_ok=True)
+            temp_path = f"{self.memory_path}.tmp_{os.getpid()}_{int(time.time()*1000)}"
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(memory, f, indent=2, ensure_ascii=False)
+            os.replace(temp_path, self.memory_path)
+        except Exception as e:
+            logger.error("Failed to save council memory to %s: %s", self.memory_path, e)
+
     def get_active_directives(self) -> Dict[str, Any]:
-        """Retrieve active governance directives posted by the AI Health Doctor."""
+        """
+        Retrieve active governance directives.
+        Combines directives posted by AI Health Doctor and the Daily Council Debrief.
+        """
         state = self.load_full_state()
-        return state.get("active_directives") or {}
+        directives = dict(state.get("active_directives") or {})
+
+        # Merge directives from council_memory.json if available
+        mem = self.load_council_memory()
+        mem_dirs = mem.get("active_directives") or {}
+        if mem_dirs:
+            flagged = list(
+                set((directives.get("flagged_symbols") or []) + (mem_dirs.get("flagged_symbols") or []))
+            )
+            caution = bool(directives.get("caution_mode") or mem_dirs.get("caution_mode"))
+            min_score = max(
+                float(directives.get("min_composite_score") or 0.0),
+                float(mem_dirs.get("min_composite_score") or 0.0),
+            )
+            directives.update(mem_dirs)
+            if flagged:
+                directives["flagged_symbols"] = flagged
+            if caution:
+                directives["caution_mode"] = True
+            if min_score > 0.0:
+                directives["min_composite_score"] = min_score
+
+        return directives
 
     def update_system_status(self, update: Dict[str, Any]) -> Dict[str, Any]:
         """Update system heartbeat, active positions, and operational status."""

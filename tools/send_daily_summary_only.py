@@ -186,6 +186,28 @@ def main(argv=None):
         except Exception as exc:
             trad.logger.warning("System Doctor audit failed: %s", exc)
 
+    council_memory = None
+    council_debrief_sent = False
+    council_memory_path = Path(trad._alert_history_dir()) / "council_memory.json"
+    if bool(getattr(trad.config, "COUNCIL_DEBRIEF_ENABLED", True)):
+        try:
+            from infrastructure.council.daily_debrief import DailyCouncilDebrief
+
+            debrief_obj = DailyCouncilDebrief(
+                data_dir=str(trad._alert_history_dir()),
+                config=trad.config,
+            )
+            council_memory = debrief_obj.run_debrief(
+                lookback_hours=float(getattr(trad.config, "COUNCIL_DEBRIEF_LOOKBACK_HOURS", 24.0)),
+                notify_telegram=False,
+            )
+            if bool(getattr(trad.config, "COUNCIL_DEBRIEF_NOTIFY_TELEGRAM", True)):
+                debrief_msg = debrief_obj.format_telegram_message(council_memory)
+                if debrief_msg:
+                    council_debrief_sent = bool(trad.send_telegram_alert(debrief_msg))
+        except Exception as exc:
+            trad.logger.warning("Daily Council Debrief failed: %s", exc)
+
     recent_cache_keys = trad._load_recent_alert_cache_keys(
         trad.get_thai_now,
         max_age_seconds=26 * 60 * 60,
@@ -248,6 +270,15 @@ def main(argv=None):
             "blackboard_briefing_posted": bool((doctor_report or {}).get("blackboard_posted")),
             "caution_mode": (doctor_report or {}).get("directives", {}).get("caution_mode", False),
             "council_rounds_24h": ((doctor_report or {}).get("checks", {}).get("central_blackboard", {}).get("council_stats") or {}).get("total_rounds_24h", 0),
+        },
+        "council_debrief": {
+            "enabled": bool(getattr(trad.config, "COUNCIL_DEBRIEF_ENABLED", True)),
+            "sent": council_debrief_sent,
+            "market_regime": (council_memory or {}).get("market_regime"),
+            "risk_stance": (council_memory or {}).get("risk_stance"),
+            "min_composite_score": (council_memory or {}).get("min_composite_score"),
+            "lessons_count": len((council_memory or {}).get("lessons_learned") or []),
+            "memory_path": str(council_memory_path) if council_memory else None,
         },
     }
     if args.verify_output:

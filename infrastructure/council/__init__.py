@@ -14,6 +14,7 @@ from .specialists import (
 )
 from .news_sentinel import NewsSentinel
 from .arbiter import ConsensusVerdict, TradingCouncil
+from .daily_debrief import DailyCouncilDebrief
 
 __all__ = [
     "CentralBlackboard",
@@ -26,4 +27,5 @@ __all__ = [
     "NewsSentinel",
     "ConsensusVerdict",
     "TradingCouncil",
+    "DailyCouncilDebrief",
 ]

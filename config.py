@@ -1466,3 +1466,11 @@ NEWS_SENTINEL_CALENDAR_PATH = _env_str("NEWS_SENTINEL_CALENDAR_PATH", ".data/mac
 BINANCE_MOMENTUM_HARVESTER_TRIGGER_R = _env_float("BINANCE_MOMENTUM_HARVESTER_TRIGGER_R", 3.0)
 BINANCE_MOMENTUM_HARVESTER_DIST_R = _env_float("BINANCE_MOMENTUM_HARVESTER_DIST_R", 0.4)
 
+# ==============================================================================
+# Daily Council Debrief & Adaptive Memory Governance
+# ==============================================================================
+COUNCIL_DEBRIEF_ENABLED = _env_bool("COUNCIL_DEBRIEF_ENABLED", True)
+COUNCIL_DEBRIEF_LOOKBACK_HOURS = _env_float("COUNCIL_DEBRIEF_LOOKBACK_HOURS", 24.0)
+COUNCIL_DEBRIEF_NOTIFY_TELEGRAM = _env_bool("COUNCIL_DEBRIEF_NOTIFY_TELEGRAM", True)
+COUNCIL_MEMORY_PATH = _env_str("COUNCIL_MEMORY_PATH", ".data/telegram_alerts/council_memory.json")
+

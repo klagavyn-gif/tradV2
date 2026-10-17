@@ -179,13 +179,14 @@ class TradingCouncil:
         sizing_info = opinions["risk_specialist"].metrics or {}
 
         # 4. Formulate Verdict
+        effective_min_score = float(directives.get("min_composite_score") or self.min_composite_score)
         caution_tag = " [⚠️ Caution Mode]" if directives.get("caution_mode") else ""
         if veto_specialist:
             decision = "VETO"
             approved = False
             summary = f"ยับยั้งโดย {veto_specialist} ({veto_reason}): {opinions[veto_specialist].note}"
             telegram_badge = f"🏛️ <b>[Council Veto]</b> สภายับยั้งโดย {veto_specialist} ({veto_reason})"
-        elif composite_score >= self.min_composite_score:
+        elif composite_score >= effective_min_score:
             decision = "EXECUTE"
             approved = True
             total_specialists = len(opinions)
@@ -195,7 +196,7 @@ class TradingCouncil:
         else:
             decision = "STANDBY"
             approved = False
-            summary = f"คะแนนความมั่นใจไม่ถึงเกณฑ์ ({composite_score:.1f}% < {self.min_composite_score:.1f}%){caution_tag}"
+            summary = f"คะแนนความมั่นใจไม่ถึงเกณฑ์ ({composite_score:.1f}% < {effective_min_score:.1f}%){caution_tag}"
             telegram_badge = f"🏛️ <b>[Council Standby]</b> ความมั่นใจรวม {composite_score:.1f}% ต่ำกว่าเกณฑ์{caution_tag}"
 
         verdict = ConsensusVerdict(

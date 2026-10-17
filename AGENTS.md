@@ -882,11 +882,45 @@ TRADING_COUNCIL_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberation
   - อัปเดตคำสั่ง `STOP_MARKET` บนกระดานเทรด Binance จริงแบบ Algorithmic เพื่อล็อคกำไร $+2.6R$ ถึง $+3.1R+$ ไว้ในกระเป๋าทันทีโดยไม่ต้องรอให้ราคาร่วงกลับมาลึก
   - **Initial Risk Tracking**: ปรับปรุงฟังก์ชัน `sync_breakeven_stops` ให้อ่าน initial risk จาก `executed_records` ทำให้การคำนวณ R-multiple มีความแม่นยำตลอดชีพของ Position แม้ Stop Loss จะถูกเลื่อนขึ้นสูงกว่าจุดเข้า (In-Profit SL) แล้วก็ตาม
 
-### 3. การทดสอบครอบคลุม (`scratch/test_news_and_harvester.py` & `scratch/test_trading_council.py`)
-- ทดสอบการตรวจจับหน้าต่างเวลาข่าว NFP และ CPI: **VETO ถูกต้อง 100%**
-- ทดสอบสภาเทรด 6 ฝ่าย: ประชุมฉันทามติและคำนวณคะแนนถ่วงน้ำหนักรวมได้ถูกต้อง
-- ทดสอบการรวบระยะ Trailing Stop จาก 0.8R สู่ 0.4R เมื่อแตะ 3.5R: **เลื่อน SL ไปที่ 131.0 สำเร็จ 100%**
-- ทุก Test Suites ในระบบทำงานร่วมกันได้อย่างราบรื่นและผ่านการทดสอบ 100%
+## 25. ระบบสภาประชุมแลกเปลี่ยนความคิดเห็นประจำวัน (Daily Council Debrief) และ Adaptive Council Memory (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+เพื่อยกระดับระบบจากการทำตามกฎตายตัว สู่ **ระบบ AI ที่เรียนรู้และปรับตัวได้เองทุกวัน (Agentic Self-Reflection & Memory Loop)** ระบบได้สร้างและติดตั้งกลไกการประชุมสภาประจำวันและหน่วยความจำสภา:
+
+### 1. Daily Council Debrief (`infrastructure/council/daily_debrief.py`)
+- **หน้าที่**: ทำหน้าที่จำลองการประชุมโต๊ะกลม (Round-Table Debrief) ของ 6 ผู้เชี่ยวชาญ (Arbiter, Alpha, Derivatives, Macro, News, Risk, Ops) ในทุกๆ วัน
+- **การวิเคราะห์ 3 มิติ**:
+  1. **Post-Mortem**: ชันสูตรไม้ที่ชน Stop Loss ย้อนหลัง 24–48 ชม. (ตรวจหา Upper Wick, False Breakout, Volume ไซด์เวย์)
+  2. **Veto Efficiency Review**: ทบทวนไม้ที่สภาสั่ง VETO ว่าช่วยปกป้องเงินทุนได้จริงหรือไม่
+  3. **Protection & Profit Lock Efficacy**: ประเมินผลงานของ Breakeven Stop (+1.2R) และ Momentum Harvester (+3.0R รวบ Trailing 0.4R)
+- **เครื่องมือขับเคลื่อนบทสนทนา**:
+  - รองรับทั้ง **Google Gemini 2.5 Flash** (เมื่อมี `GEMINI_API_KEY`) เพื่อสร้างบทสนทนาแบบไดนามิกภาษาไทยที่ลึกซึ้ง
+  - และ **Deterministic Dialogue Synthesizer** สำรอง (Offline-Safe) ทำให้ระบบสามารถรันการประชุมได้สมบูรณ์เสมอโดยไม่ล่มแม้ไม่มีการเชื่อมต่อภายนอก
+- **การแจ้งเตือน**: ส่งบันทึกการประชุมสภา (Daily Council Debrief Memo) พร้อมสถิติ 24 ชม., บทเรียนที่ได้รับ, และไฮไลท์คำพูดของแต่ละฝ่ายเข้า Telegram
+
+### 2. ระบบหน่วยความจำสภา (`council_memory.json`)
+- **ที่จัดเก็บ**: `.data/telegram_alerts/council_memory.json`
+- **โครงสร้างข้อมูลสำคัญ**:
+  - `market_regime`: ระบุสภาวะตลาดประจำวัน เช่น `TRENDING_HEALTHY`, `SIDEWAY_CHOP`, `HIGH_VOLATILITY`
+  - `risk_stance`: ท่าทีความเสี่ยง เช่น `NORMAL`, `DEFENSIVE`, `AGGRESSIVE`
+  - `min_composite_score`: เกณฑ์คะแนนความเชื่อมั่นขั้นต่ำของสภาแบบไดนามิก (ปกติ 65.0%, หากตลาด Sideway / ขาดทุนติดกันจะปรับขึ้นเป็น 70.0% ทันที)
+  - `active_directives`:
+    - `caution_mode`: เปิดโหมดระวังความเสี่ยง
+    - `flagged_symbols`: รายชื่อเหรียญที่แพ้ใน 24 ชม. ล่าสุด เพื่อให้ฝ่าย Alpha ปรับลดคะแนนลง 15–20 คะแนน
+    - `risk_multiplier_cap`: จำกัดเพดานขนาดไม้ (0.75x) หากอยู่ในช่วงชะลอความเสี่ยง
+    - `max_funding_rate_long`: บีบเพดาน Funding Rate ฝั่ง Long ให้เข้มงวดยิ่งขึ้น (0.00030)
+  - `lessons_learned`: บันทึกข้อคิดและบทเรียนที่ตกผลึกจากการเทรดจริง
+
+### 3. การเชื่อมต่อแบบวงปิดเข้าสู่ Central Blackboard และ Trading Council
+- `CentralBlackboard` (`infrastructure/council/blackboard.py`):
+  - เพิ่มฟังก์ชัน `load_council_memory()` และ `save_council_memory()`
+  - ฟังก์ชัน `get_active_directives()` จะรวมคำสั่งจากทั้ง AI Health Doctor และ Council Memory เข้าด้วยกันอัตโนมัติ
+- `TradingCouncil` (`infrastructure/council/arbiter.py`):
+  - คำนวณ `effective_min_score = float(directives.get("min_composite_score") or self.min_composite_score)` ในทุกๆ แท่ง M15
+  - สภาจะอนุมัติไม้เฉพาะเมื่อคะแนนสูงกว่าเกณฑ์ไดนามิกที่สภาประจำวันกำหนดไว้เท่านั้น
+- `tools/send_daily_summary_only.py`: เชื่อมต่อการรันสภา Debrief เข้ากับรอบสรุปประจำวัน 09:00 น. อัตโนมัติ
+- เครื่องมือรันคำสั่งอิสระ: `python tools/run_council_debrief.py`
 
 
 

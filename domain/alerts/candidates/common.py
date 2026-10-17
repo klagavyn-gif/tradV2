@@ -981,23 +981,36 @@ def _harmonize_rendered_message_with_status(message, status, candidate):
         target_plan_head = "📌 แผนเข้า:"
 
     new_lines = []
-    original_has_note = any(l.strip().startswith("<b>⚠️ หมายเหตุ:</b>") for l in message.split("\n"))
+    original_has_note = any(
+        l.strip().startswith("<b>⚠️ หมายเหตุ:</b>") or l.strip().startswith("<b>⚠️ Note:</b>")
+        for l in message.split("\n")
+    )
 
     for line in message.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("<b>🎯 สรุป:</b>"):
-            new_lines.append(f"<b>🎯 สรุป:</b> {html.escape(summary_text)}")
-        elif stripped.startswith("<b>📝 เหตุผล:</b>"):
-            new_lines.append(f"<b>📝 เหตุผล:</b> {html.escape(primary_reason)}")
-        elif stripped.startswith("<b>👉 การทำต่อ:</b>"):
-            new_lines.append(f"<b>👉 การทำต่อ:</b> {html.escape(action_text)}")
+        if stripped.startswith("<b>🎯 สรุป:</b>") or stripped.startswith("<b>🚦 สถานะ:</b>"):
+            tag = "🎯 สรุป:" if stripped.startswith("<b>🎯 สรุป:</b>") else "🚦 สถานะ:"
+            new_lines.append(f"<b>{tag}</b> {html.escape(summary_text)}")
+        elif stripped.startswith("<b>📝 เหตุผล:</b>") or stripped.startswith("<b>📝 Decision:</b>"):
+            tag = "📝 เหตุผล:" if stripped.startswith("<b>📝 เหตุผล:</b>") else "📝 Decision:"
+            new_lines.append(f"<b>{tag}</b> {html.escape(primary_reason)}")
+        elif stripped.startswith("<b>👉 การทำต่อ:</b>") or stripped.startswith("<b>🎯 Action:</b>"):
+            tag = "👉 การทำต่อ:" if stripped.startswith("<b>👉 การทำต่อ:</b>") else "🎯 Action:"
+            new_lines.append(f"<b>{tag}</b> {html.escape(action_text)}")
             if not original_has_note and note_text:
-                new_lines.append(f"<b>⚠️ หมายเหตุ:</b> {html.escape(note_text)}")
-        elif stripped.startswith("<b>⚠️ หมายเหตุ:</b>"):
-            new_lines.append(f"<b>⚠️ หมายเหตุ:</b> {html.escape(note_text)}")
-        elif stripped.startswith("<b>📌 แผน:</b>") or stripped.startswith("<b>📌 แผนเข้า:</b>"):
+                note_tag = "⚠️ หมายเหตุ:" if tag == "👉 การทำต่อ:" else "⚠️ Note:"
+                new_lines.append(f"<b>{note_tag}</b> {html.escape(note_text)}")
+        elif stripped.startswith("<b>⚠️ หมายเหตุ:</b>") or stripped.startswith("<b>⚠️ Note:</b>"):
+            tag = "⚠️ หมายเหตุ:" if stripped.startswith("<b>⚠️ หมายเหตุ:</b>") else "⚠️ Note:"
+            new_lines.append(f"<b>{tag}</b> {html.escape(note_text)}")
+        elif (
+            stripped.startswith("<b>📌 แผน:</b>")
+            or stripped.startswith("<b>📌 แผนเข้า:</b>")
+            or stripped.startswith("<b>📌 Plan:</b>")
+        ):
             suffix = stripped.split("</b>", 1)[1] if "</b>" in stripped else ""
-            new_lines.append(f"<b>{target_plan_head}</b>{suffix}")
+            plan_head = "📌 Plan:" if stripped.startswith("<b>📌 Plan:</b>") else target_plan_head
+            new_lines.append(f"<b>{plan_head}</b>{suffix}")
         elif stripped.startswith("<b>🧭 หมวดเหตุผล:</b>"):
             reason_line = " ".join(part for part in (label, reason_group) if part).strip()
             new_lines.append(f"<b>🧭 หมวดเหตุผล:</b> {html.escape(reason_line)}")

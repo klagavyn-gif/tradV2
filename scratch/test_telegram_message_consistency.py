@@ -257,5 +257,69 @@ class TestTelegramMessageConsistency(unittest.TestCase):
         self.assertEqual(msg2.count("<b>📝 เหตุผลใช้งาน:</b>"), 1)
 
 
+    def test_cdcvix_paxg_message_harmonization(self):
+        """Verify CDC+VixFix message with '🚦 สถานะ:', '📝 Decision:', '🎯 Action:' is 100% harmonized."""
+        raw_cdcvix_msg = (
+            "<b>🔴 CDC+VixFix 15m SELL | PAXG-USD</b>\n"
+            "<i>PAXG-USD</i>\n"
+            "────────────────\n"
+            "<b>📍 Snapshot:</b> ราคา 4,160.75 (+0.00%)\n"
+            "<b>🧭 1H Trend:</b> UP | STRONG | ActionZone 15m, Price Action 15m\n"
+            "<b>🧪 Edge:</b> Conf 91% | WR 60.0% | ExpRR 0.45 | Trades 30\n"
+            "<b>🚦 สถานะ:</b> 🟢 เข้าได้\n"
+            "<b>📝 Decision:</b> แผนยังใกล้จุดเข้าและมี SL/TP พร้อมใช้งาน\n"
+            "<b>🎯 Action:</b> เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด SELL/Short ตามแผนได้\n"
+            "<b>⚠️ Note:</b> ครบอายุ CDC เดิม แต่ตลาดยังลงต่อและราคายังไม่ไกลจากจุดเข้าใหม่\n"
+            "<b>⏳ Hold Plan:</b> ถือได้ประมาณ 6 ชม. (24 แท่ง 15m) ถ้าไม่ไปตามทางควรลดไม้หรือปิดรอบ\n"
+            "<b>🧠 Context:</b> Forecast SELL 92/100 | Trend ขาลง | R>G 11/100 | flip 34 bars\n"
+            "<b>📌 Plan:</b> Entry 4,142.70 | SL 4,223.16 | TP1 4,062.24 | TP2 3,997.87\n"
+            "<b>📏 Risk:</b> Risk 2.18% | RR TP1 1.00R / TP2 1.80R\n"
+            "<b>🧭 Level Source:</b> actual+fallback\n"
+            "<b>🤖 AI:</b> ยืนยันเพิ่ม | p(win) 60% | exp +0.78%\n"
+            "<b>🧠 Entry AI:</b> รอ | Watch | p(entry) 20% | p(avoid) 63%\n"
+            "<b>📘 กติกาใช้งาน:</b> รอ Watch เมื่อ p(entry) ยังไม่ถึง 80% หรือ p(avoid) ยังสูง | รอบนี้ 20% / 63%\n"
+            "<b>🎯 Entry Window:</b> Entry 4,142.700195 | ใกล้ entry ไม่เกิน 3.00% | หรือ 1.30R\n"
+            "<b>🏃 Max Chase:</b> SELL ไม่ควรไล่ต่ำกว่า 4,038.100824\n"
+            "<b>⏱️ อายุสัญญาณ:</b> 158 แท่ง 15m | ~2370 นาที | 2026-10-15 14:15:00\n"
+            "────────────────\n"
+            "🕒 <b>เวลา:</b> 2026-10-17 05:33\n"
+            '<a href="https://th.tradingview.com/chart/?symbol=CRYPTO:PAXGUSD">📈 TradingView</a>'
+        )
+
+        candidate = {
+            "symbol": "PAXG-USD",
+            "signal": "SELL",
+            "strategy": "CDCVIX15",
+            "timeframe_minutes": 15,
+            "bars_since_signal": 158.0,
+            "entry_ai_bucket": "watch",
+            "entry_ai_reason": "ผ่านเกณฑ์ Watch monitor ใช้เฝ้าดูจังหวะต่อเนื่อง",
+            "plan": {
+                "entry_price": 4142.70,
+                "current_price": 4160.75,
+                "stop_loss": 4223.16,
+                "take_profit": 4062.24,
+                "risk_reward": 1.0,
+            },
+        }
+
+        harmonized = _append_dispatch_readiness_lines(raw_cdcvix_msg, candidate, config=self.config)
+
+        # Must harmonize 🚦 สถานะ: to 🟡 รอ
+        self.assertIn("<b>🚦 สถานะ:</b> 🟡 รอ", harmonized)
+        self.assertNotIn("<b>🚦 สถานะ:</b> 🟢 เข้าได้", harmonized)
+
+        # Must harmonize 🎯 Action:
+        self.assertIn("<b>🎯 Action:</b> ยังไม่เข้า รอราคาใกล้ entry zone หรือรอแท่งยืนยันเพิ่ม", harmonized)
+        self.assertNotIn("เข้าได้ตามสัญญาณหลัก ถ้ายังไม่มีสถานะสามารถเปิด SELL/Short ตามแผนได้", harmonized)
+
+        # Must harmonize 📝 Decision:
+        self.assertIn("<b>📝 Decision:</b> ผ่านเกณฑ์ Watch monitor ใช้เฝ้าดูจังหวะต่อเนื่อง", harmonized)
+
+        # Must preserve 📌 Plan:
+        self.assertIn("<b>📌 Plan:</b>", harmonized)
+
+
 if __name__ == "__main__":
     unittest.main()
+

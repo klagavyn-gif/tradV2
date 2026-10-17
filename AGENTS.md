@@ -947,6 +947,10 @@ TRADING_COUNCIL_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberation
 - **Exploration Override ใน Arbiter**:
   - เมื่อคะแนนสภาโดยรวมอยู่ที่ $50.0\% - 64.9\%$ (ซึ่งปกติจะติด STANDBY) แต่ ContrarianScout ตรวจพบจังหวะอสมมาตรและยังมีโควตา สภาจะอนุมัติไม้ในฐานะ **`🧪 [Sandbox Exploration]`**
   - ติดป้าย `🧪 <b>[Sandbox Exploration Bet]</b> ไม้ทดลองความเสี่ยงต่ำ (35%) | โอกาสอสมมาตร R:R สูง` ในใบเสร็จ Telegram
+- **Contrarian Rescue Channel (ช่องทางกู้ชีพสัญญาณ)**:
+  - สัญญาณที่ถูกระบบสถิติเดิมตีตราว่า `"ห้ามเข้า"` หรือ `"รอ"` จะถูกส่งให้ `ContrarianScout` ตรวจสอบก่อนทิ้งเสมอ
+  - หากตรวจพบว่ามี $R:R \ge 2.8R$ หรือ Short Squeeze สเกาต์จะกู้ชีพขึ้นมาเป็น `is_exploration_candidate = True` ทะลุเข้าสู่สภา
+  - ฝ่าย `AlphaSpecialist` จะไม่สั่ง VETO ขวางทาง แต่จะให้คะแนนต่ำ (35%) แสดงความกังขา เพื่อให้สภาเปิดอภิปรายและอนุมัติเป็นไม้ทดลอง Sandbox ได้อย่างแท้จริง
 
 ### 3. การเชื่อมต่อสู่วงจรการเรียนรู้ใน Daily Council Debrief
 - **Dialogue Turn**: ContrarianScout เข้าร่วมการประชุมโต๊ะกลมในฐานะผู้เชี่ยวชาญคนที่ 7

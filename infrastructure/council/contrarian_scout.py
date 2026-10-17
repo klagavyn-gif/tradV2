@@ -25,11 +25,20 @@ class ContrarianScout:
         min_asymmetric_rr: float = 2.8,
         sandbox_size_multiplier: float = 0.35,
         squeeze_funding_threshold: float = -0.00015,  # -0.015% funding rate indicates short crowd
+        researcher: Optional[Any] = None,
     ):
         self.name = "contrarian_scout"
         self.min_asymmetric_rr = float(min_asymmetric_rr)
         self.sandbox_size_multiplier = float(sandbox_size_multiplier)
         self.squeeze_funding_threshold = float(squeeze_funding_threshold)
+        if researcher is None:
+            try:
+                from .scout_researcher import ScoutResearcher
+                self.researcher = ScoutResearcher()
+            except Exception:
+                self.researcher = None
+        else:
+            self.researcher = researcher
 
     def evaluate(
         self,
@@ -37,9 +46,11 @@ class ContrarianScout:
         directives: Optional[Dict[str, Any]] = None,
         open_explorations_count: int = 0,
         max_explorations_allowed: int = 1,
+        market_intel: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """
         Evaluate candidate for Asymmetric Payoff and Contrarian Squeeze potential.
+        Consults ScoutResearcher for inter-market lead-lag and contagion anomalies.
         Returns a standardized CouncilOpinion with exploration metadata.
         """
         from .specialists import CouncilOpinion
@@ -74,11 +85,29 @@ class ContrarianScout:
         )
         is_asymmetric_rr = effective_rr >= self.min_asymmetric_rr
 
+        # 2.5 Consult Scout Researcher (Secretary on Cross-Market Dynamics)
+        research_eval = None
+        research_confidence_boost = 0.0
+        theses = []
+
+        if self.researcher and hasattr(self.researcher, "evaluate_correlation"):
+            try:
+                # Extract snapshot if market_intel was passed
+                snap = None
+                if isinstance(market_intel, dict):
+                    snap = market_intel.get("market_snapshot") or market_intel
+                research_eval = self.researcher.evaluate_correlation(candidate, snapshot=snap)
+                if research_eval and research_eval.get("has_anomaly"):
+                    research_confidence_boost = float(research_eval.get("confidence_boost", 0.0))
+                    for a in research_eval.get("anomalies", []):
+                        theses.append(f"🔎 [เลขาตรวจพบความสัมพันธ์] {a['thesis']}")
+            except Exception as re:
+                logger.debug("[ContrarianScout] Researcher correlation check skipped: %s", re)
+
         # 3. Quota check: Ensure we don't exceed max simultaneous exploration bets
         quota_available = open_explorations_count < max_explorations_allowed
 
-        # 4. Formulate Contrarian Thesis
-        theses = []
+        # 4. Formulate Contrarian Theses
         if is_asymmetric_rr:
             theses.append(f"ผลตอบแทนอสมมาตรสูงลิ่ว R:R={effective_rr:.2f}x (คุ้มเสี่ยง)")
         if is_short_squeeze_setup:
@@ -87,7 +116,11 @@ class ContrarianScout:
             theses.append(f"Long Flush Setup (Funding Rate บวม {funding_rate*100:.3f}%)")
 
         # 5. Check if candidate qualifies as an Exploration Sandbox Candidate
-        is_exploration = (is_asymmetric_rr or is_short_squeeze_setup or is_long_flush_setup) and quota_available
+        is_research_anomaly = bool(research_eval and research_eval.get("has_anomaly"))
+        is_exploration = (
+            (is_asymmetric_rr or is_short_squeeze_setup or is_long_flush_setup or (is_research_anomaly and effective_rr >= 2.0))
+            and quota_available
+        )
 
         # Check caution mode from Blackboard directives
         if isinstance(directives, dict) and directives.get("caution_mode"):
@@ -96,8 +129,8 @@ class ContrarianScout:
                 is_exploration = False
 
         if is_exploration:
-            confidence = 85.0
-            thesis_str = " | ".join(theses)
+            confidence = max(60.0, min(95.0, 85.0 + research_confidence_boost))
+            thesis_str = " | ".join(theses) if theses else "Asymmetric Payoff"
             note = (
                 f"🔬 [Contrarian Scout] ขอเสนอเปิดไม้ทดลอง (Sandbox Bet) ขนาด {self.sandbox_size_multiplier*100:.0f}%: "
                 f"{thesis_str}"
@@ -114,6 +147,7 @@ class ContrarianScout:
                     "funding_rate": funding_rate,
                     "sandbox_size_multiplier": self.sandbox_size_multiplier,
                     "target_rr": round(effective_rr, 2),
+                    "researcher_eval": research_eval or {},
                 },
                 note=note,
             )

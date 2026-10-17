@@ -700,6 +700,34 @@ TELEGRAM_ALERT_EDIT_MESSAGE_STORE_PATH = ".data/telegram_alerts/live_trade_messa
      4. จำลองการตั้งค่า Override 8 ชั่วโมง (28,800s) -> ทำงานถูกต้อง
    - ผลการทดสอบ: **ผ่านฉลุย 100% (All Tests Passed)**
 
+## 21. การตรวจสอบและแก้ไขปัญหาแอบแฝงเชิงลึกในระบบ Auto-Trade & Risk Engine (ต.ค. 2026)
+
+สถานะ: **เสร็จสิ้นและผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+จากการตรวจสอบเชิงลึกทั้งโครงสร้างโค้ดและ Artifact จริงบน Cloud (`scratch/latest_cloud_paxg/`) ตรวจพบปัญหาแอบแฝง 4 จุดสำคัญและแก้ไขแล้วทั้งหมด:
+
+### 1. ปัญหา Infinite Loss Streak พุ่งค้าง (6 ไม้รวด) และ Circuit Breaker Loop
+- **ปัญหา**: ใน `infrastructure/binance/risk_manager.py` ตัวแปร `consecutive_losses` ใน State จริงค้างอยู่ที่ `6` เพราะ:
+  - เมื่อ Circuit Breaker พักครบ 6 ชั่วโมงและหมดอายุ (`check_circuit_breaker`), ระบบไม่ได้รีเซ็ต `consecutive_losses = 0`
+  - ในลูป Auto-reconciliation (`update_from_settled_outcomes`), ระบบนับผลแพ้ย้อนหลังข้ามสัปดาห์ (ADA, NEAR, SOL, XRP, ETH, ETH) โดยไม่รีเซ็ตเมื่อมี Circuit Breaker คั่นกลาง ทำให้แตะ 6 ไม้
+  - **ผลกระทบ**: บอทถูกบีบลดขนาดไม้ลง 50% ตลอดกาล (`multiplier = 0.5x`) และหากแพ้ไม้ถัดไปเพียงไม้เดียว จะกระตุ้น Circuit Breaker หยุดเทรด 6 ชม. ทันที
+- **การแก้ไข**:
+  - เมื่อ Circuit Breaker หมดอายุ -> รีเซ็ต `consecutive_losses = 0` ทันที
+  - ในลูปคำนวณและ Auto-reconciliation -> เมื่อแตะเกณฑ์ `loss_streak_max` (3 ไม้) และเกิดคูลดาวน์ขึ้นแล้ว รอบถัดไปจะเริ่มนับรอบใหม่จาก 0
+  - หากสถานะ Circuit Breaker ปิดอยู่แต่มี Streak ตกค้าง $\ge 3$ ไม้ -> เคลียร์เป็น 0 อัตโนมัติ
+
+### 2. ปัญหา `binance_executed_orders.json` ไม่บันทึกสถานะ `"status": "closed"` ลง Disk
+- **ปัญหา**: ใน `pipeline_hook.py` คำสั่ง `_save_executed_orders` เดิมถูกเรียกเฉพาะในลูป `for d in closed_details:` แต่ใน `watchdog.py` หากไม้นั้นถูกบันทึก settled ใน `realized_outcomes.json` ไปก่อนแล้ว ไม้นั้นจะไม่ถูกใส่ใน `closed_details` ทำให้ `rec["status"] = "closed"` เปลี่ยนแค่ใน Memory แต่ไม่เคยถูกเซฟลง Disk กลายเป็น `status: null` ค้าง
+- **การแก้ไข**: ปรับให้ `_save_executed_orders` ถูกเรียกบันทึกลง Disk เสมอหลัง Watchdog ทำงานเสร็จ และเมื่อเปิดไม้ใหม่จะกำหนด `"status": "open"` อย่างชัดเจน
+
+### 3. ปัญหา Parameter Collision ใน `cancel_algo_order`
+- **ปัญหา**: ใน `infrastructure/binance/client.py` ฟังก์ชัน `cancel_algo_order` ส่งทั้ง `algoId` และ `clientAlgoId` ไปพร้อมกัน (`if algo_id: ... if client_algo_id: ...`) ซึ่ง API ของ Binance อาจตีกลับว่า Parameter ซ้ำซ้อน
+- **การแก้ไข**: เปลี่ยนเป็น `if algo_id: ... elif client_algo_id:` เพื่อส่งเพียงคีย์เดียวเหมือน `cancel_order`
+
+### 4. การเพิ่ม Safety Net ป้องกัน Stop Loss หลุดตอนปรับ Breakeven
+- **ปัญหา**: ใน `order_manager.py` ขณะเลื่อน SL ไปที่ทุน (Breakeven) ระบบจะยกเลิก SL เก่าก่อน แล้วส่ง SL ใหม่ หากคำสั่งใหม่เกิดล้มเหลว (เช่น ราคาแกว่งข้าม หรือเน็ตเวิร์กสะดุด) ไม้นั้นจะกลายเป็น Naked Position ไม่มี Stop Loss
+- **การแก้ไข**: เพิ่มกลไก Fallback หากคำสั่ง Breakeven Stop ล้มเหลว ระบบจะส่งคำสั่ง Protective Stop Loss เดิมที่ราคา `current_sl` กลับคืนทันที
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

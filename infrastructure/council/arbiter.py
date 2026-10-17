@@ -116,20 +116,34 @@ class TradingCouncil:
         alert_id = str(candidate.get("alert_id") or "")
 
         opinions: Dict[str, CouncilOpinion] = {}
+        directives = self.blackboard.get_active_directives() if self.blackboard else {}
 
-        # 1. Gather specialist opinions
-        opinions["alpha_specialist"] = self.alpha_specialist.evaluate(candidate)
-        opinions["macro_specialist"] = self.macro_specialist.evaluate(
-            candidate, client=client, shock_eval=shock_eval
+        def _safe_call(eval_fn, *args, **kwargs):
+            try:
+                return eval_fn(*args, **kwargs)
+            except TypeError as te:
+                if "directives" in str(te) and "directives" in kwargs:
+                    kw_clean = {k: v for k, v in kwargs.items() if k != "directives"}
+                    return eval_fn(*args, **kw_clean)
+                raise
+
+        # 1. Gather specialist opinions with Blackboard directives
+        opinions["alpha_specialist"] = _safe_call(self.alpha_specialist.evaluate, candidate, directives=directives)
+        opinions["macro_specialist"] = _safe_call(
+            self.macro_specialist.evaluate, candidate, client=client, shock_eval=shock_eval, directives=directives
         )
-        opinions["derivatives_specialist"] = self.derivatives_specialist.evaluate(
-            candidate, **(deriv_filter_kwargs or {})
+        opinions["derivatives_specialist"] = _safe_call(
+            self.derivatives_specialist.evaluate, candidate, directives=directives, **(deriv_filter_kwargs or {})
         )
-        opinions["risk_specialist"] = self.risk_specialist.evaluate(candidate, total_equity=total_equity)
-        opinions["ops_specialist"] = self.ops_specialist.evaluate(
+        opinions["risk_specialist"] = _safe_call(
+            self.risk_specialist.evaluate, candidate, total_equity=total_equity, directives=directives
+        )
+        opinions["ops_specialist"] = _safe_call(
+            self.ops_specialist.evaluate,
             candidate,
             open_positions_count=open_positions_count,
             live_price=live_price,
+            directives=directives,
         )
 
         # 2. Check for VETO
@@ -151,6 +165,7 @@ class TradingCouncil:
         sizing_info = opinions["risk_specialist"].metrics or {}
 
         # 4. Formulate Verdict
+        caution_tag = " [⚠️ Caution Mode]" if directives.get("caution_mode") else ""
         if veto_specialist:
             decision = "VETO"
             approved = False
@@ -160,13 +175,13 @@ class TradingCouncil:
             decision = "EXECUTE"
             approved = True
             approvals_count = sum(1 for op in opinions.values() if op.status == "APPROVED")
-            summary = f"สภาเห็นชอบเอกฉันท์ ({approvals_count}/5 เสียง, คะแนน {composite_score:.1f}%)"
-            telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/5 เสียง ({composite_score:.1f}%)"
+            summary = f"สภาเห็นชอบเอกฉันท์ ({approvals_count}/5 เสียง, คะแนน {composite_score:.1f}%){caution_tag}"
+            telegram_badge = f"🏛️ <b>[Council Consensus]</b> สภาเห็นชอบ {approvals_count}/5 เสียง ({composite_score:.1f}%){caution_tag}"
         else:
             decision = "STANDBY"
             approved = False
-            summary = f"คะแนนความมั่นใจไม่ถึงเกณฑ์ ({composite_score:.1f}% < {self.min_composite_score:.1f}%)"
-            telegram_badge = f"🏛️ <b>[Council Standby]</b> ความมั่นใจรวม {composite_score:.1f}% ต่ำกว่าเกณฑ์"
+            summary = f"คะแนนความมั่นใจไม่ถึงเกณฑ์ ({composite_score:.1f}% < {self.min_composite_score:.1f}%){caution_tag}"
+            telegram_badge = f"🏛️ <b>[Council Standby]</b> ความมั่นใจรวม {composite_score:.1f}% ต่ำกว่าเกณฑ์{caution_tag}"
 
         verdict = ConsensusVerdict(
             decision=decision,
@@ -180,7 +195,7 @@ class TradingCouncil:
             telegram_badge=telegram_badge,
         )
 
-        # 5. Record round onto Central Blackboard (Hot Memory)
+        # 5. Record round onto Central Blackboard (Hot Memory) & update system status
         try:
             round_record = {
                 "round_id": f"rnd_{symbol}_{alert_id[:8]}",
@@ -190,6 +205,11 @@ class TradingCouncil:
                 "verdict": verdict.to_dict(),
             }
             self.blackboard.post_deliberation(round_record)
+            self.blackboard.update_system_status({
+                "open_positions_count": open_positions_count,
+                "last_deliberated_symbol": symbol,
+                "last_verdict": verdict.decision,
+            })
         except Exception as be:
             logger.warning("Failed to record deliberation to blackboard: %s", be)
 

@@ -245,6 +245,9 @@ def main(argv=None):
             "score": (doctor_report or {}).get("score"),
             "urgent_alert_sent": doctor_urgent_sent,
             "issues_count": len((doctor_report or {}).get("issues") or []),
+            "blackboard_briefing_posted": bool((doctor_report or {}).get("blackboard_posted")),
+            "caution_mode": (doctor_report or {}).get("directives", {}).get("caution_mode", False),
+            "council_rounds_24h": ((doctor_report or {}).get("checks", {}).get("central_blackboard", {}).get("council_stats") or {}).get("total_rounds_24h", 0),
         },
     }
     if args.verify_output:

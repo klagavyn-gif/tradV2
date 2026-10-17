@@ -626,6 +626,7 @@ def execute_binance_auto_trade_pipeline(
                         "stop_loss": c.get("stop_loss"),
                         "status": "open",
                         "executed_at": datetime.utcnow().isoformat(),
+                        "council_round_id": getattr(verdict, "round_id", None) if verdict else None,
                     }
                     _save_executed_orders(executed_orders_path, executed_records)
                 logger.info("Auto-traded on Binance: %s %s @ %s", exec_res["symbol"], exec_res["signal"], exec_res["entry_price"])

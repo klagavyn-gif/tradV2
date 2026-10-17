@@ -58,11 +58,12 @@ class AlphaSpecialist:
         self.name = "alpha_specialist"
         self.allowed_strategies = allowed_strategies or {"CDCVIX15", "PA15", "PRIMARY"}
 
-    def evaluate(self, candidate: Dict[str, Any]) -> CouncilOpinion:
+    def evaluate(self, candidate: Dict[str, Any], directives: Optional[Dict[str, Any]] = None) -> CouncilOpinion:
         strategy = str(candidate.get("strategy") or "").strip().upper()
         signal = str(candidate.get("signal") or "").strip().upper()
         dispatch_label = str(candidate.get("dispatch_status_label") or "").strip()
         plan = candidate.get("plan") if isinstance(candidate.get("plan"), dict) else {}
+        symbol = str(candidate.get("symbol") or "")
 
         # 1. Strategy check
         if strategy not in self.allowed_strategies:
@@ -108,8 +109,21 @@ class AlphaSpecialist:
             elif ai_prob < 0.40:
                 confidence -= 15.0
 
+        # Incorporate active Central Blackboard directives
+        directive_notes = []
+        if isinstance(directives, dict):
+            flagged = directives.get("flagged_symbols") or []
+            if symbol in flagged:
+                confidence -= 20.0
+                directive_notes.append("Flagged by Blackboard Health Directive")
+            if directives.get("caution_mode"):
+                confidence -= 10.0
+                directive_notes.append("Board Caution Mode")
+
         confidence = max(20.0, min(95.0, confidence))
         note = f"{strategy} {signal} validated | R:R={rr_ratio:.2f} | Entry={entry_p:,}"
+        if directive_notes:
+            note += f" [{' | '.join(directive_notes)}]"
 
         return CouncilOpinion(
             specialist_name=self.name,
@@ -128,7 +142,7 @@ class MacroSpecialist:
         self.name = "macro_specialist"
         self.barrier = barrier
 
-    def evaluate(self, candidate: Dict[str, Any], client=None, shock_eval: Optional[Dict[str, Any]] = None) -> CouncilOpinion:
+    def evaluate(self, candidate: Dict[str, Any], client=None, shock_eval: Optional[Dict[str, Any]] = None, directives: Optional[Dict[str, Any]] = None) -> CouncilOpinion:
         if not self.barrier:
             return CouncilOpinion(
                 specialist_name=self.name,
@@ -177,7 +191,7 @@ class DerivativesSpecialist:
         self.name = "derivatives_specialist"
         self.deriv_filter = deriv_filter
 
-    def evaluate(self, candidate: Dict[str, Any], **filter_kwargs) -> CouncilOpinion:
+    def evaluate(self, candidate: Dict[str, Any], directives: Optional[Dict[str, Any]] = None, **filter_kwargs) -> CouncilOpinion:
         if not self.deriv_filter:
             return CouncilOpinion(
                 specialist_name=self.name,
@@ -241,14 +255,21 @@ class RiskSpecialist:
         self.default_notional = float(default_notional)
         self.leverage = int(leverage)
 
-    def evaluate(self, candidate: Dict[str, Any], total_equity: float = 0.0) -> CouncilOpinion:
+    def evaluate(self, candidate: Dict[str, Any], total_equity: float = 0.0, directives: Optional[Dict[str, Any]] = None) -> CouncilOpinion:
         if not self.risk_manager:
+            mult = 1.0
+            notional = self.default_notional
+            if isinstance(directives, dict) and directives.get("caution_mode"):
+                cap = float(directives.get("risk_multiplier_cap", 0.75))
+                if mult > cap:
+                    mult = cap
+                    notional = notional * cap
             return CouncilOpinion(
                 specialist_name=self.name,
                 status="APPROVED",
-                confidence=70.0,
-                metrics={"final_notional": self.default_notional, "multiplier": 1.0},
-                note="Fixed sizing active (RiskManager disabled)",
+                confidence=65.0 if mult < 1.0 else 70.0,
+                metrics={"final_notional": notional, "multiplier": mult},
+                note=f"Fixed sizing active (Multiplier: {mult}x)",
             )
 
         # 1. Circuit Breaker check
@@ -274,15 +295,29 @@ class RiskSpecialist:
         mult_reason = str(sizing_info.get("multiplier_reason", "normal"))
         final_notional = float(sizing_info.get("final_notional", self.default_notional))
 
+        # Respect Central Blackboard directives (e.g. Caution Mode cap)
+        directive_note = ""
+        if isinstance(directives, dict) and directives.get("caution_mode"):
+            cap = float(directives.get("risk_multiplier_cap", 0.75))
+            if multiplier > cap:
+                ratio = cap / multiplier if multiplier > 0 else 1.0
+                multiplier = cap
+                final_notional = final_notional * ratio
+                sizing_info["multiplier"] = multiplier
+                sizing_info["final_notional"] = final_notional
+                sizing_info["multiplier_reason"] = f"blackboard_caution_cap_{cap}x"
+                mult_reason = sizing_info["multiplier_reason"]
+                directive_note = f" (Capped by Blackboard Caution Directive at {cap}x)"
+
         confidence = 80.0
         if multiplier < 1.0:
             confidence -= 15.0
-            note = f"Throttled: {mult_reason} (Notional {final_notional:.2f} USDT, {multiplier}x)"
+            note = f"Throttled: {mult_reason} (Notional {final_notional:.2f} USDT, {multiplier}x){directive_note}"
         elif multiplier > 1.0:
             confidence += 10.0
-            note = f"Scaled: {mult_reason} (Notional {final_notional:.2f} USDT, {multiplier}x)"
+            note = f"Scaled: {mult_reason} (Notional {final_notional:.2f} USDT, {multiplier}x){directive_note}"
         else:
-            note = f"Standard Sizing (Notional {final_notional:.2f} USDT, Margin {final_notional/self.leverage:.2f} USDT)"
+            note = f"Standard Sizing (Notional {final_notional:.2f} USDT, Margin {final_notional/self.leverage:.2f} USDT){directive_note}"
 
         return CouncilOpinion(
             specialist_name=self.name,
@@ -307,16 +342,26 @@ class OpsSpecialist:
         candidate: Dict[str, Any],
         open_positions_count: int,
         live_price: Optional[float] = None,
+        directives: Optional[Dict[str, Any]] = None,
     ) -> CouncilOpinion:
+        # Effective capacity from base or Central Blackboard directive
+        capacity = self.max_positions
+        if isinstance(directives, dict) and directives.get("max_positions_cap"):
+            try:
+                capacity = min(self.max_positions, int(directives.get("max_positions_cap")))
+            except (ValueError, TypeError):
+                capacity = self.max_positions
+
         # 1. Capacity check
-        if open_positions_count >= self.max_positions:
+        if open_positions_count >= capacity:
+            cap_note = f" (Capped by Blackboard Directive at {capacity})" if capacity < self.max_positions else ""
             return CouncilOpinion(
                 specialist_name=self.name,
                 status="VETOED",
                 confidence=0.0,
                 veto=True,
                 veto_reason=f"max_positions_{open_positions_count}_reached",
-                note=f"Account capacity full ({open_positions_count}/{self.max_positions} active positions)",
+                note=f"Account capacity full ({open_positions_count}/{capacity} active positions){cap_note}",
             )
 
         # 2. Price Drift / Anti-Chase check
@@ -348,6 +393,6 @@ class OpsSpecialist:
             status="APPROVED",
             confidence=90.0,
             veto=False,
-            metrics={"open_positions": open_positions_count, "capacity": self.max_positions},
-            note=f"Execution ready: capacity {open_positions_count}/{self.max_positions} | Slippage safe",
+            metrics={"open_positions": open_positions_count, "capacity": capacity},
+            note=f"Execution ready: capacity {open_positions_count}/{capacity} | Slippage safe",
         )

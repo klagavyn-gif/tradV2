@@ -47,7 +47,19 @@ def main():
 
     for c_name, c_data in report.get("checks", {}).items():
         status_icon = "✅" if c_data.get("status") == "PASS" else ("⚠️" if c_data.get("status") == "WARNING" else "❌")
-        print(f" {status_icon} [{c_name:17s}] {c_data.get('details')}")
+        print(f" {status_icon} [{c_name:18s}] {c_data.get('details')}")
+
+    if report.get("directives"):
+        dirs = report["directives"]
+        print("-" * 65)
+        print(" CENTRAL BLACKBOARD DIRECTIVES:")
+        print(f"  Caution Mode:        {'ON (⚠️)' if dirs.get('caution_mode') else 'OFF (🟢)'}")
+        print(f"  Risk Multiplier Cap: {dirs.get('risk_multiplier_cap')}x")
+        if dirs.get('max_positions_cap'):
+            print(f"  Max Positions Cap:   {dirs.get('max_positions_cap')}")
+        if dirs.get('flagged_symbols'):
+            print(f"  Flagged Symbols:     {', '.join(dirs.get('flagged_symbols'))}")
+        print(f"  Posted to Board:     {'YES ✅' if report.get('blackboard_posted') else 'NO'}")
 
     if report.get("issues"):
         print("-" * 65)

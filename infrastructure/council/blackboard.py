@@ -45,43 +45,127 @@ class CentralBlackboard:
         self.max_age_hours = float(max_hot_hours if max_hot_hours is not None else max_age_hours)
         self.max_rounds = int(max_hot_rounds if max_hot_rounds is not None else max_rounds)
 
-    def load_deliberations(self) -> List[Dict[str, Any]]:
-        """Load hot memory deliberations from disk."""
+    def load_full_state(self) -> Dict[str, Any]:
+        """Load the complete state document from the Blackboard."""
         if not os.path.exists(self.file_path) or os.path.getsize(self.file_path) == 0:
-            return []
+            return {
+                "version": 1,
+                "updated_at": _format_dt(_utc_now()),
+                "system_status": {},
+                "daily_health_briefing": None,
+                "active_directives": {},
+                "total_rounds": 0,
+                "rounds": [],
+                "deliberations": [],
+            }
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, list):
-                return data
+                return {
+                    "version": 1,
+                    "updated_at": _format_dt(_utc_now()),
+                    "system_status": {},
+                    "daily_health_briefing": None,
+                    "active_directives": {},
+                    "total_rounds": len(data),
+                    "rounds": data,
+                    "deliberations": data,
+                }
             if isinstance(data, dict):
-                if "deliberations" in data and isinstance(data["deliberations"], list):
-                    return data["deliberations"]
-                if "rounds" in data and isinstance(data["rounds"], list):
-                    return data["rounds"]
-            return []
+                rounds = data.get("rounds") or data.get("deliberations") or []
+                data["rounds"] = rounds
+                data["deliberations"] = rounds
+                data.setdefault("system_status", {})
+                data.setdefault("daily_health_briefing", None)
+                data.setdefault("active_directives", {})
+                return data
+            return {}
         except Exception as e:
-            logger.warning("Failed to load deliberations from %s: %s", self.file_path, e)
-            return []
+            logger.warning("Failed to load full state from %s: %s", self.file_path, e)
+            return {}
 
-    def save_deliberations(self, rounds: List[Dict[str, Any]]) -> None:
-        """Atomically persist deliberations list to disk."""
+    def save_full_state(self, state: Dict[str, Any]) -> None:
+        """Atomically persist the complete state document to disk."""
         try:
             os.makedirs(os.path.dirname(os.path.abspath(self.file_path)), exist_ok=True)
             temp_path = f"{self.file_path}.tmp_{os.getpid()}_{int(time.time()*1000)}"
-            payload = {
-                "version": 1,
-                "updated_at": _format_dt(_utc_now()),
-                "total_rounds": len(rounds),
-                "last_pruned": _format_dt(_utc_now()),
-                "deliberations": rounds,
-                "rounds": rounds,
-            }
+            state["updated_at"] = _format_dt(_utc_now())
+            rounds = state.get("rounds") or state.get("deliberations") or []
+            state["rounds"] = rounds
+            state["deliberations"] = rounds
+            state["total_rounds"] = len(rounds)
             with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
+                json.dump(state, f, indent=2, ensure_ascii=False)
             os.replace(temp_path, self.file_path)
         except Exception as e:
-            logger.error("Failed to save deliberations to %s: %s", self.file_path, e)
+            logger.error("Failed to save full state to %s: %s", self.file_path, e)
+
+    def load_deliberations(self) -> List[Dict[str, Any]]:
+        """Load hot memory deliberations from disk."""
+        state = self.load_full_state()
+        return state.get("rounds", [])
+
+    def save_deliberations(self, rounds: List[Dict[str, Any]]) -> None:
+        """Atomically persist deliberations list while preserving state hub metadata."""
+        state = self.load_full_state()
+        state["rounds"] = rounds
+        state["deliberations"] = rounds
+        state["last_pruned"] = _format_dt(_utc_now())
+        self.save_full_state(state)
+
+    def post_health_briefing(self, briefing: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Record the Daily AI Health Diagnostic & Governance Review onto the Blackboard.
+        Updates active directives to guide subsequent multi-agent deliberations.
+        """
+        state = self.load_full_state()
+        briefing_copy = dict(briefing)
+        briefing_copy.setdefault("posted_at", _format_dt(_utc_now()))
+        
+        state["daily_health_briefing"] = briefing_copy
+        directives = briefing_copy.get("directives") or {}
+        state["active_directives"] = directives
+        
+        # Update system status with latest health audit metrics
+        status = state.setdefault("system_status", {})
+        status["last_health_score"] = briefing_copy.get("score")
+        status["last_health_severity"] = briefing_copy.get("severity")
+        status["last_health_check_at"] = briefing_copy.get("posted_at")
+        status["caution_mode"] = bool(directives.get("caution_mode", False))
+
+        self.save_full_state(state)
+        logger.info(
+            "[Blackboard] Daily AI Health Briefing posted: Score=%.1f (%s) CautionMode=%s",
+            float(briefing_copy.get("score") or 0.0),
+            briefing_copy.get("severity", "UNKNOWN"),
+            directives.get("caution_mode", False),
+        )
+        return briefing_copy
+
+    def get_health_briefing(self) -> Optional[Dict[str, Any]]:
+        """Retrieve the latest daily AI health briefing from the Blackboard."""
+        state = self.load_full_state()
+        return state.get("daily_health_briefing")
+
+    def get_active_directives(self) -> Dict[str, Any]:
+        """Retrieve active governance directives posted by the AI Health Doctor."""
+        state = self.load_full_state()
+        return state.get("active_directives") or {}
+
+    def update_system_status(self, update: Dict[str, Any]) -> Dict[str, Any]:
+        """Update system heartbeat, active positions, and operational status."""
+        state = self.load_full_state()
+        status = state.setdefault("system_status", {})
+        status.update(update)
+        status["last_heartbeat"] = _format_dt(_utc_now())
+        self.save_full_state(state)
+        return status
+
+    def get_system_status(self) -> Dict[str, Any]:
+        """Retrieve complete 360-degree operational status of the bot."""
+        state = self.load_full_state()
+        return state.get("system_status") or {}
 
     def post_deliberation(self, round_record: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -100,6 +184,15 @@ class CentralBlackboard:
         pruned_rounds = self.prune_hot_memory(rounds)
         self.save_deliberations(pruned_rounds)
         return round_record
+
+    @property
+    def rounds(self) -> List[Dict[str, Any]]:
+        """Retrieve deliberations list for direct inspection."""
+        return self.load_deliberations()
+
+    def record_round(self, round_record: Dict[str, Any]) -> Dict[str, Any]:
+        """Convenience alias for post_deliberation."""
+        return self.post_deliberation(round_record)
 
     def prune_hot_memory(
         self,

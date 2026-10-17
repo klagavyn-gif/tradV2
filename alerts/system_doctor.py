@@ -236,6 +236,165 @@ def check_binance_futures_connection(config: Any) -> Dict[str, Any]:
     return result
 
 
+def check_central_blackboard_and_council(
+    data_dir: Path,
+    config: Any = None,
+    blackboard: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """
+    Audit Central Blackboard deliberations, Trading Council consensus,
+    and detect untracked/rogue orders executed out-of-council on Binance.
+    """
+    result = {
+        "status": "PASS",
+        "details": "Central Blackboard & Trading Council operating normally",
+        "issues": [],
+        "council_stats": {
+            "total_rounds_24h": 0,
+            "approved_count": 0,
+            "approval_rate_pct": 100.0,
+            "specialist_vetoes": {},
+        },
+        "untracked_orders": [],
+    }
+
+    if blackboard is None:
+        try:
+            from infrastructure.council import CentralBlackboard
+            delib_file = data_dir / "council_deliberations.json"
+            blackboard = CentralBlackboard(file_path=str(delib_file))
+        except Exception as e:
+            result["details"] = f"Central Blackboard not initialized: {e}"
+            return result
+
+    try:
+        state = blackboard.load_full_state()
+    except Exception as e:
+        result["details"] = f"Failed to load Blackboard state: {e}"
+        return result
+
+    rounds = state.get("rounds", [])
+    now_utc7 = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+    cutoff_24h = now_utc7 - timedelta(hours=24)
+
+    # 1. Deliberation stats in last 24h
+    total_rounds_24h = 0
+    approved_count = 0
+    specialist_vetoes: Dict[str, int] = {}
+    council_alert_ids = set()
+    council_round_ids = set()
+
+    for r in rounds:
+        aid = str(r.get("alert_id") or "").strip()
+        rid = str(r.get("round_id") or "").strip()
+        if aid:
+            council_alert_ids.add(aid)
+        if rid:
+            council_round_ids.add(rid)
+
+        ts_str = r.get("timestamp")
+        in_24h = True
+        if ts_str:
+            try:
+                ts_clean = str(ts_str).strip()
+                if "T" in ts_clean:
+                    r_dt = datetime.fromisoformat(ts_clean.replace("Z", "+00:00"))
+                    if r_dt.tzinfo is not None:
+                        r_dt = r_dt.astimezone(timezone(timedelta(hours=7))).replace(tzinfo=None)
+                else:
+                    r_dt = datetime.strptime(ts_clean[:19], "%Y-%m-%d %H:%M:%S")
+                in_24h = (r_dt >= cutoff_24h)
+            except Exception:
+                in_24h = True
+
+        if in_24h:
+            total_rounds_24h += 1
+            if r.get("approved"):
+                approved_count += 1
+            for spec_name, spec_op in (r.get("specialist_opinions") or {}).items():
+                if isinstance(spec_op, dict) and spec_op.get("veto"):
+                    specialist_vetoes[spec_name] = specialist_vetoes.get(spec_name, 0) + 1
+
+    # Council deadlock detection: If we had many signals but 0 approvals
+    if total_rounds_24h >= 6 and approved_count == 0:
+        top_vetoer = max(specialist_vetoes.items(), key=lambda x: x[1])[0] if specialist_vetoes else "Unknown"
+        top_count = specialist_vetoes.get(top_vetoer, 0)
+        veto_detail = f"Veto สูงสุดโดย {top_vetoer} ({top_count} ครั้ง)" if top_count > 0 else "คะแนนฉันทามติไม่ถึงเกณฑ์ขั้นต่ำ"
+        result["status"] = "WARNING"
+        result["issues"].append({
+            "severity": "WARNING",
+            "type": "council_deliberation_lockup",
+            "message": f"สภาเทรดปฏิเสธสัญญาณ 100% ใน 24 ชม. ({total_rounds_24h} รอบ) [{veto_detail}]",
+        })
+
+    # 2. Audit Binance Executed Orders vs Council Rounds ("ไม่ให้มีอะไรแอบทำงานเอง")
+    exec_orders_path = data_dir / "binance_executed_orders.json"
+    executed_orders = _read_json_file(exec_orders_path)
+    untracked_orders = []
+
+    for aid, rec in executed_orders.items():
+        if not isinstance(rec, dict):
+            continue
+        status = str(rec.get("status") or "").lower()
+        rec_round_id = str(rec.get("council_round_id") or "").strip()
+        is_tracked = (aid in council_alert_ids) or (rec_round_id and rec_round_id in council_round_ids)
+
+        if not is_tracked and rounds:
+            exec_at = rec.get("executed_at")
+            sym = rec.get("symbol", "UNKNOWN")
+            untracked_info = {
+                "alert_id": aid,
+                "symbol": sym,
+                "status": status,
+                "executed_at": exec_at,
+            }
+            untracked_orders.append(untracked_info)
+            if status == "open":
+                result["status"] = "CRITICAL"
+                result["issues"].append({
+                    "severity": "CRITICAL",
+                    "type": "untracked_rogue_order",
+                    "symbol": sym,
+                    "message": f"พบคำสั่งเปิด {sym} ({aid}) บน Binance ไม่อยู่ในบันทึกของ Central Blackboard (Rogue Trade Detected!)",
+                })
+            else:
+                if result["status"] != "CRITICAL":
+                    result["status"] = "WARNING"
+                result["issues"].append({
+                    "severity": "WARNING",
+                    "type": "untracked_closed_order",
+                    "symbol": sym,
+                    "message": f"พบประวัติออเดอร์ {sym} ({aid}) บน Binance ไม่อยู่ในบันทึกของ Central Blackboard",
+                })
+
+    # 3. Check System Status on Blackboard
+    system_status = state.get("system_status", {})
+    fetch_errors = system_status.get("data_fetch_errors", [])
+    if isinstance(fetch_errors, list) and fetch_errors:
+        if result["status"] == "PASS":
+            result["status"] = "WARNING"
+        for sym_err in fetch_errors:
+            result["issues"].append({
+                "severity": "WARNING",
+                "type": "symbol_data_fetch_error",
+                "symbol": sym_err,
+                "message": f"Central Blackboard ตรวจพบปัญหาดึงข้อมูลในเหรียญ {sym_err}",
+            })
+
+    approval_rate = (approved_count / total_rounds_24h * 100.0) if total_rounds_24h > 0 else 100.0
+    result["council_stats"]["total_rounds_24h"] = total_rounds_24h
+    result["council_stats"]["approved_count"] = approved_count
+    result["council_stats"]["approval_rate_pct"] = round(approval_rate, 1)
+    result["council_stats"]["specialist_vetoes"] = specialist_vetoes
+    result["untracked_orders"] = untracked_orders
+    result["details"] = (
+        f"Deliberations (24h): {total_rounds_24h}, Approved: {approved_count} ({approval_rate:.1f}%), "
+        f"Untracked: {len(untracked_orders)}"
+    )
+
+    return result
+
+
 def generate_doctor_ai_diagnosis(issues: List[Dict[str, str]], config: Any) -> Optional[str]:
     """Use Gemini Flash to generate concise Thai diagnosis and remedy for detected issues."""
     if not issues:
@@ -289,14 +448,23 @@ def _fallback_heuristic_diagnosis(issues: List[Dict[str, str]]) -> str:
     lines = []
     if criticals:
         c_types = {c.get("type") for c in criticals}
-        if "cold_start_deadlock" in c_types or "missing_prior_fallback" in c_types:
+        if "untracked_rogue_order" in c_types:
+            lines.append("🔍 สาเหตุ: มีคำสั่งซื้อขายเปิดบน Binance โดยไม่ผ่าน Trading Council และ Central Blackboard")
+            lines.append("💡 วิธีแก้: ตรวจสอบ Position ที่เปิดอยู่ และหยุดการส่งคำสั่งนอกระบบทันที")
+        elif "cold_start_deadlock" in c_types or "missing_prior_fallback" in c_types:
             lines.append("🔍 สาเหตุ: สถิติ realized_summary เป็น 0 ทำให้ระบบติด Deadlock บล็อกไม้เข้า")
             lines.append("💡 วิธีแก้: ตรวจสอบการตั้งค่า STRATEGY_BASELINE_EDGE_PRIORS ใน config.py เพื่อเปิดใช้สถิติตั้งต้น")
         else:
             lines.append(f"🔍 ตรวจพบข้อผิดพลาดร้ายแรง {len(criticals)} รายการ: {criticals[0].get('message')}")
     elif warnings:
         w_types = {w.get("type") for w in warnings}
-        if "low_margin_balance" in w_types:
+        if "council_deliberation_lockup" in w_types:
+            lines.append("🔍 สาเหตุ: สภาเทรดปฏิเสธทุกสัญญาณ อาจเกิดจากเกณฑ์ Macro/Derivatives ตึงเกินไป หรือมีไม้ค้าง")
+            lines.append("💡 วิธีแก้: ตรวจสอบสถานะตลาดและข้อจำกัดของ Specialist แต่ละฝ่ายบน Central Blackboard")
+        elif "symbol_data_fetch_error" in w_types:
+            lines.append("🔍 สาเหตุ: Central Blackboard ตรวจพบปัญหาการดึงแท่งเทียนหรือข้อมูลตลาดบางเหรียญ")
+            lines.append("💡 วิธีแก้: ตรวจสอบการเชื่อมต่อ API ของ Binance หรือคู่เหรียญที่ถูกขึ้นบัญชีระวัง")
+        elif "low_margin_balance" in w_types:
             lines.append("🔍 ยอด Margin USDT ต่ำกว่าเกณฑ์ความปลอดภัย")
             lines.append("💡 วิธีแก้: โอนเงิน USDT เติมเข้า Futures Wallet เพื่อให้พร้อมเปิดออเดอร์")
         elif "stale_analysis_run" in w_types:
@@ -308,10 +476,17 @@ def _fallback_heuristic_diagnosis(issues: List[Dict[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def run_system_health_audit(config: Any, *, data_dir: Optional[Path] = None, logger: Any = None) -> Dict[str, Any]:
+def run_system_health_audit(
+    config: Any,
+    *,
+    data_dir: Optional[Path] = None,
+    blackboard: Optional[Any] = None,
+    logger: Any = None,
+) -> Dict[str, Any]:
     """
-    Execute full 5-point system health audit.
-    Returns structured audit payload including health score, badge, and AI diagnosis.
+    Execute full 6-point system health audit with Central Blackboard governance.
+    Returns structured audit payload including health score, badge, active directives,
+    and posts briefing to Central Blackboard.
     """
     target_data_dir = data_dir or DATA_DIR
     now_utc7 = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=7))).strftime("%Y-%m-%d %H:%M:%S")
@@ -326,6 +501,8 @@ def run_system_health_audit(config: Any, *, data_dir: Optional[Path] = None, log
     c4 = check_risk_state(target_data_dir)
     # 5. Binance Futures Check
     c5 = check_binance_futures_connection(config)
+    # 6. Central Blackboard & Trading Council Check
+    c6 = check_central_blackboard_and_council(target_data_dir, config, blackboard=blackboard)
 
     checks = {
         "pipeline_flow": c1,
@@ -333,6 +510,7 @@ def run_system_health_audit(config: Any, *, data_dir: Optional[Path] = None, log
         "baseline_priors": c3,
         "risk_manager": c4,
         "binance_futures": c5,
+        "central_blackboard": c6,
     }
 
     all_issues = []
@@ -344,20 +522,85 @@ def run_system_health_audit(config: Any, *, data_dir: Optional[Path] = None, log
     has_critical = any(i.get("severity") == "CRITICAL" for i in all_issues)
     has_warning = any(i.get("severity") == "WARNING" for i in all_issues)
 
+    score = 100.0
+    for iss in all_issues:
+        if iss.get("severity") == "CRITICAL":
+            score -= 30.0
+        elif iss.get("severity") == "WARNING":
+            score -= 10.0
+    score = max(0.0, score)
+
     if has_critical:
         severity = "CRITICAL"
-        score = 40.0
+        score = min(score, 50.0)
         badge = "🚨 <b>สุขภาพระบบ:</b> ⛔ มีจุดติดล็อกวิกฤต (Critical Issues Detected)"
     elif has_warning:
         severity = "WARNING"
-        score = 75.0
+        score = min(score, 85.0)
         badge = "⚠️ <b>สุขภาพระบบ:</b> 🟡 มีข้อควรระวัง (Warnings Detected)"
     else:
         severity = "OK"
         score = 100.0
-        badge = "🩺 <b>สุขภาพระบบ:</b> 🟢 สมบูรณ์ 100% (Pipeline OK | Data OK | Risk OK | Prior OK)"
+        badge = "🩺 <b>สุขภาพระบบ:</b> 🟢 สมบูรณ์ 100% (Pipeline OK | Council OK | Risk OK | Data OK)"
+
+    # Formulate Board Governance Directives for Specialists
+    caution_mode = severity in ("WARNING", "CRITICAL")
+    if severity == "CRITICAL":
+        risk_multiplier_cap = 0.50
+        max_positions_cap = 1
+    elif severity == "WARNING":
+        risk_multiplier_cap = 0.75
+        max_positions_cap = None
+    else:
+        risk_multiplier_cap = 1.25
+        max_positions_cap = None
+
+    flagged_symbols = []
+    for iss in all_issues:
+        sym = iss.get("symbol")
+        if sym and sym not in flagged_symbols:
+            flagged_symbols.append(sym)
+
+    directives = {
+        "caution_mode": caution_mode,
+        "risk_multiplier_cap": risk_multiplier_cap,
+        "max_positions_cap": max_positions_cap,
+        "flagged_symbols": flagged_symbols,
+        "health_score": score,
+        "health_severity": severity,
+        "audited_at": now_utc7,
+    }
 
     ai_diagnosis = generate_doctor_ai_diagnosis(all_issues, config) if all_issues else None
+
+    # Post Health Briefing & Directives to Central Blackboard
+    blackboard_posted = False
+    active_bb = blackboard
+    if active_bb is None:
+        try:
+            from infrastructure.council import CentralBlackboard
+            delib_path = target_data_dir / "council_deliberations.json"
+            active_bb = CentralBlackboard(file_path=str(delib_path))
+        except Exception:
+            active_bb = None
+
+    if active_bb is not None:
+        try:
+            briefing = {
+                "health_score": score,
+                "health_severity": severity,
+                "summary_badge": badge,
+                "directives": directives,
+                "doctor_diagnosis": ai_diagnosis,
+                "issues": all_issues,
+                "council_stats": c6.get("council_stats", {}),
+                "audited_at": now_utc7,
+            }
+            active_bb.post_health_briefing(briefing)
+            blackboard_posted = True
+        except Exception as ex:
+            if logger:
+                logger.warning("Failed to post health briefing to Central Blackboard: %s", ex)
 
     report = {
         "generated_at": now_utc7,
@@ -367,6 +610,8 @@ def run_system_health_audit(config: Any, *, data_dir: Optional[Path] = None, log
         "checks_passed": sum(1 for c in checks.values() if c.get("status") == "PASS"),
         "checks_total": len(checks),
         "summary_badge": badge,
+        "directives": directives,
+        "blackboard_posted": blackboard_posted,
         "checks": checks,
         "issues": all_issues,
         "ai_diagnosis": ai_diagnosis,
@@ -392,9 +637,18 @@ def format_doctor_alert_message(report: Dict[str, Any]) -> Optional[str]:
         f"{icon} <b>{title}</b>",
         f"⏱️ <b>เวลาตรวจ:</b> {html.escape(str(report.get('generated_at') or '-'))}",
         f"🎯 <b>คะแนนสุขภาพ:</b> {report.get('score', 0):.0f}/100 | ผ่าน {report.get('checks_passed')}/{report.get('checks_total')} จุด",
-        "",
-        "<b>รายการที่พบ:</b>",
     ]
+
+    c_stats = (report.get("checks", {}).get("central_blackboard", {}).get("council_stats")) or {}
+    if c_stats.get("total_rounds_24h", 0) > 0:
+        lines.append(f"🏛️ <b>Trading Council (24h):</b> พิจารณา {c_stats['total_rounds_24h']} สัญญาณ | อนุมัติ {c_stats['approved_count']} ไม้ ({c_stats['approval_rate_pct']}%)")
+
+    directives = report.get("directives") or {}
+    if directives.get("caution_mode"):
+        lines.append(f"🛡️ <b>คำสั่งจากบอร์ด (Directives):</b> Caution Mode ON (จำกัด Risk {directives.get('risk_multiplier_cap')}x)")
+
+    lines.append("")
+    lines.append("<b>รายการที่พบ:</b>")
 
     for idx, iss in enumerate(report.get("issues", [])[:4], start=1):
         sev_icon = "⛔" if iss.get("severity") == "CRITICAL" else "⚠️"

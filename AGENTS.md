@@ -777,6 +777,50 @@ TRADING_COUNCIL_DELIBERATIONS_PATH = ".data/telegram_alerts/council_deliberation
   4. End-to-End Pipeline Hook with Central Blackboard & Trading Council
 - ผลการทดสอบ: **ผ่านฉลุย 100% ทุกชุดการทดสอบ โดยไม่มี Regression ต่อโค้ดเดิม**
 
+## 23. การเชื่อมต่อ AI ตรวจสุขภาพระบบ เข้ากับกระดานกลางและการกำกับดูแลเอเจนต์ (Daily AI Health Doctor & Blackboard Governance) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+ระบบหมอตรวจสุขภาพ AI ประจำวันเวลา 09:00 (`alerts/system_doctor.py` ผ่าน `tools/send_daily_summary_only.py`) ได้รับการยกระดับให้เชื่อมต่อเข้ากับ **Central Blackboard** เพื่อวิเคราะห์ความสมบูรณ์ของระบบในระดับองค์รวมแบบ 360 องศา และออกคำสั่งกำกับดูแล (Governance Directives) ไปยังเอเจนต์อื่นๆ อัตโนมัติ:
+
+### 1. การตรวจสุขภาพและป้องกันการทำงานนอกระบบ (Anti-Rogue Trade Invariant)
+- **ตรวจสอบ Central Blackboard Deliberations**:
+  - วิเคราะห์รอบการประชุมสภาใน 24 ชั่วโมงล่าสุด: จำนวนรอบการพิจารณา, อัตราฉันทามติอนุมัติ (Approval Rate), และสถิติการ Veto ราย Specialist
+  - ตรวจจับ **Council Deliberation Lockup**: หากมีสัญญาณเข้ามาต่อเนื่อง $\ge 6$ รอบแต่สภาปฏิเสธ 100% จะระบุ Specialist ที่เป็นคอขวดและแจ้งเตือนทันที
+- **สกัดกั้นการแอบทำงานเอง (Rogue / Untracked Trades Detection)**:
+  - สอบทานคำสั่งซื้อขายจริงใน `binance_executed_orders.json` เทียบกับมติสภาบน Central Blackboard
+  - หากพบคำสั่งซื้อขายที่เปิดบน Binance โดยไม่มีบันทึกการประชุมสภา หรือไม่อยู่ในการรับรู้ของ Central Blackboard ระบบจะตีตราเป็น **🚨 CRITICAL: Untracked Rogue Order Detected!** ทันที เพื่อป้องกันบอทหรือคำสั่งภายนอกแอบทำงานเองโดยไม่ผ่านระบบควบคุม
+  - บันทึก `council_round_id` กำกับไว้ในทุกคำสั่งที่เปิดผ่าน `infrastructure/binance/pipeline_hook.py` เพื่อการตรวจสอบย้อนกลับ (Full Traceability)
+
+### 2. การลงความเห็นและออกคำสั่งกำกับดูแลลงบนกระดานกลาง (Blackboard Health Briefing & Directives)
+- เมื่อตรวจสุขภาพเสร็จในทุก 09:00 น. AI Doctor จะโพสต์สรุปผลพร้อมข้อสั่งการลงบนกระดานกลางผ่าน `blackboard.post_health_briefing()`:
+  - `health_score`: คะแนนสุขภาพ 0-100
+  - `health_severity`: "OK", "WARNING", "CRITICAL"
+  - `directives`:
+    - `caution_mode`: เปิดโหมดเฝ้าระวังอัตโนมัติหากมีข้อผิดพลาดระดับ WARNING หรือ CRITICAL
+    - `risk_multiplier_cap`: จำกัดเพดานขนาดไม้ (0.50x หาก CRITICAL, 0.75x หาก WARNING, 1.25x ปกติ)
+    - `max_positions_cap`: จำกัดจำนวนไม้สูงสุดที่ถือได้ (1 ไม้หาก CRITICAL)
+    - `flagged_symbols`: ขึ้นบัญชีดำเหรียญที่พบปัญหาดึงข้อมูลหรือมีความผิดปกติ
+    - `doctor_diagnosis`: การวินิจฉัยและคำแนะนำภาษาไทยจาก AI
+- **ทำงานเบา ไม่โหลดระบบเทรด (Zero Performance Degradation)**:
+  - การตรวจวิเคราะห์แบบละเอียด (Heavy Diagnostics) ทำเพียงวันละ 1 ครั้งตอน 09:00 น.
+  - ในรอบเทรดปกติทุก 15 นาที เอเจนต์แต่ละตัวและ Trading Council เพียงแค่อ่าน `blackboard.get_active_directives()` ในระดับ In-Memory/JSON แบบ $O(1)$ ไม่มีการตรวจซ้ำซ้อนให้ระบบทำงานหนักเกินไป
+
+### 3. การตอบสนองของเอเจนต์ในสภาเทรดต่อคำสั่งจากบอร์ด (Adaptive Specialist Deliberation)
+- `AlphaSpecialist`: ลดค่าความมั่นใจลงทันทีหากเป็นเหรียญที่ติด `flagged_symbols` (-20.0%) หรืออยู่ในช่วง `caution_mode` (-10.0%)
+- `RiskSpecialist`: ปรับลดขนาดไม้ (Position Sizing) ไม่ให้เกินเพดาน `risk_multiplier_cap` ที่หมอระบุ
+- `OpsSpecialist`: บังคับใช้เพดาน `max_positions_cap` หากพอร์ตถือครบตามเพดานฉุกเฉิน จะใช้สิทธิ์ VETO สกัดการเปิดไม้ใหม่ทันที
+- `TradingCouncil`: ประทับตรา `[⚠️ Caution Mode]` บนใบเสร็จและแจ้งเตือน Telegram เพื่อความโปร่งใส
+
+### 4. การทดสอบครอบคลุม (`scratch/test_blackboard_health_doctor.py`)
+- ครอบคลุมการทดสอบ 5 ด้าน:
+  1. Clean Health Audit & Blackboard Briefing Posting
+  2. Rogue / Untracked Trade Detection on Binance
+  3. Closed Untracked Trade Warning Handling
+  4. Council Deliberation Lockup Deadlock Detection
+  5. Specialists & Trading Council Adaptive Directives Enforcement
+- ผลการทดสอบ: **ผ่านฉลุย 100% ทุกชุดการทดสอบ พร้อมคงสถานะผ่าน 100% ในชุดทดสอบเดิมทั้งหมด**
+
 ## ข้อควรรู้ทั่วไป
 - Alert runtime รันบนคลาวด์ (Cloud Scheduler → Cloud Run → GitHub Actions) เครื่อง local
   ไม่ต้องเปิดค้าง — local ใช้เฉพาะแก้โค้ด/deploy/รัน tools

@@ -104,6 +104,24 @@ class ContrarianScout:
             except Exception as re:
                 logger.debug("[ContrarianScout] Researcher correlation check skipped: %s", re)
 
+        # 2.8 Check Active AlphaForge Factors
+        alpha_factor_hit = None
+        active_factors_path = getattr(self, "active_factors_path", ".data/council_research/active_alpha_factors.json")
+        try:
+            import os, json
+            if os.path.exists(active_factors_path):
+                with open(active_factors_path, "r", encoding="utf-8") as f:
+                    af_data = json.load(f)
+                factors = af_data.get("factors") or {}
+                for f_id, f_spec in factors.items():
+                    if f_spec.get("status") == "active_sandbox_exploration":
+                        if candidate.get("alpha_factor_id") == f_id or candidate.get("strategy") == f_id or f_id in str(candidate.get("message") or ""):
+                            alpha_factor_hit = f_spec
+                            theses.append(f"🔬 [สูตรคณิตศาสตร์ AlphaForge] {f_spec.get('factor_name')}")
+                            break
+        except Exception as fe:
+            logger.debug("[ContrarianScout] Active factors check skipped: %s", fe)
+
         # 3. Quota check: Ensure we don't exceed max simultaneous exploration bets
         quota_available = open_explorations_count < max_explorations_allowed
 
@@ -117,15 +135,16 @@ class ContrarianScout:
 
         # 5. Check if candidate qualifies as an Exploration Sandbox Candidate
         is_research_anomaly = bool(research_eval and research_eval.get("has_anomaly"))
+        is_alpha_factor = bool(alpha_factor_hit)
         is_exploration = (
-            (is_asymmetric_rr or is_short_squeeze_setup or is_long_flush_setup or (is_research_anomaly and effective_rr >= 2.0))
+            (is_asymmetric_rr or is_short_squeeze_setup or is_long_flush_setup or (is_research_anomaly and effective_rr >= 2.0) or is_alpha_factor)
             and quota_available
         )
 
         # Check caution mode from Blackboard directives
         if isinstance(directives, dict) and directives.get("caution_mode"):
-            # In caution mode, only allow exploration if R:R is exceptional (>= 3.5x)
-            if effective_rr < 3.5:
+            # In caution mode, only allow exploration if R:R is exceptional (>= 3.5x) or verified alpha factor
+            if effective_rr < 3.5 and not is_alpha_factor:
                 is_exploration = False
 
         if is_exploration:

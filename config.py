@@ -1483,3 +1483,16 @@ SANDBOX_EXPLORATION_MAX_POSITIONS = _env_int("SANDBOX_EXPLORATION_MAX_POSITIONS"
 SANDBOX_EXPLORATION_SIZE_MULTIPLIER = _env_float("SANDBOX_EXPLORATION_SIZE_MULTIPLIER", 0.35)
 SANDBOX_EXPLORATION_MIN_RR = _env_float("SANDBOX_EXPLORATION_MIN_RR", 2.8)
 
+# ==============================================================================
+# Council AlphaForge: Quantitative Research & Formula Mining
+# ==============================================================================
+ALPHA_FORGE_ENABLED = _env_bool("ALPHA_FORGE_ENABLED", True)
+ALPHA_FORGE_MIN_OOS_PROFIT_FACTOR = _env_float("ALPHA_FORGE_MIN_OOS_PROFIT_FACTOR", 1.40)
+ALPHA_FORGE_MIN_OOS_EXPECTANCY_PCT = _env_float("ALPHA_FORGE_MIN_OOS_EXPECTANCY_PCT", 0.20)
+ALPHA_FORGE_MIN_OOS_WIN_RATE = _env_float("ALPHA_FORGE_MIN_OOS_WIN_RATE", 42.0)
+ALPHA_FORGE_MAX_CDC_CORRELATION = _env_float("ALPHA_FORGE_MAX_CDC_CORRELATION", 0.65)
+ALPHA_FORGE_FRICTION_PCT = _env_float("ALPHA_FORGE_FRICTION_PCT", 0.30)
+ALPHA_FORGE_DATA_DIR = _env_str("ALPHA_FORGE_DATA_DIR", ".data/council_research")
+ALPHA_FORGE_ACTIVE_FACTORS_PATH = _env_str("ALPHA_FORGE_ACTIVE_FACTORS_PATH", ".data/council_research/active_alpha_factors.json")
+
+

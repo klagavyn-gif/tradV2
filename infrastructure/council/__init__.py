@@ -17,6 +17,7 @@ from .contrarian_scout import ContrarianScout
 from .scout_researcher import ScoutResearcher
 from .arbiter import ConsensusVerdict, TradingCouncil
 from .daily_debrief import DailyCouncilDebrief
+from .alpha_forge import CouncilAlphaForge
 
 __all__ = [
     "CentralBlackboard",
@@ -32,4 +33,5 @@ __all__ = [
     "ConsensusVerdict",
     "TradingCouncil",
     "DailyCouncilDebrief",
+    "CouncilAlphaForge",
 ]

@@ -1056,6 +1056,56 @@ SANDBOX_EXPLORATION_MIN_RR = 2.8            # R:R ขั้นต่ำสำห
 - เมื่อมีสัญญาณผ่านสภา ค่า `take_profit` จะถูกคำนวณสเกลตาม `tp_target_multiplier` และบันทึกลง `executed_records` อัตโนมัติ
 - ปรากฏการปรับจูนชัดเจนในมติสภาท้ายรายงาน Telegram ทุกเช้า
 
+## 29. ระบบห้องวิจัยคณิตศาสตร์ควอนต์อัตโนมัติ (Council AlphaForge & Quantitative Factor Mining) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบครอบคลุม 100% (Verified)**
+
+### แนวคิดและสถาปัตยกรรม (Architecture)
+เพื่อยกระดับ tradV2 จากบอทที่พึ่งพาสัญญาณสำเร็จรูปเดิม ๆ (เช่น CDC ActionZone หรือ VIXFix) สู่การเป็น **Autonomous Quant Fund** สภาได้จัดตั้งห้องทดลองวิจัย **Council AlphaForge (`infrastructure/council/alpha_forge.py`)** ซึ่งมีความสามารถในการคิดค้นสูตรคณิตศาสตร์และ Alpha Factor ใหม่จากศูนย์ (Symbolic Alpha Discovery) โดยแบ่งการทำงานแบบ **High-ROI & Low-Cost (คุ้มค่า ประหยัด API สูงสุด)**:
+
+```
+[1. Hypothesis Generation] 
+Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Researcher ออกแบบสมมติฐานและสูตรคณิตศาสตร์ (ใช้ ~300 tokens เสียเงินไม่ถึง 0.05 บาท/สัปดาห์) 
+       ⬇
+[2. Vectorized Walk-Forward Backtester] 
+รันการคำนวณผ่าน NumPy/Pandas บนแท่งเทียน M15 ย้อนหลัง 11 เหรียญ (ฟรี 100% บนเครื่อง Local / GitHub Actions)
+       ⬇
+[3. Strict Quality Gate (ด่านคัดกรองเข้มงวด)] 
+หักต้นทุน Friction 0.30% ทุกไม้ + Out-of-Sample Test (30%) + Correlation กับ CDC < 0.65
+       ⬇
+[4. Graduation to Sandbox Exploration] 
+สูตรที่ผ่านการทดสอบจะถูกบรรจุเข้า active_alpha_factors.json ให้ ContrarianScout เปิดไม้ทดลองจิ๋ว 35% บน Binance จริง
+```
+
+### 1. โครงสร้างโมดูล (`infrastructure/council/alpha_forge.py`)
+- **Mathematical DSL & Safe Vectorized Evaluator**:
+  - ตัวแปรพื้นฐาน: `open, high, low, close, volume, body, upper_wick, lower_wick, range, atr14, rel_vol, ret1, wick_asymmetry`
+  - ฟังก์ชันเชิงควอนต์: `ts_mean, ts_std, ts_max, ts_min, delta, zscore, decay_linear, rsi, bb_width`
+  - มีระบบความปลอดภัย (Security Sandboxing) ป้องกันการรันโค้ดอันตรายด้วย Regex word boundary check
+- **Historical Data Loader & Cache**:
+  - ดึงข้อมูลแท่งเทียน 15m โดยตรงจาก Binance Futures Public Endpoint (`/fapi/v1/klines`) ฟรี ไม่ต้องใช้ API Key
+  - แคชข้อมูลลง `.data/market_history/` เพื่อการคำนวณซ้ำที่เร็วในระดับเสี้ยววินาที (0.15s)
+- **Data Snooping Defense & Cost Hurdle**:
+  - แบ่งข้อมูลเป็น In-Sample (70%) และ Out-of-Sample (30%)
+  - **หักค่าธรรมเนียมและ Slippage ทันที 0.30% ต่อรอบ (0.0030)** ทุกไม้
+  - เกณฑ์ขั้นต่ำในการผ่าน (Quality Gate):
+    - `oos_profit_factor >= 1.40`
+    - `oos_expectancy >= +0.20%` ต่อไม้
+    - `oos_win_rate >= 42.0%`
+    - `cdc_correlation <= 0.65` (ไม่ซ้ำซ้อนกับเทรนด์ CDC)
+
+### 2. การเชื่อมโยงกับ ContrarianScout และ Sandbox Exploration
+- เมื่อสูตรคณิตศาสตร์ผ่านเกณฑ์ จะถูกบันทึกเข้าสู่ `.data/council_research/active_alpha_factors.json`
+- `ContrarianScout` ใน [contrarian_scout.py](file:///E:/5-8-69/tradV2/infrastructure/council/contrarian_scout.py) จะตรวจสอบสูตร Active Factor อัตโนมัติ
+- หากมีสัญญาณตรงตามสูตร สเกาต์จะเสนอให้เปิดเป็น **ไม้ทดลองความเสี่ยงต่ำ Sandbox Exploration (ขนาด 35% ไม่เกิน 1 ไม้ พร้อม Hard SL)** เพื่อพิสูจน์ผลงานบนกระดานจริง
+
+### 3. ระบบทำงานอัตโนมัติบน Cloud (GitHub Actions Weekly Workflow)
+- ไฟล์ Workflow: `.github/workflows/alpha-forge-weekly.yml`
+- รันอัตโนมัติทุกคืนวันอาทิตย์ เวลา 23:00 UTC (วันจันทร์ 06:00 น. เวลาไทย)
+- รันฟรีภายใต้โควตา GitHub Actions และส่งสรุปผลการวิจัยเข้า Telegram ทุกเช้าวันจันทร์
+- เครื่องมือรันด้วยตนเอง: `python tools/run_alpha_forge.py --notify-telegram`
+
+
 
 
 

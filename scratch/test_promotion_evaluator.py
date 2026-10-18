@@ -258,6 +258,69 @@ class TestCouncilPromotionEvaluator(unittest.TestCase):
         self.assertEqual(opinion_boosted.confidence - opinion_normal.confidence, 15.0)
         self.assertIn("ผ่านเกณฑ์สูตรหลัก", opinion_boosted.note)
 
+    def test_auto_demotion_on_regime_failure(self):
+        """Test that a promoted production factor is demoted back to sandbox if it fails in production."""
+        # Setup promoted factor
+        factors_data = {
+            "factors": {
+                "alpha_liquidity_vacuum": {
+                    "factor_id": "alpha_liquidity_vacuum",
+                    "factor_name": "Liquidity Absorption & Wick Vacuum",
+                    "status": "promoted_to_production",
+                    "promoted_at": "2026-10-18 00:00:00 UTC",
+                }
+            }
+        }
+        with open(self.factors_path, "w", encoding="utf-8") as f:
+            json.dump(factors_data, f)
+
+        promoted_data = {
+            "version": 1,
+            "promoted_factors": {
+                "alpha_liquidity_vacuum": {
+                    "factor_id": "alpha_liquidity_vacuum",
+                    "factor_name": "Liquidity Absorption & Wick Vacuum",
+                    "promoted_at": "2026-10-18 00:00:00 UTC",
+                }
+            }
+        }
+        with open(self.promoted_path, "w", encoding="utf-8") as f:
+            json.dump(promoted_data, f)
+
+        # 3 consecutive losses in live market regime shift
+        outcomes_list = [
+            {"symbol": "SOL-USD", "alpha_factor_id": "alpha_liquidity_vacuum", "outcome_status": "settled", "pnl_pct": -1.5},
+            {"symbol": "SOL-USD", "alpha_factor_id": "alpha_liquidity_vacuum", "outcome_status": "settled", "pnl_pct": -2.0},
+            {"symbol": "SOL-USD", "alpha_factor_id": "alpha_liquidity_vacuum", "outcome_status": "settled", "pnl_pct": -1.8},
+        ]
+        with open(self.outcomes_path, "w", encoding="utf-8") as f:
+            json.dump({"outcomes": outcomes_list}, f)
+
+        evaluator = CouncilPromotionEvaluator(
+            factors_path=self.factors_path,
+            promoted_path=self.promoted_path,
+            executed_path=self.executed_path,
+            outcomes_path=self.outcomes_path,
+        )
+
+        res = evaluator.evaluate_promotions()
+
+        # Verify Auto-Demotion
+        self.assertEqual(res["newly_demoted_count"], 1)
+        self.assertEqual(res["active_promoted_count"], 0)
+        demoted = res["newly_demoted"][0]
+        self.assertEqual(demoted["factor_id"], "alpha_liquidity_vacuum")
+        self.assertEqual(demoted["max_consecutive_losses"], 3)
+
+        # Verify Disk updates
+        with open(self.promoted_path, "r", encoding="utf-8") as f:
+            saved_prom = json.load(f)
+        self.assertNotIn("alpha_liquidity_vacuum", saved_prom["promoted_factors"])
+
+        with open(self.factors_path, "r", encoding="utf-8") as f:
+            saved_f = json.load(f)
+        self.assertEqual(saved_f["factors"]["alpha_liquidity_vacuum"]["status"], "active_sandbox_exploration")
+
 
 if __name__ == "__main__":
     unittest.main()

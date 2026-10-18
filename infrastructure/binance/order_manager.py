@@ -70,6 +70,7 @@ class BinanceFuturesOrderManager:
         kinetic_min_r: float = 0.60,
         harvester_trigger_r: float = 3.0,
         harvester_dist_r: float = 0.4,
+        breakeven_buffer_r: float = 0.10,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -77,6 +78,7 @@ class BinanceFuturesOrderManager:
         self.leverage = int(leverage)
         self.margin_type = str(margin_type or "ISOLATED").upper()
         self.breakeven_r = float(breakeven_r)
+        self.breakeven_buffer_r = float(breakeven_buffer_r)
         self.trailing_r = float(trailing_r)
         self.trailing_dist_r = float(trailing_dist_r)
         self.risk_manager = risk_manager
@@ -485,7 +487,10 @@ class BinanceFuturesOrderManager:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
                     else:
                         self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
-                    new_sl = round_to_tick(entry_price, tick_size)
+                    # Apply Breakeven Buffer (+0.10R) to clear round-trip fees (0.30%) and avoid spread noise whipsaw
+                    be_target = entry_price + (self.breakeven_buffer_r * risk) if (is_profit_be and self.breakeven_buffer_r > 0) else entry_price
+                    be_target = min(be_target, mark_price)
+                    new_sl = round_to_tick(be_target, tick_size)
                     client_id = f"{'kbe' if is_kinetic_be else 'be'}_{int(time.time())}"
                     res = self.client.create_algo_order(
                         symbol=symbol,
@@ -582,7 +587,10 @@ class BinanceFuturesOrderManager:
                         self.client.cancel_algo_order(symbol, algo_id=sl_order.get("algoId"), client_algo_id=sl_order.get("clientAlgoId"))
                     else:
                         self.client.cancel_order(symbol, order_id=sl_order.get("orderId"))
-                    new_sl = round_to_tick(entry_price, tick_size)
+                    # Apply Breakeven Buffer (-0.10R) to clear round-trip fees (0.30%) and avoid spread noise whipsaw
+                    be_target = entry_price - (self.breakeven_buffer_r * risk) if (is_profit_be and self.breakeven_buffer_r > 0) else entry_price
+                    be_target = max(be_target, mark_price)
+                    new_sl = round_to_tick(be_target, tick_size)
                     client_id = f"{'kbe' if is_kinetic_be else 'be'}_{int(time.time())}"
                     res = self.client.create_algo_order(
                         symbol=symbol,

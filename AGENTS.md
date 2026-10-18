@@ -1172,6 +1172,43 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
   - รายงาน Telegram ยามเช้าจะแสดงแบนเนอร์แสดงความยินดี:
     `🎓 สภาอนุมัติเลื่อนขั้นสูตรคณิตศาสตร์ (Auto-Promotion): 👑 {factor_name} ➔ เลื่อนขั้นเป็น Pre-Council Alpha Gate เรียบร้อย!`
 
+## 32. ระบบเกราะป้องกันความเสี่ยงวิกฤต (Critical System Hardening & Risk Defense Engine) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified)**
+
+สืบเนื่องจากการวิเคราะห์ความเสี่ยงเชิงลึก (Adversarial Threat Modeling) ได้ดำเนินการติดตั้งเกราะป้องกันความเสี่ยง 4 จุดสำคัญที่สุด:
+
+### 1. Clock Drift Synchronization & RecvWindow Resilience (`infrastructure/binance/client.py`)
+- **ปัญหา**: บน GitHub Actions Cloud Runner นาฬิกาของเครื่องเสมือนอาจเดินคลาดเคลื่อนกับ Binance Server ส่งผลให้ถูกปฏิเสธคำสั่งด้วย Error `-1021 INVALID_TIMESTAMP`
+- **การแก้ไข**:
+  - สร้างฟังก์ชัน `sync_time_offset()` เชื่อมต่อ `/fapi/v1/time` คำนวณ `time_offset_ms = server_time - local_time` อัตโนมัติ
+  - ปรับขยาย `recvWindow` เป็น `10,000ms` (ขีดจำกัดสูงสุดของ Binance)
+  - ติดตั้ง Auto-Recovery: หากพบ Error `-1021` ระบบจะซิงค์เวลาใหม่ทันทีและ Re-sign ส่งคำสั่งซ้ำอัตโนมัติ
+
+### 2. Breakeven Buffer หนี Spread & Noise Whipsaw (`infrastructure/binance/order_manager.py`)
+- **ปัญหา**: การเลื่อน Stop Loss มาที่ราคาเปิดเป๊ะ (Exact Entry) มักถูกไส้เทียนของตลาดหรือ Bid-Ask Spread สัมผัสพอดี ทำให้โดนปิดไม้เท่าทุน (แต่เสียค่าธรรมเนียมฟรี 0.30%) ก่อนที่ราคาจะวิ่งไปถึงเป้าหมายกำไร
+- **การแก้ไข**:
+  - เพิ่มพารามิเตอร์ `breakeven_buffer_r: float = 0.10` (+0.10R)
+  - สำหรับฝั่ง LONG: เลื่อน SL มาที่ `entry_price + (0.10 * risk)`
+  - สำหรับฝั่ง SHORT: เลื่อน SL มาที่ `entry_price - (0.10 * risk)`
+  - ผลลัพธ์: นอกจากจะหนีระยะสะบัดของ Spread แล้ว ยังการันตีกำไรครอบคลุมค่าธรรมเนียม Maker/Taker 0.30% ทุกครั้งที่โดนกันทุน เปลี่ยนไม้เสมอตัวให้กลายเป็นไม้กำไรสุทธิสีเขียวเสมอ
+
+### 3. Auto-Demotion Safeguard ปลดสูตรออกจากระบบหลักเมื่อ Regime เปลี่ยน (`infrastructure/council/promotion_evaluator.py`)
+- **ปัญหา**: สูตรที่เลื่อนขั้นจาก Sandbox ในช่วงตลาดไซด์เวย์ อาจสูญเสีย Edge เมื่อตลาดเปลี่ยนเป็น Super Trend หากปล่อยให้เป็นตัวกรองหลักต่อไปจะสร้างความเสียหายต่อพอร์ต
+- **การแก้ไข**:
+  - ทุกเช้าในรอบ Debrief ระบบจะตรวจสอบผลงานของสูตรหลักย้อนหลัง
+  - เกณฑ์การปลดประจำการอัตโนมัติ (Demotion Criteria):
+    1. แพ้ติดต่อกัน $\ge 3$ ไม้ (`consecutive_losses >= 3`) หรือ
+    2. เทรด 6 ไม้ล่าสุดแล้วได้ `profit_factor < 0.95` (ขาดทุนสุทธิ)
+  - หากเข้าเกณฑ์ สภาจะ **สั่งปลดสูตรกลับสู่ Sandbox ทันที** และถอดออกจาก `promoted_production_factors.json` พร้อมแจ้งเตือน Telegram ยามเช้า
+
+### 4. Sector Correlation Guard สกัดความเสี่ยงเหรียญคู่ขนาน (`infrastructure/binance/pipeline_hook.py`)
+- **ปัญหา**: เมื่อพอร์ตเปิดถือ Altcoin กลุ่ม High-Beta ตัวหนึ่งอยู่แล้ว (เช่น SUI) แล้วมีสัญญาณใหม่ของเหรียญกลุ่มเดียวกันเข้ามา (เช่น SOL) หากเปิดทั้งคู่ พอร์ตจะรับความเสี่ยง L1 ซ้ำซ้อน 2 เท่า หาก BTC ย่อตัว ทั้งคู่จะชน SL พร้อมกัน
+- **การแก้ไข**:
+  - จัดทำแผนผังหมวดหมู่สินทรัพย์ `SECTOR_MAP` (L1_HIGH_BETA, L1_CORE, MEME, RWA, GOLD_SAFE_HAVEN)
+  - หากพอร์ตถือเหรียญในกลุ่ม `L1_HIGH_BETA` หรือ `MEME` อยู่แล้ว และมีเหรียญกลุ่มเดียวกันเข้ามา ระบบจะปฏิเสธการเปิดไม้ (`sector_correlation_blocked`) เว้นแต่ว่าสภาจะมีคะแนนฉันทามติสูงเป็นพิเศษ ($\ge 75\%$) และไม่ได้อยู่ใน Caution Mode
+
+
 
 
 

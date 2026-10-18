@@ -41,6 +41,28 @@ def _save_executed_orders(file_path: str, data: Dict[str, Any]) -> None:
         logger.warning("Could not save executed orders to %s: %s", file_path, e)
 
 
+def _safe_float(val: Any, default: float = 0.0) -> float:
+    try:
+        if val is None:
+            return default
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+SECTOR_MAP: Dict[str, str] = {
+    "SOLUSDT": "L1_HIGH_BETA", "SOL-USD": "L1_HIGH_BETA",
+    "SUIUSDT": "L1_HIGH_BETA", "SUI-USD": "L1_HIGH_BETA",
+    "ETHUSDT": "L1_CORE", "ETH-USD": "L1_CORE",
+    "BNBUSDT": "L1_EXCHANGE", "BNB-USD": "L1_EXCHANGE",
+    "ADAUSDT": "L1_LEGACY", "ADA-USD": "L1_LEGACY",
+    "DOGEUSDT": "MEME", "DOGE-USD": "MEME",
+    "ONDOUSDT": "RWA", "ONDO-USD": "RWA",
+    "BTCUSDT": "BTC_BENCHMARK", "BTC-USD": "BTC_BENCHMARK",
+    "PAXGUSDT": "GOLD_SAFE_HAVEN", "PAXG-USD": "GOLD_SAFE_HAVEN",
+}
+
+
 def execute_binance_auto_trade_pipeline(
     sent_candidates: Optional[List[Dict[str, Any]]] = None,
     *,
@@ -747,6 +769,31 @@ def execute_binance_auto_trade_pipeline(
                     logger.info("[Auto-Trade] Adjusted TP for %s: %.4f -> %.4f (scale=%.2fx)", c.get("symbol"), c_tp, scaled_tp, tp_mult)
                 except Exception as tp_err:
                     logger.debug("Could not scale TP for %s: %s", c.get("symbol"), tp_err)
+
+            # Sector Correlation Guard: Prevent holding correlated high-beta pairs simultaneously (e.g. SOL + SUI)
+            cand_sym = str(c.get("symbol") or "")
+            from .order_manager import normalize_futures_symbol
+            cand_sector = SECTOR_MAP.get(cand_sym) or SECTOR_MAP.get(normalize_futures_symbol(cand_sym))
+            if cand_sector in ("L1_HIGH_BETA", "MEME") and isinstance(open_positions, list) and open_positions:
+                open_syms = [
+                    p.get("symbol") for p in open_positions
+                    if isinstance(p, dict) and abs(_safe_float(p.get("positionAmt"))) > 0
+                ]
+                open_sectors = [SECTOR_MAP.get(s) or SECTOR_MAP.get(normalize_futures_symbol(s)) for s in open_syms]
+                if cand_sector in open_sectors:
+                    min_corr_score = 75.0
+                    c_score = float(getattr(verdict, "composite_score", 0.0)) if verdict else 0.0
+                    if c_score < min_corr_score or council_directives.get("caution_mode"):
+                        logger.warning(
+                            "[SectorGuard] Blocked candidate %s: already holding %s in correlated sector '%s' (Council Score=%.1f < %.1f)",
+                            cand_sym, open_syms, cand_sector, c_score, min_corr_score
+                        )
+                        results["executed_entries"].append({
+                            "success": False,
+                            "reason": f"sector_correlation_blocked_{cand_sector}",
+                            "symbol": cand_sym,
+                        })
+                        continue
 
             exec_res = order_mgr.execute_candidate(c, sizing_override=sizing_override)
             results["executed_entries"].append(exec_res)

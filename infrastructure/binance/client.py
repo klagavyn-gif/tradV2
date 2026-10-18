@@ -46,6 +46,34 @@ class BinanceFuturesClient:
         self._exchange_info_time: float = 0.0
         self._cache_ttl_seconds: float = 3600.0  # Cache exchangeInfo for 1 hour
 
+        # Clock drift defense: sync offset between local runner and Binance server time
+        self._time_offset_ms: int = 0
+        if self.api_key and self.api_secret:
+            try:
+                self.sync_time_offset()
+            except Exception:
+                pass
+
+    def sync_time_offset(self) -> int:
+        """
+        Fetches Binance server time and computes offset relative to local clock.
+        Prevents code -1021 INVALID_TIMESTAMP errors on cloud runners.
+        """
+        try:
+            url = f"{self.base_url}/fapi/v1/time"
+            resp = self.session.get(url, timeout=self.timeout)
+            if resp.status_code == 200:
+                data = resp.json()
+                server_time = int(data.get("serverTime") or 0)
+                if server_time > 0:
+                    local_time = int(time.time() * 1000)
+                    self._time_offset_ms = server_time - local_time
+                    logger.info("Binance time offset synchronized: %+d ms", self._time_offset_ms)
+                    return self._time_offset_ms
+        except Exception as e:
+            logger.warning("Could not sync Binance server time: %s", e)
+        return self._time_offset_ms
+
     def _sign(self, params: Dict[str, Any]) -> str:
         """Create HMAC-SHA256 signature for parameters."""
         query_string = urllib.parse.urlencode(params)
@@ -61,6 +89,7 @@ class BinanceFuturesClient:
         path: str,
         params: Optional[Dict[str, Any]] = None,
         signed: bool = False,
+        _retry: bool = False,
     ) -> Dict[str, Any]:
         """Execute HTTP request with error handling and signing if required."""
         url = f"{self.base_url}{path}"
@@ -69,8 +98,9 @@ class BinanceFuturesClient:
         if signed:
             if not self.api_key or not self.api_secret:
                 raise ValueError("API Key and Secret must be provided for signed endpoints")
-            params["timestamp"] = int(time.time() * 1000)
-            params["recvWindow"] = 5000
+            # Apply time offset to neutralize cloud clock drift
+            params["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
+            params["recvWindow"] = 10000  # Max permitted by Binance for network resilience
             params["signature"] = self._sign(params)
 
         try:
@@ -89,6 +119,17 @@ class BinanceFuturesClient:
             if resp.status_code >= 400:
                 code = data.get("code")
                 msg = data.get("msg")
+                # Handle Code -1021: Timestamp ahead/behind server
+                if code == -1021 and not _retry and signed:
+                    logger.warning("Binance API returned code -1021 (timestamp drift). Re-syncing clock offset and retrying...")
+                    self.sync_time_offset()
+                    # Clean params of old timestamp & signature before retry
+                    retry_params = {k: v for k, v in (params or {}).items() if k not in ("timestamp", "recvWindow", "signature")}
+                    return self._request(method, path, params=retry_params, signed=signed, _retry=True)
+
+                if resp.status_code == 429:
+                    logger.error("Binance rate limit (429) hit! Backoff recommended. Headers: %s", resp.headers.get("Retry-After"))
+
                 logger.error("Binance API error %s: %s (status %s)", code, msg, resp.status_code)
                 return {"success": False, "status_code": resp.status_code, "code": code, "msg": msg, "data": data}
             return {"success": True, "status_code": resp.status_code, "data": data}

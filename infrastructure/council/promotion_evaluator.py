@@ -120,7 +120,8 @@ class CouncilPromotionEvaluator:
             if not is_sandbox and order_rec.get("is_sandbox_exploration"):
                 is_sandbox = True
 
-            if not is_sandbox:
+            has_factor = bool(oc.get("alpha_factor_id") or order_rec.get("alpha_factor_id"))
+            if not is_sandbox and not has_factor:
                 continue
 
             # Identify matching factor_id
@@ -159,19 +160,86 @@ class CouncilPromotionEvaluator:
         telemetry = self.collect_sandbox_telemetry()
 
         newly_promoted: List[Dict[str, Any]] = []
+        newly_demoted: List[Dict[str, Any]] = []
         evaluation_results: Dict[str, Any] = {}
 
         for f_id, f_spec in factors.items():
             current_status = f_spec.get("status", "active_sandbox_exploration")
             factor_name = f_spec.get("factor_name", f_id)
 
-            # Check if factor already promoted
+            # Check if factor already promoted -> Perform Auto-Demotion Audit for safety
             if current_status == "promoted_to_production" or f_id in existing_promoted:
+                live_trades = telemetry.get(f_id) or telemetry.get(factor_name) or []
+                settled_trades = [t for t in live_trades if t.get("outcome_status") == "settled" or t.get("pnl_pct") is not None]
+
+                # Check recent streak and performance (last 10 trades)
+                recent_trades = settled_trades[-10:] if len(settled_trades) > 10 else settled_trades
+                cur_consec_losses = 0
+                max_consec_losses = 0
+                rec_wins = 0
+                rec_losses = 0
+                rec_gross_p = 0.0
+                rec_gross_l = 0.0
+                for t in recent_trades:
+                    pnl = _safe_float(t.get("pnl_pct"))
+                    if pnl < -0.05:
+                        rec_losses += 1
+                        rec_gross_l += abs(pnl)
+                        cur_consec_losses += 1
+                        if cur_consec_losses > max_consec_losses:
+                            max_consec_losses = cur_consec_losses
+                    elif pnl > 0.05:
+                        rec_wins += 1
+                        rec_gross_p += pnl
+                        cur_consec_losses = 0
+
+                rec_pf = (rec_gross_p / rec_gross_l) if rec_gross_l > 0 else (99.0 if rec_gross_p > 0 else 1.0)
+
+                # Demotion criteria:
+                # 1. 3 consecutive losses in recent trades, OR
+                # 2. At least 6 recent trades with profit factor < 0.95 (net loss-making)
+                should_demote = (
+                    (max_consec_losses >= 3 and len(recent_trades) >= 3)
+                    or (len(recent_trades) >= 6 and rec_pf < 0.95)
+                )
+
+                if should_demote:
+                    logger.warning(
+                        "[PromotionEvaluator] ⚠️ AUTO-DEMOTION TRIGGERED: Factor '%s' failed production safety! (ConsecLosses=%d, RecentPF=%.2f). Demoting to Sandbox.",
+                        factor_name, max_consec_losses, rec_pf
+                    )
+                    now_str = _format_dt(_utc_now())
+                    f_spec["status"] = "active_sandbox_exploration"
+                    f_spec["demoted_at"] = now_str
+                    f_spec["demoted_reason"] = f"Production safeguard: ConsecLosses={max_consec_losses}, RecentPF={rec_pf:.2f}"
+                    if f_id in existing_promoted:
+                        del existing_promoted[f_id]
+
+                    demoted_info = {
+                        "factor_id": f_id,
+                        "factor_name": factor_name,
+                        "demoted_at": now_str,
+                        "reason": f_spec["demoted_reason"],
+                        "max_consecutive_losses": max_consec_losses,
+                        "recent_profit_factor": round(rec_pf, 2),
+                    }
+                    newly_demoted.append(demoted_info)
+                    evaluation_results[f_id] = {
+                        "factor_name": factor_name,
+                        "status": "demoted_to_sandbox",
+                        "demoted_at": now_str,
+                        "reason": f_spec["demoted_reason"],
+                        "is_active_gate": False,
+                    }
+                    continue
+
                 evaluation_results[f_id] = {
                     "factor_name": factor_name,
                     "status": "promoted_to_production",
                     "promoted_at": f_spec.get("promoted_at") or existing_promoted.get(f_id, {}).get("promoted_at"),
                     "is_active_gate": True,
+                    "recent_consec_losses": max_consec_losses,
+                    "recent_pf": round(rec_pf, 2),
                 }
                 continue
 
@@ -269,9 +337,12 @@ class CouncilPromotionEvaluator:
             evaluation_results[f_id] = stats_summary
 
         # Save updates to disk
-        if newly_promoted:
+        if newly_promoted or newly_demoted:
             factors_data["factors"] = factors
-            factors_data["last_promotion_at"] = _format_dt(_utc_now())
+            if newly_promoted:
+                factors_data["last_promotion_at"] = _format_dt(_utc_now())
+            if newly_demoted:
+                factors_data["last_demotion_at"] = _format_dt(_utc_now())
             self._save_json(self.factors_path, factors_data)
 
             promoted_data["promoted_factors"] = existing_promoted
@@ -281,6 +352,11 @@ class CouncilPromotionEvaluator:
         # Build Thai summary for Council Debrief
         active_promoted_list = list(existing_promoted.values())
         summary_lines = []
+        if newly_demoted:
+            for nd in newly_demoted:
+                summary_lines.append(
+                    f"⚠️ สภาสั่งปลด '{nd['factor_name']}' กลับสู่ Sandbox ชั่วคราว! ({nd['reason']})"
+                )
         if newly_promoted:
             for np_f in newly_promoted:
                 summary_lines.append(
@@ -290,13 +366,15 @@ class CouncilPromotionEvaluator:
         elif active_promoted_list:
             names = ", ".join(p.get("factor_name", "") for p in active_promoted_list)
             summary_lines.append(f"มีสูตรคณิตศาสตร์ประจำการในระบบหลัก {len(active_promoted_list)} สูตร: {names}")
-        else:
+        elif not newly_demoted:
             summary_lines.append("สูตรใน Sandbox ยังอยู่ในช่วงสะสมสถิติ (Incubation) ยังไม่มีสูตรที่เลื่อนขั้นรอบนี้")
 
         return {
             "total_evaluated": len(factors),
             "newly_promoted_count": len(newly_promoted),
             "newly_promoted": newly_promoted,
+            "newly_demoted_count": len(newly_demoted),
+            "newly_demoted": newly_demoted,
             "active_promoted_count": len(active_promoted_list),
             "active_promoted_gates": active_promoted_list,
             "evaluations": evaluation_results,

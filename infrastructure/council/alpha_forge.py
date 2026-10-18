@@ -364,7 +364,15 @@ class CouncilAlphaForge:
         Fetches 15m candlestick data directly from public Binance Futures API.
         Caches locally to disk to enable rapid, zero-cost iterative testing.
         """
-        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        text = str(symbol or "").strip().upper()
+        if text.endswith("-USD") or text.endswith("/USD"):
+            clean_sym = text[:-4] + "USDT"
+        elif text.endswith("/USDT") or text.endswith("-USDT"):
+            clean_sym = text.replace("/", "").replace("-", "")
+        elif not text.endswith("USDT"):
+            clean_sym = f"{text}USDT"
+        else:
+            clean_sym = text
         cache_file = os.path.join(self.market_data_dir, f"{clean_sym}_15m.csv")
 
         # Use cache if fresh (< 6 hours old)

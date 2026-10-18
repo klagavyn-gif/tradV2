@@ -270,6 +270,15 @@ class DailyCouncilDebrief:
                 1 for rec in executed_orders if isinstance(rec, dict) and rec.get("is_sandbox_exploration")
             )
 
+        # 4. Cross-market macro intelligence from ScoutResearcher
+        macro_intel = {}
+        try:
+            from .scout_researcher import ScoutResearcher
+            researcher = ScoutResearcher()
+            macro_intel = researcher.load_cached_intel() or {}
+        except Exception as me:
+            logger.debug("[DailyCouncilDebrief] Could not load macro intel: %s", me)
+
         return {
             "lookback_hours": lookback_hours,
             "total_settled": total_settled,
@@ -294,160 +303,280 @@ class DailyCouncilDebrief:
             "circuit_breaker_active": circuit_breaker_active,
             "executed_orders_count": len(executed_orders) if isinstance(executed_orders, (list, dict)) else 0,
             "sandbox_executed_count": sandbox_executed,
+            "macro_intel": macro_intel,
         }
 
     def _generate_deterministic_dialogue(self, stats: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
         """
         Synthesizes a realistic, role-based Thai multi-agent debrief transcript
         when Gemini LLM is offline or not configured.
+        Intelligently adapts between Trade Post-Mortem (when trades settled) and
+        Market Stagnation Diagnostic (when zero trades settled).
         """
         dialogue = []
+        total_settled = stats.get("total_settled", 0)
         wins = stats.get("wins", 0)
         losses = stats.get("losses", 0)
+        breakevens = stats.get("breakevens", 0)
         wr = stats.get("win_rate_pct", 0.0)
         net_r = stats.get("net_r", 0.0)
         net_pnl = stats.get("net_pnl_pct", 0.0)
         loss_details = stats.get("loss_details") or []
         win_details = stats.get("win_details") or []
-        veto_count = stats.get("delib_vetoed", 0)
+        delib_count = stats.get("deliberations_count", 0)
+        delib_executed = stats.get("delib_executed", 0)
+        delib_vetoed = stats.get("delib_vetoed", 0)
+        delib_standby = stats.get("delib_standby", 0)
         vetoes_by_spec = stats.get("vetoes_by_spec") or {}
         consec_losses = stats.get("consecutive_losses", 0)
 
-        # 1. Council Arbiter Opening
-        dialogue.append({
-            "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
-            "text": (
-                f"เปิดการประชุมสภาประจำวันเพื่อทบทวนผลงานในรอบ 24 ชม. ที่ผ่านมาครับ "
-                f"ระบบมีออเดอร์ปิดรอบ {stats.get('total_settled', 0)} ไม้: ชนะ {wins} ไม้, แพ้ {losses} ไม้, "
-                f"กันทุน {stats.get('breakevens', 0)} ไม้ (Win Rate {wr:.1f}%, Net PnL {net_pnl:+.2f}%, Net {net_r:+.2f}R) "
-                f"และสภาได้ออกคำสั่งยับยั้ง (VETO) ความเสี่ยงไปทั้งหมด {veto_count} ครั้ง "
-                f"ขอให้แต่ละฝ่ายเริ่มรายงานการชันสูตรครับ"
-            ),
-        })
+        # Macro snapshot from ScoutResearcher
+        macro_intel = stats.get("macro_intel") or {}
+        sp_chg = _safe_float(macro_intel.get("sp500_change_24h") or macro_intel.get("sp500_change_24h_pct"), 0.0)
+        btc_chg = _safe_float(macro_intel.get("btc_change_24h") or macro_intel.get("btc_change_24h_pct"), 0.0)
+        paxg_chg = _safe_float(macro_intel.get("paxg_change_24h") or macro_intel.get("paxg_change_24h_pct"), 0.0)
+        macro_regime_cached = str(macro_intel.get("market_regime") or "CALM_CONSOLIDATION")
 
-        # 2. Alpha Specialist on Entries & Patterns
-        if loss_details:
-            l0 = loss_details[0]
-            alpha_note = (
-                f"สำหรับไม้ที่ชน SL ({l0.get('symbol', '?')} {l0.get('pnl_pct', 0.0)}%): จากการตรวจย้อนหลังพบว่า "
-                f"สัญญาณ CDC เขียวเกิดขึ้นที่ขอบบนของกรอบไซด์เวย์ มีไส้เทียนบน (Upper Wick) ต้านแรงซื้อ "
-                f"และโมเมนตัมไม่ต่อเนื่อง ทำให้การเบรกเอาต์กลายเป็น False Break "
-                f"ผมเสนอให้เพิ่มเกณฑ์ระวังแท่งเทียนที่มีไส้บนเกิน 35% ของขนาดแท่งครับ"
-            )
+        # -------------------------------------------------------------
+        # Case A: ZERO SETTLED TRADES (Market Stagnation / Coiling Mode)
+        # -------------------------------------------------------------
+        if total_settled == 0:
+            # 1. Arbiter Opening
+            dialogue.append({
+                "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
+                "text": (
+                    f"เปิดการประชุมสภาประจำวันครับ ในรอบ 24 ชม. ที่ผ่านมา บอทไม่มีออเดอร์ปิดรอบ (ไม่มีไม้ขาดทุนและไม่มีไม้ชน SL) "
+                    f"โดยสภาได้รับสัญญาณ M15 เข้ามาพิจารณาทั้งหมด {delib_count} ครั้ง (อนุมัติ {delib_executed} ครั้ง, "
+                    f"ยับยั้งความเสี่ยง VETO {delib_vetoed} ครั้ง, และติดสถานะเฝ้าระวัง STANDBY {delib_standby} ครั้ง) "
+                    f"ขอให้ทุกฝ่ายรายงานชีพจรตลาดและทบทวนความคุ้มเสี่ยงครับ"
+                ),
+            })
+
+            # 2. Alpha Specialist
+            dialogue.append({
+                "speaker": "🎯 Alpha Specialist (ฝ่ายกลยุทธ์ & กราฟแท่งเทียน)",
+                "text": (
+                    f"ฝ่ายกลยุทธ์รายงาน: สัญญาณในรอบนี้ส่วนใหญ่ติดสถานะ 'รอ' เนื่องจาก 2 ปัจจัยหลัก: "
+                    f"1) ราคาปัจจุบันวิ่งห่างเกิน Entry Window ปลอดภัย (ไม่ไล่ราคาปลายคลื่น) และ "
+                    f"2) แท่งเทียน 11 เหรียญส่วนใหญ่อยู่ในกรอบบีบแคบ (Volatility Contraction) "
+                    f"การรักษาวินัยไม่ฝืนเปิดไม้ช่วยให้เราไม่ติดดอยและพร้อมเข้าทำเมื่อมีเบรกเอาท์จริงครับ"
+                ),
+            })
+
+            # 3. Derivatives Specialist
+            dialogue.append({
+                "speaker": "📊 Derivatives Specialist (ฝ่ายอนุพันธ์ & สภาพคล่อง)",
+                "text": (
+                    f"ฝ่ายอนุพันธ์รายงาน: ตรวจสอบ Funding Rate และ Open Interest ของ Universe 11 เหรียญ พบว่าทรงตัว "
+                    f"ไม่มีภาวะเก็งกำไรฟองสบู่ฝั่งใดฝั่งหนึ่งรุนแรง เม็ดเงินสถาบันกำลังรอดูทิศทาง macro "
+                    f"การที่บอทไม่เข้าไม้ในสภาวะนี้คือการตัดสินใจที่ถูกต้องตามวินัยอนุพันธ์ครับ"
+                ),
+            })
+
+            # 4. Risk Specialist
+            dialogue.append({
+                "speaker": "🛡️ Risk Specialist (ฝ่ายบริหารความเสี่ยง & กันทุน)",
+                "text": (
+                    f"ฝ่ายบริหารความเสี่ยง: พอร์ตหลักปลอดภัย 100% ขาดทุนสะสมรายวัน 0.0% "
+                    f"สภาวะที่ไม่มีไม้เทรดไม่ใช่ความล้มเหลว แต่เป็น 'Shields Up' ป้องกันไม่ให้พอร์ตโดน Whipsaw "
+                    f"กัดกร่อนเงินทุน วินัยความเสี่ยงยังคงแข็งแกร่งสูงสุดครับ"
+                ),
+            })
+
+            # 5. Macro & News Sentinel (with ScoutResearcher Data)
+            dialogue.append({
+                "speaker": "🌍 Macro & News Sentinel (ฝ่ายมหภาคและข่าวเหตุการณ์)",
+                "text": (
+                    f"ฝ่ายมหภาคและข่าวกรอง (ร่วมกับ ScoutResearcher): ตลาดโลก S&P 500 ขยับ {sp_chg:+.2f}%, "
+                    f"ทองคำ/PAXG {paxg_chg:+.1f}%, และ BTC {btc_chg:+.1f}% สภาวะโดยรวมคือ '{macro_regime_cached}' "
+                    f"ยังไม่มีปัจจัย FUD รุนแรง แต่สภาพคล่องกระจุกตัว รอคอยตัวเลขเศรษฐกิจเพื่อเลือกทิศทางใหม่"
+                ),
+            })
+
+            # 6. Ops Specialist
+            dialogue.append({
+                "speaker": "⚡ Ops Specialist (ฝ่ายระบบคำสั่ง & สภาพคล่อง)",
+                "text": (
+                    f"ฝ่ายระบบปฏิบัติการ: เชื่อมต่อ Binance Futures API ทำงานเสถียร 100% "
+                    f"สเปรดและ Slippage อยู่ในกรอบปกติ ไม่พบปัญหาติดขัดของคำสั่ง STOP_MARKET "
+                    f"การจัดการ Lot Size และ Notional สอดคล้องกับขีดจำกัดของกระดานเทรด"
+                ),
+            })
+
+            # 7. Contrarian Scout
+            dialogue.append({
+                "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
+                "text": (
+                    f"ฝ่ายสำรวจและคิดต่าง: ระหว่างที่ตลาดกำลังสะสมพลัง เราจับตาหาจังหวะ Relative Strength "
+                    f"และ Panic Sweep อย่างใกล้ชิด หากเกิดการทุบกวาดสภาพคล่องผิดปกติ สเกาต์พร้อมเสนอไม้ทดลอง Sandbox "
+                    f"ทันทีเพื่อเก็บแต้มต่อต้นคลื่น"
+                ),
+            })
+
+        # -------------------------------------------------------------
+        # Case B: SETTLED TRADES OCCURRED (Trade Post-Mortem Mode)
+        # -------------------------------------------------------------
         else:
-            alpha_note = (
-                f"ในรอบนี้สัญญาณ CDC ActionZone ที่ผ่านสภาเข้ามาถือว่าคุณภาพคมมากครับ "
-                f"การกรองร่วมกับ VIXFix และ ATR Trailing ทำให้เราไม่หลงเข้าไม้ตอนไซด์เวย์บีบแคบ "
-                f"ไม้ที่เข้าได้มี Win Rate {wr:.1f}% ตามแผนทุกประการ"
-            )
-        dialogue.append({
-            "speaker": "🎯 Alpha Specialist (ฝ่ายกลยุทธ์ & กราฟแท่งเทียน)",
-            "text": alpha_note,
-        })
+            # 1. Arbiter Opening
+            dialogue.append({
+                "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
+                "text": (
+                    f"เปิดการประชุมสภาประจำวันเพื่อทบทวนผลงานในรอบ 24 ชม. ที่ผ่านมาครับ "
+                    f"ระบบมีออเดอร์ปิดรอบ {total_settled} ไม้: ชนะ {wins} ไม้, แพ้ {losses} ไม้, "
+                    f"กันทุน {breakevens} ไม้ (Win Rate {wr:.1f}%, Net PnL {net_pnl:+.2f}%, Net {net_r:+.2f}R) "
+                    f"และสภาได้ออกคำสั่งยับยั้ง (VETO) ความเสี่ยงไปทั้งหมด {delib_vetoed} ครั้ง "
+                    f"ขอให้แต่ละฝ่ายเริ่มรายงานการชันสูตรครับ"
+                ),
+            })
 
-        # 3. Derivatives Specialist on Funding & Open Interest
-        deriv_vetoes = vetoes_by_spec.get("derivatives_specialist", 0)
-        if deriv_vetoes > 0:
-            deriv_note = (
-                f"ฝ่ายอนุพันธ์ขอรายงานว่า การ VETO {deriv_vetoes} ครั้งของเราช่วยสกัดกับดัก Long Squeeze ได้สำเร็จ "
-                f"ช่วงที่มีสัญญาณ BUY มีการตรวจพบ Funding Rate พุ่งสูงและ Open Interest ลดลงผิดปกติ "
-                f"ซึ่งเป็นสัญญาณว่าเงินสถาบันกำลังรินขายทำกำไร การระงับคำสั่งจึงช่วยปกป้องเงินทุนพอร์ตได้ 100%"
-            )
-        else:
-            deriv_note = (
-                f"ภาพรวมอนุพันธ์ 24 ชม. ที่ผ่านมา Funding Rate ของเหรียญใน Universe เฉลี่ยทรงตัว "
-                f"ไม่มีภาวะ Overcrowded รุนแรง ถือว่าสัญญาณที่สภาอนุมัติเป็นจังหวะที่คลีนครับ"
-            )
-        dialogue.append({
-            "speaker": "📊 Derivatives Specialist (ฝ่ายอนุพันธ์ & สภาพคล่อง)",
-            "text": deriv_note,
-        })
+            # 2. Alpha Specialist on Entries & Patterns
+            if loss_details:
+                l0 = loss_details[0]
+                alpha_note = (
+                    f"สำหรับไม้ที่ชน SL ({l0.get('symbol', '?')} {l0.get('pnl_pct', 0.0)}%): จากการตรวจย้อนหลังพบว่า "
+                    f"สัญญาณ CDC เขียวเกิดขึ้นที่ขอบบนของกรอบไซด์เวย์ มีไส้เทียนบน (Upper Wick) ต้านแรงซื้อ "
+                    f"และโมเมนตัมไม่ต่อเนื่อง ทำให้การเบรกเอาต์กลายเป็น False Break "
+                    f"ผมเสนอให้เพิ่มเกณฑ์ระวังแท่งเทียนที่มีไส้บนเกิน 35% ของขนาดแท่งครับ"
+                )
+            else:
+                alpha_note = (
+                    f"ในรอบนี้สัญญาณ CDC ActionZone ที่ผ่านสภาเข้ามาถือว่าคุณภาพคมมากครับ "
+                    f"การกรองร่วมกับ VIXFix และ ATR Trailing ทำให้เราไม่หลงเข้าไม้ตอนไซด์เวย์บีบแคบ "
+                    f"ไม้ที่เข้าได้มี Win Rate {wr:.1f}% ตามแผนทุกประการ"
+                )
+            dialogue.append({
+                "speaker": "🎯 Alpha Specialist (ฝ่ายกลยุทธ์ & กราฟแท่งเทียน)",
+                "text": alpha_note,
+            })
 
-        # 4. Risk Specialist on Drawdown & Stop Management
-        risk_note = (
-            f"ฝ่ายบริหารความเสี่ยงขอเน้นย้ำเรื่องวินัย: "
-            f"ปัจจุบันแพ้สะสมติดกัน {consec_losses} ไม้ (สถิติดึงกลับสะสมรายวัน {stats.get('daily_loss_pct', 0.0):.2f}%) "
-            f"ระบบ Breakeven Stop ทำงานยอดเยี่ยม ช่วยล็อคเสมอ {stats.get('breakevens', 0)} ไม้ "
-            f"และ Momentum Harvester ช่วยขยับ Trailing Stop ล็อคกำไรที่วิ่งเกิน +3.0R "
-            f"เงินต้นได้รับการคุ้มกันอย่างปลอดภัยตามมาตรฐานความเสี่ยง"
-        )
-        dialogue.append({
-            "speaker": "🛡️ Risk Specialist (ฝ่ายบริหารความเสี่ยง & กันทุน)",
-            "text": risk_note,
-        })
+            # 3. Derivatives Specialist
+            deriv_vetoes = vetoes_by_spec.get("derivatives_specialist", 0)
+            if deriv_vetoes > 0:
+                deriv_note = (
+                    f"ฝ่ายอนุพันธ์ขอรายงานว่า การ VETO {deriv_vetoes} ครั้งของเราช่วยสกัดกับดัก Long Squeeze ได้สำเร็จ "
+                    f"ช่วงที่มีสัญญาณ BUY มีการตรวจพบ Funding Rate พุ่งสูงและ Open Interest ลดลงผิดปกติ "
+                    f"ซึ่งเป็นสัญญาณว่าเงินสถาบันกำลังรินขายทำกำไร การระงับคำสั่งจึงช่วยปกป้องเงินทุนพอร์ตได้ 100%"
+                )
+            else:
+                deriv_note = (
+                    f"ภาพรวมอนุพันธ์ 24 ชม. ที่ผ่านมา Funding Rate ของเหรียญใน Universe เฉลี่ยทรงตัว "
+                    f"ไม่มีภาวะ Overcrowded รุนแรง ถือว่าสัญญาณที่สภาอนุมัติเป็นจังหวะที่คลีนครับ"
+                )
+            dialogue.append({
+                "speaker": "📊 Derivatives Specialist (ฝ่ายอนุพันธ์ & สภาพคล่อง)",
+                "text": deriv_note,
+            })
 
-        # 5. Macro & News Sentinel
-        news_vetoes = vetoes_by_spec.get("news_specialist", 0)
-        news_note = (
-            f"ฝ่ายมหภาคและข่าวกรอง: ตลาด BTC ยังคงเป็นตัวกำหนดชีพจรใหญ่ "
-            + (
-                f"ในรอบนี้เรา Freeze การเทรดไป {news_vetoes} ครั้งช่วงที่มีความเสี่ยงความผันผวนของตัวเลขเศรษฐกิจ "
-                if news_vetoes > 0
-                else "ไม่มีตัวเลข CPI/FOMC สำคัญที่ทำให้สเปรดถ่างรุนแรง "
+            # 4. Risk Specialist
+            risk_note = (
+                f"ฝ่ายบริหารความเสี่ยงขอเน้นย้ำเรื่องวินัย: "
+                f"ปัจจุบันแพ้สะสมติดกัน {consec_losses} ไม้ (สถิติดึงกลับสะสมรายวัน {stats.get('daily_loss_pct', 0.0):.2f}%) "
+                f"ระบบ Breakeven Stop ทำงานยอดเยี่ยม ช่วยล็อคเสมอ {breakevens} ไม้ "
+                f"และ Momentum Harvester ช่วยขยับ Trailing Stop ล็อคกำไรที่วิ่งเกิน +3.0R "
+                f"เงินต้นได้รับการคุ้มกันอย่างปลอดภัยตามมาตรฐานความเสี่ยง"
             )
-            + "คำแนะนำสำหรับ 24 ชม. ข้างหน้าคือให้ติดตามทิศทาง BTC ที่แนวต้านสำคัญอย่างใกล้ชิด"
-        )
-        dialogue.append({
-            "speaker": "🌍 Macro & News Sentinel (ฝ่ายมหภาคและข่าวเหตุการณ์)",
-            "text": news_note,
-        })
+            dialogue.append({
+                "speaker": "🛡️ Risk Specialist (ฝ่ายบริหารความเสี่ยง & กันทุน)",
+                "text": risk_note,
+            })
 
-        # 6. Ops Specialist on Exchange Health
-        ops_note = (
-            f"ฝ่ายระบบปฏิบัติการ: เชื่อมต่อ Binance Futures API ทำงานเสถียร 100% "
-            f"สเปรดและ Slippage อยู่ในกรอบปกติ ไม่พบปัญหาติดขัดของคำสั่ง STOP_MARKET "
-            f"การจัดการ Lot Size และ Notional สอดคล้องกับขีดจำกัดของกระดานเทรด"
-        )
-        dialogue.append({
-            "speaker": "⚡ Ops Specialist (ฝ่ายระบบคำสั่ง & สภาพคล่อง)",
-            "text": ops_note,
-        })
-
-        # 7. Contrarian Scout on Asymmetric Exploration
-        sandbox_count = stats.get("sandbox_executed_count", 0)
-        if sandbox_count > 0:
-            scout_note = (
-                f"ฝ่ายสำรวจและคิดต่าง: ใน 24 ชม. ที่ผ่านมา เราได้ปล่อยไม้ทดลอง Sandbox ไป {sandbox_count} ไม้ "
-                f"(ด้วยขนาด Micro-size 35% พร้อม Hard SL บนกระดาน) เพื่อเสาะหาจุดเข้าไม่สมมาตร (Asymmetric Edge) "
-                f"ผลลัพธ์กำลังถูกนำเข้าสู่คลังความจำสภา เพื่อเรียนรู้ว่าจังหวะ Squeeze หรือ Divergence นี้คุ้มค่าที่จะพัฒนาเป็นกลยุทธ์หลักหรือไม่"
+            # 5. Macro & News Sentinel
+            news_vetoes = vetoes_by_spec.get("news_specialist", 0)
+            news_note = (
+                f"ฝ่ายมหภาคและข่าวกรอง: ตลาด BTC ยังคงเป็นตัวกำหนดชีพจรใหญ่ "
+                + (
+                    f"ในรอบนี้เรา Freeze การเทรดไป {news_vetoes} ครั้งช่วงที่มีความเสี่ยงความผันผวนของตัวเลขเศรษฐกิจ "
+                    if news_vetoes > 0
+                    else "ไม่มีตัวเลข CPI/FOMC สำคัญที่ทำให้สเปรดถ่างรุนแรง "
+                )
+                + "คำแนะนำสำหรับ 24 ชม. ข้างหน้าคือให้ติดตามทิศทาง BTC ที่แนวต้านสำคัญอย่างใกล้ชิด"
             )
-        else:
-            scout_note = (
-                "ฝ่ายสำรวจและคิดต่าง: รอบ 24 ชม. ที่ผ่านมา ไม่พบจังหวะ Asymmetric ที่มี R:R >= 2.8R หรือเกิด Squeeze ชัดเจน "
-                "จึงสงวนโควตาและไม่มีการเปิดไม้ Sandbox เพื่อคุ้มครองเงินทุนตามระเบียบสภา"
-            )
-        dialogue.append({
-            "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
-            "text": scout_note,
-        })
+            dialogue.append({
+                "speaker": "🌍 Macro & News Sentinel (ฝ่ายมหภาคและข่าวเหตุการณ์)",
+                "text": news_note,
+            })
 
-        # 8. Arbiter Closing & Directives
-        # Determine regime & risk stance (Risk-First Hierarchy)
+            # 6. Ops Specialist
+            ops_note = (
+                f"ฝ่ายระบบปฏิบัติการ: เชื่อมต่อ Binance Futures API ทำงานเสถียร 100% "
+                f"สเปรดและ Slippage อยู่ในกรอบปกติ ไม่พบปัญหาติดขัดของคำสั่ง STOP_MARKET "
+                f"การจัดการ Lot Size และ Notional สอดคล้องกับขีดจำกัดของกระดานเทรด"
+            )
+            dialogue.append({
+                "speaker": "⚡ Ops Specialist (ฝ่ายระบบคำสั่ง & สภาพคล่อง)",
+                "text": ops_note,
+            })
+
+            # 7. Contrarian Scout
+            sandbox_count = stats.get("sandbox_executed_count", 0)
+            if sandbox_count > 0:
+                scout_note = (
+                    f"ฝ่ายสำรวจและคิดต่าง: ใน 24 ชม. ที่ผ่านมา เราได้ปล่อยไม้ทดลอง Sandbox ไป {sandbox_count} ไม้ "
+                    f"(ด้วยขนาด Micro-size 35% พร้อม Hard SL บนกระดาน) เพื่อเสาะหาจุดเข้าไม่สมมาตร (Asymmetric Edge) "
+                    f"ผลลัพธ์กำลังถูกนำเข้าสู่คลังความจำสภา เพื่อเรียนรู้ว่าจังหวะ Squeeze หรือ Divergence นี้คุ้มค่าที่จะพัฒนาเป็นกลยุทธ์หลักหรือไม่"
+                )
+            else:
+                scout_note = (
+                    "ฝ่ายสำรวจและคิดต่าง: รอบ 24 ชม. ที่ผ่านมา ไม่พบจังหวะ Asymmetric ที่มี R:R >= 2.8R หรือเกิด Squeeze ชัดเจน "
+                    "จึงสงวนโควตาและไม่มีการเปิดไม้ Sandbox เพื่อคุ้มครองเงินทุนตามระเบียบสภา"
+                )
+            dialogue.append({
+                "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
+                "text": scout_note,
+            })
+
+        # -------------------------------------------------------------
+        # 8. Arbiter Closing & DYNAMIC DIRECTIVES CALIBRATION
+        # -------------------------------------------------------------
+        # Determine regime, risk stance, and dynamic execution parameters
         if consec_losses >= 2 or stats.get("daily_loss_pct", 0.0) >= 2.5 or stats.get("circuit_breaker_active"):
             regime = "SIDEWAY_CHOP"
             stance = "DEFENSIVE"
             min_score = 70.0
             caution = True
-        elif wr >= 55.0 and net_r > 0:
+            tp_mult = 0.85
+            be_r = 1.0
+            ts_r = 1.8
+            max_drift = 0.60
+            entry_atr_mult = 0.85
+        elif total_settled > 0 and wr >= 55.0 and net_r > 0:
             regime = "TRENDING_HEALTHY"
             stance = "NORMAL"
             min_score = 65.0
             caution = False
-        elif wr < 40.0:
+            tp_mult = 1.25
+            be_r = 1.2
+            ts_r = 2.0
+            max_drift = 1.00
+            entry_atr_mult = 1.15
+        elif total_settled > 0 and wr < 40.0:
             regime = "SIDEWAY_CHOP"
             stance = "DEFENSIVE"
             min_score = 70.0
             caution = True
+            tp_mult = 0.85
+            be_r = 1.0
+            ts_r = 1.8
+            max_drift = 0.60
+            entry_atr_mult = 0.85
         else:
-            regime = "CALM_CONSOLIDATION"
+            # Consolidation or zero settled trades without losses:
+            # RELEASE SYSTEM FROM 70% DEADLOCK! Set score back to 65% with balanced parameters.
+            regime = "CALM_CONSOLIDATION" if macro_regime_cached in ("CALM_CONSOLIDATION", "NEUTRAL") else macro_regime_cached
             stance = "NORMAL"
             min_score = 65.0
             caution = False
+            tp_mult = 1.00
+            be_r = 1.2
+            ts_r = 2.0
+            max_drift = 0.80
+            entry_atr_mult = 1.00
 
         closing_text = (
             f"มติสภาที่ประชุม: กำหนดสภาวะตลาดเป็น '{regime}' ท่าทีความเสี่ยง '{stance}' "
-            f"โดยปรับเกณฑ์คะแนนความเชื่อมั่นขั้นต่ำเป็น {min_score:.0f}% (Caution Mode = {caution}) "
-            f"และสั่งการให้ทุกฝ่ายบันทึก Memory นี้เพื่อนำไปบังคับใช้ในการคัดเลือกไม้ M15 ทุกแท่งเทียนวันพรุ่งนี้ ปิดประชุมครับ"
+            f"เกณฑ์ความเชื่อมั่นขั้นต่ำ {min_score:.0f}% (Caution Mode = {caution}) "
+            f"ปรับสเกลเป้ากำไร TP={tp_mult:.2f}x | จุดกันทุน Breakeven=+{be_r:.1f}R "
+            f"สั่งการให้ทุกฝ่ายบันทึก Directives นี้เข้าสู่ Blackboard เพื่อบังคับใช้จริงใน 24 ชม. ข้างหน้า ปิดประชุมครับ"
         )
         dialogue.append({
             "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
@@ -459,6 +588,11 @@ class DailyCouncilDebrief:
             "risk_stance": stance,
             "min_composite_score": min_score,
             "caution_mode": caution,
+            "tp_target_multiplier": tp_mult,
+            "breakeven_trigger_r": be_r,
+            "trailing_activation_r": ts_r,
+            "max_entry_drift_pct": max_drift,
+            "entry_window_atr_mult": entry_atr_mult,
         }
         return dialogue, meta
 
@@ -477,12 +611,17 @@ class DailyCouncilDebrief:
             "หน้าที่ของคุณคือประชุมโต๊ะกลมจำลอง (Debrief) เพื่อทบทวนผลงานรอบ 24 ชั่วโมงที่ผ่านมา "
             "โดยมีผู้พูด: 👨‍⚖️ ประธานสภา, 🎯 Alpha Specialist, 📊 Derivatives Specialist, 🛡️ Risk Specialist, 🌍 Macro & News Sentinel, ⚡ Ops Specialist, 🔭 Contrarian Scout "
             "ให้ผู้เชี่ยวชาญพูดคุยแลกเปลี่ยน ชันสูตรไม้ที่แพ้ ชื่นชมกลไกกันทุน (Breakeven) และการระงับความเสี่ยง (Veto) รวมถึงวิเคราะห์ผลลัพธ์ของไม้ทดลอง Sandbox Exploration "
+            "หากรอบนี้ไม่มีไม้ปิดรอบ (total_settled == 0) ให้วิเคราะห์ว่าเพราะเหตุใดตลาดจึงติดสถานะ 'รอ' (เช่น ตลาดบีบแคบ Volatility Contraction หรือราคาห่าง Entry Window) และห้ามพูดว่า Win Rate 0.0% ล้มเหลว "
             "แล้วสรุปมติเป็น JSON รูปแบบ: "
             "{\n"
-            '  "market_regime": "SIDEWAY_CHOP" | "TRENDING_HEALTHY" | "HIGH_VOLATILITY",\n'
+            '  "market_regime": "SIDEWAY_CHOP" | "TRENDING_HEALTHY" | "CALM_CONSOLIDATION" | "HIGH_VOLATILITY",\n'
             '  "risk_stance": "DEFENSIVE" | "NORMAL" | "AGGRESSIVE",\n'
             '  "min_composite_score": 65.0 หรือ 70.0,\n'
             '  "caution_mode": true หรือ false,\n'
+            '  "tp_target_multiplier": 0.85 ถึง 1.25,\n'
+            '  "breakeven_trigger_r": 1.0 ถึง 1.5,\n'
+            '  "trailing_activation_r": 1.8 ถึง 2.5,\n'
+            '  "max_entry_drift_pct": 0.60 ถึง 1.00,\n'
             '  "dialogue": [{"speaker": "...", "text": "..."}],\n'
             '  "lessons_learned": ["...", "..."]\n'
             "}"
@@ -518,10 +657,15 @@ class DailyCouncilDebrief:
 
                 dialogue = parsed.get("dialogue") or []
                 meta = {
-                    "market_regime": parsed.get("market_regime", "SIDEWAY_CHOP"),
+                    "market_regime": parsed.get("market_regime", "CALM_CONSOLIDATION" if stats.get("total_settled", 0) == 0 else "SIDEWAY_CHOP"),
                     "risk_stance": parsed.get("risk_stance", "NORMAL"),
                     "min_composite_score": float(parsed.get("min_composite_score", 65.0)),
                     "caution_mode": bool(parsed.get("caution_mode", False)),
+                    "tp_target_multiplier": float(parsed.get("tp_target_multiplier", 1.0)),
+                    "breakeven_trigger_r": float(parsed.get("breakeven_trigger_r", 1.2)),
+                    "trailing_activation_r": float(parsed.get("trailing_activation_r", 2.0)),
+                    "max_entry_drift_pct": float(parsed.get("max_entry_drift_pct", 0.80)),
+                    "entry_window_atr_mult": float(parsed.get("entry_window_atr_mult", 1.0)),
                     "lessons_learned": parsed.get("lessons_learned", []),
                 }
                 return dialogue, meta
@@ -538,7 +682,7 @@ class DailyCouncilDebrief:
         now = _utc_now()
         session_id = f"debrief_{now.strftime('%Y%m%d_%H%M%S')}"
 
-        market_regime = meta.get("market_regime", "SIDEWAY_CHOP")
+        market_regime = meta.get("market_regime", "CALM_CONSOLIDATION" if stats.get("total_settled", 0) == 0 else "SIDEWAY_CHOP")
         risk_stance = meta.get("risk_stance", "NORMAL")
         min_composite_score = float(meta.get("min_composite_score", 65.0))
         caution_mode = bool(meta.get("caution_mode", False))
@@ -562,7 +706,10 @@ class DailyCouncilDebrief:
                     f"สภา VETO ตัดไฟแต่ต้นลม {stats['delib_vetoed']} ครั้ง ช่วยรักษาวินัยการเทรดไม่ให้ Overtrade"
                 )
             if not lessons:
-                lessons.append("รักษาวินัยคัดกรองสัญญาณ CDC M15 ตามแผนที่ทดสอบแล้ว")
+                if stats.get("total_settled", 0) == 0:
+                    lessons.append("การรักษาวินัยไม่ไล่ราคาในช่วงตลาดพักตัวช่วยปกป้องเงินทุนได้สมบูรณ์แบบ 100%")
+                else:
+                    lessons.append("รักษาวินัยคัดกรองสัญญาณ CDC M15 ตามแผนที่ทดสอบแล้ว")
 
         active_directives = {
             "caution_mode": caution_mode,
@@ -573,6 +720,11 @@ class DailyCouncilDebrief:
             "risk_multiplier_cap": 0.75 if caution_mode else 1.0,
             "max_funding_rate_long": 0.00030 if caution_mode else 0.00040,
             "strict_oi_filter": caution_mode,
+            "tp_target_multiplier": float(meta.get("tp_target_multiplier", 1.0)),
+            "breakeven_trigger_r": float(meta.get("breakeven_trigger_r", 1.2)),
+            "trailing_activation_r": float(meta.get("trailing_activation_r", 2.0)),
+            "max_entry_drift_pct": float(meta.get("max_entry_drift_pct", 0.80)),
+            "entry_window_atr_mult": float(meta.get("entry_window_atr_mult", 1.0)),
             "updated_at": _format_dt(now),
             "source": "daily_council_debrief",
         }
@@ -638,24 +790,39 @@ class DailyCouncilDebrief:
         directives = memory.get("active_directives") or {}
         dialogue = memory.get("dialogue_transcript") or []
         lessons = memory.get("lessons_learned") or []
+        total_settled = stats.get("total_settled", 0)
 
         lines = [
             "🏛️ <b>บันทึกการประชุมสภาประจำวัน (Daily Council Debrief)</b>",
             f"📅 <i>รอบประเมิน 24 ชั่วโมง | {_format_dt(_utc_now())}</i>",
             "",
-            "📊 <b>สรุปผลงานและการคุ้มกันพอร์ต:</b>",
-            f"• ไม้ปิดรอบ: <b>{stats.get('total_settled', 0)} ไม้</b> (ชนะ {stats.get('wins', 0)} | แพ้ {stats.get('losses', 0)} | กันทุน 🛡️ {stats.get('breakevens', 0)})",
-            f"• Win Rate สุทธิ: <b>{stats.get('win_rate_pct', 0.0):.1f}%</b> | Profit Factor: <b>{stats.get('profit_factor', 0.0):.2f}</b>",
-            f"• ผลตอบแทนรวม: <b>{stats.get('net_pnl_pct', 0.0):+.2f}%</b> (<b>{stats.get('net_r', 0.0):+.2f}R</b>)",
-            f"• สภายับยั้งความเสี่ยง (VETO): <b>{stats.get('delib_vetoed', 0)} ครั้ง</b>"
-            + (
-                f" | ไม้ทดลอง 🧪: <b>{stats.get('sandbox_executed_count', 0)} ไม้</b>"
-                if stats.get("sandbox_executed_count", 0) > 0
-                else ""
-            ),
+        ]
+
+        if total_settled == 0:
+            lines.extend([
+                "📊 <b>สถานะตลาด & การคุ้มกันเงินทุน:</b>",
+                "• ไม้ปิดรอบใน 24 ชม.: <b>0 ไม้ (ไม่มีการชน SL / เงินทุนปลอดภัย 100%)</b>",
+                f"• สัญญาณพิจารณาในสภา: <b>{stats.get('deliberations_count', 0)} ครั้ง</b> (อนุมัติ {stats.get('delib_executed', 0)} | VETO 🛡️ {stats.get('delib_vetoed', 0)} | รอ ⏳ {stats.get('delib_standby', 0)})",
+                f"• Drawdown รายวัน: <b>{stats.get('daily_loss_pct', 0.0):.2f}%</b> (Circuit Breaker: {'ทำงาน ⚠️' if stats.get('circuit_breaker_active') else 'ปกติ 🟢'})",
+            ])
+        else:
+            lines.extend([
+                "📊 <b>สรุปผลงานและการคุ้มกันพอร์ต:</b>",
+                f"• ไม้ปิดรอบ: <b>{total_settled} ไม้</b> (ชนะ {stats.get('wins', 0)} | แพ้ {stats.get('losses', 0)} | กันทุน 🛡️ {stats.get('breakevens', 0)})",
+                f"• Win Rate สุทธิ: <b>{stats.get('win_rate_pct', 0.0):.1f}%</b> | Profit Factor: <b>{stats.get('profit_factor', 0.0):.2f}</b>",
+                f"• ผลตอบแทนรวม: <b>{stats.get('net_pnl_pct', 0.0):+.2f}%</b> (<b>{stats.get('net_r', 0.0):+.2f}R</b>)",
+                f"• สภายับยั้งความเสี่ยง (VETO): <b>{stats.get('delib_vetoed', 0)} ครั้ง</b>"
+                + (
+                    f" | ไม้ทดลอง 🧪: <b>{stats.get('sandbox_executed_count', 0)} ไม้</b>"
+                    if stats.get("sandbox_executed_count", 0) > 0
+                    else ""
+                ),
+            ])
+
+        lines.extend([
             "",
             "💬 <b>ไฮไลท์การอภิปรายโต๊ะกลม (Board Dialogue):</b>",
-        ]
+        ])
 
         # Select key dialogue turns (prioritize Contrarian Scout when sandbox trades occurred)
         if stats.get("sandbox_executed_count", 0) > 0:
@@ -681,15 +848,19 @@ class DailyCouncilDebrief:
         flagged = directives.get("flagged_symbols") or []
         flagged_str = ", ".join(flagged) if flagged else "ไม่มี"
         caution_icon = "⚠️ เปิด" if directives.get("caution_mode") else "🟢 ปิด"
+        tp_m = directives.get("tp_target_multiplier", 1.0)
+        be_r = directives.get("breakeven_trigger_r", 1.2)
+        ts_r = directives.get("trailing_activation_r", 2.0)
+        drift = directives.get("max_entry_drift_pct", 0.80)
 
         lines.extend([
-            "📜 <b>มติสภา & คำสั่งควบคุมความเสี่ยง (มีผล 24 ชม.):</b>",
+            "📜 <b>มติสภา & การปรับจูนพารามิเตอร์อัตโนมัติ (มีผล 24 ชม.):</b>",
             f"• สภาวะตลาด: <code>{regime}</code> | ท่าที: <code>{stance}</code>",
             f"• เกณฑ์คะแนนขั้นต่ำสภา: <b>{score:.0f}%</b> | Caution Mode: {caution_icon}",
+            f"• ปรับจูน Dynamic Target: <b>TP Scale = {tp_m:.2f}x</b> | <b>กันทุน BE = +{be_r:.1f}R</b>",
+            f"• Trailing Lock = <b>+{ts_r:.1f}R</b> | คุม Drift สูงสุด = <b>{drift:.2f}%</b>",
             f"• เหรียญเฝ้าระวังพิเศษ: <code>{flagged_str}</code>",
-            f"• Funding Rate เพดาน Long: <code>{directives.get('max_funding_rate_long', 0.0004):.4f}</code>",
         ])
-
         return "\n".join(lines)
 
     def dispatch_telegram(

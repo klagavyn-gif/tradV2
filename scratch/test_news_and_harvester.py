@@ -110,9 +110,10 @@ class TestNewsSentinelAndHarvester(unittest.TestCase):
 
         self.assertEqual(verdict.decision, "EXECUTE")
         self.assertTrue(verdict.approved)
-        self.assertEqual(len(verdict.opinions), 6)
+        self.assertEqual(len(verdict.opinions), 7)
         self.assertIn("news_specialist", verdict.opinions)
-        self.assertIn("/6", verdict.summary)
+        self.assertIn("contrarian_scout", verdict.opinions)
+        self.assertIn("/7", verdict.summary)
         print("Verdict Summary:", verdict.summary)
 
     def test_momentum_harvester_tightening(self):

@@ -84,6 +84,29 @@ def execute_binance_auto_trade_pipeline(
     be_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_BREAKEVEN_R", 1.2))
     ts_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_R", 2.0))
     trail_dist_r = float(getattr(config, "TELEGRAM_ALERT_REALIZED_TRAILING_DISTANCE_R", 0.8))
+    max_drift = float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80))
+    tp_mult = 1.0
+
+    # Synchronize dynamic directives from Daily Council Debrief via CentralBlackboard
+    try:
+        from infrastructure.council.blackboard import CentralBlackboard
+        bb_file = helpers.get(
+            "council_deliberations_path",
+            lambda: getattr(config, "TRADING_COUNCIL_DELIBERATIONS_PATH", ".data/telegram_alerts/council_deliberations.json")
+        )()
+        bb = CentralBlackboard(file_path=bb_file)
+        council_directives = bb.get_active_directives() or {}
+        if council_directives:
+            be_r = float(council_directives.get("breakeven_trigger_r", be_r))
+            ts_r = float(council_directives.get("trailing_activation_r", ts_r))
+            max_drift = float(council_directives.get("max_entry_drift_pct", max_drift))
+            tp_mult = float(council_directives.get("tp_target_multiplier", 1.0))
+            logger.info(
+                "[Auto-Trade] Synchronized Council Directives: be_r=%.2fR, ts_r=%.2fR, max_drift=%.2f%%, tp_mult=%.2fx",
+                be_r, ts_r, max_drift, tp_mult
+            )
+    except Exception as cd_err:
+        logger.debug("[Auto-Trade] Could not load Council directives: %s", cd_err)
 
     risk_mgr = BinanceFuturesRiskManager(
         dynamic_sizing_enabled=getattr(config, "BINANCE_FUTURES_DYNAMIC_SIZING_ENABLED", True),
@@ -128,7 +151,7 @@ def execute_binance_auto_trade_pipeline(
         trailing_r=ts_r,
         trailing_dist_r=trail_dist_r,
         risk_manager=risk_mgr,
-        max_entry_drift_pct=float(getattr(config, "BINANCE_FUTURES_MAX_ENTRY_DRIFT_PCT", 0.80)),
+        max_entry_drift_pct=max_drift,
         kinetic_enabled=bool(getattr(config, "BINANCE_FUTURES_KINETIC_STOP_ENABLED", True)),
         kinetic_min_seconds=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_SECONDS", 21600.0)),
         kinetic_min_r=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_R", 0.60)),
@@ -675,6 +698,22 @@ def execute_binance_auto_trade_pipeline(
         try:
             is_sandbox = bool(verdict and getattr(verdict, "is_sandbox_exploration", False))
             sizing_override = verdict.sizing_info if is_sandbox else None
+
+            # Apply dynamic TP target scaling from Council Directives
+            if tp_mult != 1.0 and c.get("take_profit") and c.get("entry_price"):
+                try:
+                    c_entry = float(c["entry_price"])
+                    c_tp = float(c["take_profit"])
+                    c_sig = str(c.get("signal") or "").upper()
+                    diff = abs(c_tp - c_entry) * tp_mult
+                    scaled_tp = (c_entry + diff) if c_sig == "BUY" else (c_entry - diff)
+                    c["take_profit_original"] = c_tp
+                    c["take_profit"] = scaled_tp
+                    c["tp_target_multiplier"] = tp_mult
+                    logger.info("[Auto-Trade] Adjusted TP for %s: %.4f -> %.4f (scale=%.2fx)", c.get("symbol"), c_tp, scaled_tp, tp_mult)
+                except Exception as tp_err:
+                    logger.debug("Could not scale TP for %s: %s", c.get("symbol"), tp_err)
+
             exec_res = order_mgr.execute_candidate(c, sizing_override=sizing_override)
             results["executed_entries"].append(exec_res)
             if exec_res.get("success"):
@@ -688,6 +727,8 @@ def execute_binance_auto_trade_pipeline(
                         "quantity": exec_res.get("quantity"),
                         "notional": exec_res.get("notional"),
                         "stop_loss": c.get("stop_loss"),
+                        "take_profit": c.get("take_profit"),
+                        "tp_target_multiplier": c.get("tp_target_multiplier", 1.0),
                         "status": "open",
                         "executed_at": datetime.utcnow().isoformat(),
                         "council_round_id": getattr(verdict, "round_id", None) if verdict else None,

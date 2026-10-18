@@ -195,21 +195,48 @@ class TradingCouncil:
                 veto_reason = op.veto_reason or "vetoed_by_specialist"
                 break
 
-        # 3. Calculate weighted composite score
+        # 3. Dynamic weights & veto penalty check from Blackboard directives
+        active_weights = dict(self.WEIGHTS)
+        dir_weights = directives.get("specialist_weights")
+        if isinstance(dir_weights, dict):
+            active_weights.update(dir_weights)
+            w_sum = sum(active_weights.values())
+            if w_sum > 0:
+                active_weights = {k: v / w_sum for k, v in active_weights.items()}
+
+        veto_penalties = directives.get("veto_penalties") or {}
+        veto_overridden_note = ""
+
+        if veto_specialist and veto_specialist in veto_penalties:
+            pen = veto_penalties[veto_specialist]
+            if pen.get("active"):
+                non_veto_conf = sum(
+                    op.confidence for k, op in opinions.items() if k != veto_specialist
+                ) / max(1, len(opinions) - 1)
+                if non_veto_conf >= 65.0:
+                    logger.warning(
+                        "[TradingCouncil] Overriding VETO from %s: specialist has active penalty (%s). Non-veto confidence=%.1f%%",
+                        veto_specialist, pen.get("reason"), non_veto_conf
+                    )
+                    veto_overridden_note = f" (VETO ของ {veto_specialist} ถูกสภายกเลิกเนื่องจากความแม่นยำทางสถิติต่ำกว่าเกณฑ์)"
+                    veto_specialist = None
+                    veto_reason = None
+
+        # 4. Calculate weighted composite score
         composite_score = sum(
-            opinions[spec].confidence * weight
-            for spec, weight in self.WEIGHTS.items()
-            if spec in opinions
+            opinions[spec].confidence * active_weights.get(spec, 0.1)
+            for spec in opinions
+            if spec in active_weights
         )
 
         sizing_info = opinions["risk_specialist"].metrics or {}
 
-        # 4. Check for Exploration Sandbox Opportunity
+        # 5. Check for Exploration Sandbox Opportunity
         contrarian_op = opinions.get("contrarian_scout")
         is_exploration = bool(contrarian_op and contrarian_op.metrics.get("is_exploration"))
         exploration_meta = contrarian_op.metrics if is_exploration else {}
 
-        # 5. Formulate Verdict
+        # 6. Formulate Verdict
         effective_min_score = float(directives.get("min_composite_score") or self.min_composite_score)
         caution_tag = " [⚠️ Caution Mode]" if directives.get("caution_mode") else ""
         is_sandbox_exploration = False

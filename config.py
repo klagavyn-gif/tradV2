@@ -1495,4 +1495,14 @@ ALPHA_FORGE_FRICTION_PCT = _env_float("ALPHA_FORGE_FRICTION_PCT", 0.30)
 ALPHA_FORGE_DATA_DIR = _env_str("ALPHA_FORGE_DATA_DIR", ".data/council_research")
 ALPHA_FORGE_ACTIVE_FACTORS_PATH = _env_str("ALPHA_FORGE_ACTIVE_FACTORS_PATH", ".data/council_research/active_alpha_factors.json")
 
+# ==============================================================================
+# Market Pulse, Session Clock & Counterfactual Veto Auditor
+# ==============================================================================
+MARKET_PULSE_ENABLED = _env_bool("MARKET_PULSE_ENABLED", True)
+MARKET_SESSION_CLOCK_ENABLED = _env_bool("MARKET_SESSION_CLOCK_ENABLED", True)
+COUNCIL_VETO_AUDITOR_ENABLED = _env_bool("COUNCIL_VETO_AUDITOR_ENABLED", True)
+COUNCIL_VETO_MIN_AGE_MINUTES = _env_float("COUNCIL_VETO_MIN_AGE_MINUTES", 45.0)
+COUNCIL_VETO_PENALTY_THRESHOLD_PCT = _env_float("COUNCIL_VETO_PENALTY_THRESHOLD_PCT", 40.0)
+COUNCIL_VETO_SHADOW_PATH = _env_str("COUNCIL_VETO_SHADOW_PATH", ".data/telegram_alerts/council_veto_shadow.json")
+
 

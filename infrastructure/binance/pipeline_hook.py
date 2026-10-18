@@ -403,6 +403,18 @@ def execute_binance_auto_trade_pipeline(
 
         if not is_contrarian_candidate and dispatch_label in ("ห้ามเข้า", "รอ"):
             logger.info("[Auto-Trade] Skipping candidate %s %s (%s): dispatch_status=%s", sym, signal, strat, dispatch_label)
+            if dispatch_label == "ห้ามเข้า":
+                try:
+                    from infrastructure.council.veto_auditor import CouncilVetoAuditor
+                    _auditor = CouncilVetoAuditor()
+                    _auditor.record_veto(
+                        c,
+                        verdict=None,
+                        veto_specialist="risk_reward_gate",
+                        veto_reason=c.get("dispatch_status_reason_group") or "dispatch_status_avoid",
+                    )
+                except Exception as _ve:
+                    logger.debug("Failed to record dispatch avoid veto: %s", _ve)
             continue
         intent, intent_reason = infer_alert_intent(c)
         if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg or is_contrarian_candidate:
@@ -546,6 +558,19 @@ def execute_binance_auto_trade_pipeline(
             results["council_verdicts"].append(verdict.to_dict())
 
             if not verdict.approved:
+                # Record to Counterfactual Veto Tracker to audit if the veto was correct or false
+                try:
+                    from infrastructure.council.veto_auditor import CouncilVetoAuditor
+                    _auditor = CouncilVetoAuditor()
+                    _auditor.record_veto(
+                        c,
+                        verdict=verdict,
+                        veto_specialist=verdict.veto_specialist or "general_council",
+                        veto_reason=verdict.veto_reason or verdict.decision,
+                    )
+                except Exception as _ve:
+                    logger.debug("Failed to record council veto: %s", _ve)
+
                 # 1. Macro / BTC Shockwave Veto
                 if verdict.veto_specialist == "macro_specialist" or (verdict.veto_reason and "btc_shockwave_veto" in verdict.veto_reason):
                     logger.warning(

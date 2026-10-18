@@ -18,6 +18,8 @@ from .scout_researcher import ScoutResearcher
 from .arbiter import ConsensusVerdict, TradingCouncil
 from .daily_debrief import DailyCouncilDebrief
 from .alpha_forge import CouncilAlphaForge
+from .market_pulse import MarketSessionClock, CrossAssetPulseEngine
+from .veto_auditor import CouncilVetoAuditor
 
 __all__ = [
     "CentralBlackboard",
@@ -34,4 +36,7 @@ __all__ = [
     "TradingCouncil",
     "DailyCouncilDebrief",
     "CouncilAlphaForge",
+    "MarketSessionClock",
+    "CrossAssetPulseEngine",
+    "CouncilVetoAuditor",
 ]

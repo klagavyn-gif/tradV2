@@ -1105,6 +1105,41 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
 - รันฟรีภายใต้โควตา GitHub Actions และส่งสรุปผลการวิจัยเข้า Telegram ทุกเช้าวันจันทร์
 - เครื่องมือรันด้วยตนเอง: `python tools/run_alpha_forge.py --notify-telegram`
 
+## 30. ระบบ Market Pulse, Session Clock & Counterfactual Veto Auditor (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified)**
+
+### 1. Market Session Clock & Opening Latency Surge
+- โครงสร้าง: `infrastructure/council/market_pulse.py` (`MarketSessionClock`)
+- จำแนกช่วงเวลาตลาดโลกตาม UTC:
+  - `ASIA` (00:00 - 07:00 UTC / 07:00 - 14:00 น. เวลาไทย): ความผันผวน 0.85x
+  - `LONDON` (07:00 - 13:30 UTC / 14:00 - 20:30 น. เวลาไทย): ความผันผวน 1.15x
+  - `NY_OPEN` (13:30 - 15:30 UTC / 20:30 - 22:30 น. เวลาไทย): Wall Street Opening Surge ความผันผวน 1.35x
+  - `NY_MIDDAY` (15:30 - 21:00 UTC) & `OFF_HOURS` (21:00 - 24:00 UTC)
+- ตัวแปร `is_opening_surge`: ตรวจจับ 60 นาทีแรกของ London Open และ NY Cash Open เพื่อป้องกันการโดนไส้เทียนลากกิน Stop Loss
+
+### 2. Cross-Asset Lead-Lag & Relative Strength Engine
+- โครงสร้าง: `infrastructure/council/market_pulse.py` (`CrossAssetPulseEngine`)
+- เปรียบเทียบผลตอบแทนแบบเรียลไทม์ระหว่าง:
+  - `BTCUSDT`: ผู้นำโมเมนตัมตลาดคริปโต (Market Leader)
+  - `PAXGUSDT`: ทองคำดิจิทัล (Flight-to-Safety Indicator เมื่อทองพุ่งสวนทางคริปโต)
+  - `ONDOUSDT`: สินทรัพย์โลกจริง RWA / พันธบัตรสหรัฐฯ (Institutional Risk Appetite)
+- คำนวณ `lag_spread`: ความหน่วงระหว่าง BTC กับ Altcoin หาก BTC วิ่งนำหน้าแต่ Alt ยังไม่ขยับ จะให้คะแนนโบนัสตามการดีดตัว (Catch-up Edge)
+- บูรณาการเข้ากับ `CouncilAlphaForge`: สูตรคณิตศาสตร์สามารถดึงตัวแปร `is_opening_surge`, `is_ny_session`, `is_london_session` มาใช้งานได้
+
+### 3. Counterfactual Veto Auditor & Council Feedback Loop
+- โครงสร้าง: `infrastructure/council/veto_auditor.py` (`CouncilVetoAuditor`)
+- **การบันทึก VETO เงา (Shadow Veto Registry)**:
+  - เมื่อสภา AI สั่ง `VETO` / `STANDBY` หรือระบบคัดกรองสั่ง `ห้ามเข้า` ไม้นั้นจะถูกบันทึกลงใน `.data/telegram_alerts/council_veto_shadow.json` ทันที
+- **การพิสูจน์ผลลัพธ์ด้วยแท่งเทียนจริงในอนาคต (Audit)**:
+  - `CORRECT_VETO_SAVED_LOSS`: หากราคาวิ่งไปชน Stop Loss -> สภาตัดสินใจถูกต้อง ช่วยเซฟเงินทุนไม่ให้พอร์ตขาดทุน
+  - `FALSE_VETO_MISSED_PROFIT`: หากราคาวิ่งไปชน Take Profit -> สภาตัดสินใจผิดพลาด/ขี้ระแวงเกินไป ทำตกรถ
+  - `CHOP_EXPIRED`: ราคาไซด์เวย์ไม่ไปไหนในกรอบ 24-48 ชั่วโมง
+- **ระบบแก้ไขและปรับสมดุลสภาอัตโนมัติ (Council Self-Healing & Penalties)**:
+  - เชื่อมตรงเข้าสู่ `DailyCouncilDebrief`: คำนวณ Veto Accuracy (%) และแยกผลงานราย Specialist
+  - **ลงโทษฝ่ายขี้ระแวง**: หากกรรมการฝ่ายใด (เช่น `risk_specialist` หรือ `derivatives_specialist`) มีความแม่นยำในการ VETO ต่ำกว่า 40% (บล็อคผิดบ่อยจนเสียโอกาส) สภาจะ **ลดน้ำหนักคะแนนโหวตลงเหลือ 0.08** และใน `TradingCouncil` หากกรรมการฝ่ายอื่นมีคะแนนความมั่นใจเกิน 65% สภาจะ **สั่งยกเลิก (Override) การ VETO ของฝ่ายนั้นทันที** ป้องกันไม่ให้การบล็อคมั่วทำลายโอกาสทำกำไรของพอร์ต
+
+
 
 
 

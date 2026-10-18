@@ -130,6 +130,26 @@ def prepare_market_features(df: pd.DataFrame) -> pd.DataFrame:
     ema26 = close.ewm(span=26, adjust=False).mean()
     df["cdc_bullish"] = (ema12 > ema26).astype(int)
 
+    # Session and Opening Surge detection
+    if "timestamp" in df.columns and len(df) > 0:
+        try:
+            dt_series = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
+            hours = dt_series.dt.hour + dt_series.dt.minute / 60.0
+            df["is_ny_session"] = ((hours >= 13.5) & (hours < 21.0)).astype(int)
+            df["is_london_session"] = ((hours >= 7.0) & (hours < 13.5)).astype(int)
+            df["is_asia_session"] = ((hours >= 0.0) & (hours < 7.0)).astype(int)
+            df["is_opening_surge"] = (((hours >= 7.0) & (hours < 8.0)) | ((hours >= 13.5) & (hours < 14.5))).astype(int)
+        except Exception:
+            df["is_ny_session"] = 0
+            df["is_london_session"] = 0
+            df["is_asia_session"] = 0
+            df["is_opening_surge"] = 0
+    else:
+        df["is_ny_session"] = 0
+        df["is_london_session"] = 0
+        df["is_asia_session"] = 0
+        df["is_opening_surge"] = 0
+
     return df
 
 
@@ -153,6 +173,10 @@ def evaluate_alpha_expression(expression: str, df: pd.DataFrame) -> pd.Series:
         "rel_vol": df["rel_vol"],
         "ret1": df["ret1"],
         "wick_asymmetry": df["wick_asymmetry"],
+        "is_ny_session": df["is_ny_session"],
+        "is_london_session": df["is_london_session"],
+        "is_asia_session": df["is_asia_session"],
+        "is_opening_surge": df["is_opening_surge"],
         "ts_mean": _ts_mean,
         "ts_std": _ts_std,
         "ts_max": _ts_max,
@@ -351,6 +375,17 @@ class CouncilAlphaForge:
                 "threshold": 1.8,
                 "stop_loss_atr": 1.3,
                 "take_profit_atr": 2.6,
+                "max_hold_bars": 16,
+            },
+            {
+                "factor_id": "alpha_session_surge_vacuum",
+                "factor_name": "Session Opening Liquidity Vacuum (SOLV)",
+                "economic_rationale": "Heavy wick rejection happening precisely during London or NY opening liquidity surge.",
+                "formula": "is_opening_surge * rel_vol * (lower_wick - upper_wick) / (atr14 + 1e-6)",
+                "direction": "BUY",
+                "threshold": 1.2,
+                "stop_loss_atr": 1.2,
+                "take_profit_atr": 2.5,
                 "max_hold_bars": 16,
             },
         ]

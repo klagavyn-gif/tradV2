@@ -279,6 +279,16 @@ class DailyCouncilDebrief:
         except Exception as me:
             logger.debug("[DailyCouncilDebrief] Could not load macro intel: %s", me)
 
+        # 5. Counterfactual Veto Audit & Council Performance
+        veto_audit = {}
+        try:
+            from .veto_auditor import CouncilVetoAuditor
+            auditor = CouncilVetoAuditor(data_dir=self.data_dir)
+            auditor.audit_pending_vetoes(min_age_minutes=45.0)
+            veto_audit = auditor.calculate_veto_performance(days=7)
+        except Exception as ve:
+            logger.debug("[DailyCouncilDebrief] Could not calculate veto audit: %s", ve)
+
         return {
             "lookback_hours": lookback_hours,
             "total_settled": total_settled,
@@ -304,6 +314,7 @@ class DailyCouncilDebrief:
             "executed_orders_count": len(executed_orders) if isinstance(executed_orders, (list, dict)) else 0,
             "sandbox_executed_count": sandbox_executed,
             "macro_intel": macro_intel,
+            "veto_audit": veto_audit,
         }
 
     def _generate_deterministic_dialogue(self, stats: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
@@ -572,10 +583,28 @@ class DailyCouncilDebrief:
             max_drift = 0.80
             entry_atr_mult = 1.00
 
+        veto_audit = stats.get("veto_audit") or {}
+        veto_audit_note = ""
+        penalties = veto_audit.get("penalties") or {}
+        if veto_audit.get("total_audited", 0) > 0:
+            tot = veto_audit.get("total_audited")
+            cor = veto_audit.get("correct_vetoes")
+            fal = veto_audit.get("false_vetoes")
+            acc = veto_audit.get("accuracy_pct", 0.0)
+            saved = veto_audit.get("capital_saved_pct", 0.0)
+            missed = veto_audit.get("missed_gain_pct", 0.0)
+            veto_audit_note = (
+                f" ผลการตรวจสอบ VETO ย้อนหลัง ({tot} ครั้ง): แม่นยำ {acc:.1f}% "
+                f"(เซฟทุนสำเร็จ {cor} ไม้ +{saved:.1f}%, บล็อคผิดพลาด {fal} ไม้ -{missed:.1f}%)"
+            )
+            if penalties:
+                pen_names = ", ".join(penalties.keys())
+                veto_audit_note += f" [ลงโทษปรับลดน้ำหนักฝ่าย {pen_names} เนื่องจากแม่นยำต่ำกว่าเกณฑ์]"
+
         closing_text = (
             f"มติสภาที่ประชุม: กำหนดสภาวะตลาดเป็น '{regime}' ท่าทีความเสี่ยง '{stance}' "
             f"เกณฑ์ความเชื่อมั่นขั้นต่ำ {min_score:.0f}% (Caution Mode = {caution}) "
-            f"ปรับสเกลเป้ากำไร TP={tp_mult:.2f}x | จุดกันทุน Breakeven=+{be_r:.1f}R "
+            f"ปรับสเกลเป้ากำไร TP={tp_mult:.2f}x | จุดกันทุน Breakeven=+{be_r:.1f}R.{veto_audit_note} "
             f"สั่งการให้ทุกฝ่ายบันทึก Directives นี้เข้าสู่ Blackboard เพื่อบังคับใช้จริงใน 24 ชม. ข้างหน้า ปิดประชุมครับ"
         )
         dialogue.append({
@@ -593,6 +622,8 @@ class DailyCouncilDebrief:
             "trailing_activation_r": ts_r,
             "max_entry_drift_pct": max_drift,
             "entry_window_atr_mult": entry_atr_mult,
+            "veto_penalties": penalties,
+            "specialist_weights": {spec: 0.08 for spec in penalties.keys()} if penalties else {},
         }
         return dialogue, meta
 
@@ -725,6 +756,8 @@ class DailyCouncilDebrief:
             "trailing_activation_r": float(meta.get("trailing_activation_r", 2.0)),
             "max_entry_drift_pct": float(meta.get("max_entry_drift_pct", 0.80)),
             "entry_window_atr_mult": float(meta.get("entry_window_atr_mult", 1.0)),
+            "veto_penalties": meta.get("veto_penalties") or {},
+            "specialist_weights": meta.get("specialist_weights") or {},
             "updated_at": _format_dt(now),
             "source": "daily_council_debrief",
         }
@@ -853,7 +886,27 @@ class DailyCouncilDebrief:
         ts_r = directives.get("trailing_activation_r", 2.0)
         drift = directives.get("max_entry_drift_pct", 0.80)
 
+        veto_audit = stats.get("veto_audit") or {}
+        if veto_audit.get("total_audited", 0) > 0:
+            acc = veto_audit.get("accuracy_pct", 0.0)
+            saved = veto_audit.get("capital_saved_pct", 0.0)
+            missed = veto_audit.get("missed_gain_pct", 0.0)
+            correct_n = veto_audit.get("correct_vetoes", 0)
+            false_n = veto_audit.get("false_vetoes", 0)
+            lines.extend([
+                "",
+                "🛡️ <b>ผลตรวจสอบการ VETO สกัดความเสี่ยง (Veto Audit Proof):</b>",
+                f"• ตรวจสอบย้อนหลัง: <b>{veto_audit.get('total_audited')} ไม้</b> | ความแม่นยำ: <b>{acc:.1f}%</b>",
+                f"• เซฟทุนสำเร็จ (ชน SL): <b>{correct_n} ไม้ (+{saved:.2f}% ทุนที่รอดจากการขาดทุน)</b>",
+                f"• บล็อคผิดพลาด (ชน TP): <b>{false_n} ไม้ (-{missed:.2f}% กำไรที่เสียโอกาส)</b>",
+            ])
+            penalties = veto_audit.get("penalties") or {}
+            if penalties:
+                pen_names = ", ".join(penalties.keys())
+                lines.append(f"• ⚖️ <b>ลงโทษปรับลดน้ำหนักฝ่ายขี้ระแวง:</b> <code>{pen_names}</code> (ความแม่นยำต่ำกว่า 40%)")
+
         lines.extend([
+            "",
             "📜 <b>มติสภา & การปรับจูนพารามิเตอร์อัตโนมัติ (มีผล 24 ชม.):</b>",
             f"• สภาวะตลาด: <code>{regime}</code> | ท่าที: <code>{stance}</code>",
             f"• เกณฑ์คะแนนขั้นต่ำสภา: <b>{score:.0f}%</b> | Caution Mode: {caution_icon}",

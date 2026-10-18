@@ -206,6 +206,18 @@ class CentralBlackboard:
 
         return directives
 
+    def update_directives(self, directives: Dict[str, Any]) -> Dict[str, Any]:
+        """Convenience method to update active directives directly."""
+        state = self.load_full_state()
+        cur = state.setdefault("active_directives", {})
+        cur.update(directives)
+        self.save_full_state(state)
+        return cur
+
+    def get_directives(self) -> Dict[str, Any]:
+        """Convenience alias for get_active_directives."""
+        return self.get_active_directives()
+
     def update_system_status(self, update: Dict[str, Any]) -> Dict[str, Any]:
         """Update system heartbeat, active positions, and operational status."""
         state = self.load_full_state()

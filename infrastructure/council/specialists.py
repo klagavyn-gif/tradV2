@@ -125,6 +125,16 @@ class AlphaSpecialist:
                 confidence -= 10.0
                 directive_notes.append("Board Caution Mode")
 
+            # Check Promoted Alpha Gates from Blackboard directives
+            promoted_gates = directives.get("promoted_alpha_gates") or []
+            if promoted_gates:
+                for gate in promoted_gates:
+                    f_name = gate.get("factor_name", "Promoted Alpha Gate")
+                    if candidate.get("promoted_alpha_verified") or candidate.get("alpha_factor_id") == gate.get("factor_id"):
+                        confidence += 15.0
+                        directive_notes.append(f"🎓 ผ่านเกณฑ์สูตรหลัก: {f_name}")
+                        break
+
         confidence = max(20.0, min(95.0, confidence))
         note = f"{strategy} {signal} validated | R:R={rr_ratio:.2f} | Entry={entry_p:,}"
         if directive_notes:

@@ -1505,4 +1505,14 @@ COUNCIL_VETO_MIN_AGE_MINUTES = _env_float("COUNCIL_VETO_MIN_AGE_MINUTES", 45.0)
 COUNCIL_VETO_PENALTY_THRESHOLD_PCT = _env_float("COUNCIL_VETO_PENALTY_THRESHOLD_PCT", 40.0)
 COUNCIL_VETO_SHADOW_PATH = _env_str("COUNCIL_VETO_SHADOW_PATH", ".data/telegram_alerts/council_veto_shadow.json")
 
+# ==============================================================================
+# Auto-Promotion Evaluator: Sandbox to Production Graduation
+# ==============================================================================
+COUNCIL_PROMOTION_EVALUATOR_ENABLED = _env_bool("COUNCIL_PROMOTION_EVALUATOR_ENABLED", True)
+COUNCIL_PROMOTION_MIN_TRADES = _env_int("COUNCIL_PROMOTION_MIN_TRADES", 10)
+COUNCIL_PROMOTION_MIN_PF = _env_float("COUNCIL_PROMOTION_MIN_PF", 1.45)
+COUNCIL_PROMOTION_MIN_WIN_RATE = _env_float("COUNCIL_PROMOTION_MIN_WIN_RATE", 48.0)
+COUNCIL_PROMOTION_MIN_EXPECTANCY_PCT = _env_float("COUNCIL_PROMOTION_MIN_EXPECTANCY_PCT", 0.15)
+COUNCIL_PROMOTED_FACTORS_PATH = _env_str("COUNCIL_PROMOTED_FACTORS_PATH", ".data/council_research/promoted_production_factors.json")
+
 

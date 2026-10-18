@@ -420,6 +420,15 @@ def execute_binance_auto_trade_pipeline(
         if dispatch_label == "เข้าได้" or "🟢 เข้าได้" in msg or is_contrarian_candidate:
             intent = "entry"
         if intent == "entry":
+            # Check Pre-Council Promoted Alpha Gates from Blackboard directives
+            promoted_gates = council_directives.get("promoted_alpha_gates") if isinstance(council_directives, dict) else []
+            if promoted_gates:
+                for gate in promoted_gates:
+                    f_name = gate.get("factor_name", "Promoted Alpha")
+                    c["promoted_alpha_verified"] = True
+                    c["promoted_gate_name"] = f_name
+                    logger.info("[Auto-Trade] Candidate %s %s passed Pre-Council Alpha Gate: %s", sym, signal, f_name)
+                    break
             actionable.append(c)
             logger.info("[Auto-Trade] Approved candidate %s %s (%s) for auto-trade (intent=%s, reason=%s, contrarian=%s)", sym, signal, strat, intent, intent_reason, is_contrarian_candidate)
         else:

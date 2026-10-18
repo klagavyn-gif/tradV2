@@ -289,6 +289,23 @@ class DailyCouncilDebrief:
         except Exception as ve:
             logger.debug("[DailyCouncilDebrief] Could not calculate veto audit: %s", ve)
 
+        # 6. Autonomous Alpha Factor Promotion Evaluation
+        promotion_audit = {}
+        try:
+            from .promotion_evaluator import CouncilPromotionEvaluator
+            prom_eval = CouncilPromotionEvaluator(
+                factors_path=getattr(self.config, "ALPHA_FORGE_ACTIVE_FACTORS_PATH", None),
+                promoted_path=getattr(self.config, "COUNCIL_PROMOTED_FACTORS_PATH", None),
+                executed_path=self.executed_orders_path,
+                outcomes_path=self.outcomes_path,
+                min_live_trades=int(getattr(self.config, "COUNCIL_PROMOTION_MIN_TRADES", 10)),
+                min_live_pf=float(getattr(self.config, "COUNCIL_PROMOTION_MIN_PF", 1.45)),
+                min_live_win_rate=float(getattr(self.config, "COUNCIL_PROMOTION_MIN_WIN_RATE", 48.0)),
+            )
+            promotion_audit = prom_eval.evaluate_promotions()
+        except Exception as pe:
+            logger.debug("[DailyCouncilDebrief] Could not evaluate factor promotions: %s", pe)
+
         return {
             "lookback_hours": lookback_hours,
             "total_settled": total_settled,
@@ -315,6 +332,7 @@ class DailyCouncilDebrief:
             "sandbox_executed_count": sandbox_executed,
             "macro_intel": macro_intel,
             "veto_audit": veto_audit,
+            "promotion_audit": promotion_audit,
         }
 
     def _generate_deterministic_dialogue(self, stats: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Dict[str, Any]]:
@@ -347,6 +365,9 @@ class DailyCouncilDebrief:
         btc_chg = _safe_float(macro_intel.get("btc_change_24h") or macro_intel.get("btc_change_24h_pct"), 0.0)
         paxg_chg = _safe_float(macro_intel.get("paxg_change_24h") or macro_intel.get("paxg_change_24h_pct"), 0.0)
         macro_regime_cached = str(macro_intel.get("market_regime") or "CALM_CONSOLIDATION")
+
+        prom_audit = stats.get("promotion_audit") or {}
+        newly_prom = prom_audit.get("newly_promoted") or []
 
         # -------------------------------------------------------------
         # Case A: ZERO SETTLED TRADES (Market Stagnation / Coiling Mode)
@@ -519,12 +540,23 @@ class DailyCouncilDebrief:
             })
 
             # 7. Contrarian Scout
+            prom_audit = stats.get("promotion_audit") or {}
+            newly_prom = prom_audit.get("newly_promoted") or []
             sandbox_count = stats.get("sandbox_executed_count", 0)
-            if sandbox_count > 0:
+
+            if newly_prom:
+                p_names = ", ".join(f.get("factor_name", "") for f in newly_prom)
+                scout_note = (
+                    f"ฝ่ายสำรวจและคิดต่าง: ขอรายงานข่าวสำคัญต่อที่ประชุม! "
+                    f"สูตรคณิตศาสตร์ '{p_names}' ที่เรานำไปทดลองเทรด Sandbox ด้วยเงินจริง "
+                    f"ทำสถิติผ่านเกณฑ์การบ่มเพาะ (Profit Factor และ Win Rate ชนะขาดลอย) "
+                    f"ขอเสนอให้สภาออกมติเอกฉันท์เลื่อนขั้นสู่ระบบหลัก (Production) ในฐานะ Pre-Council Alpha Gate ครับ!"
+                )
+            elif sandbox_count > 0:
                 scout_note = (
                     f"ฝ่ายสำรวจและคิดต่าง: ใน 24 ชม. ที่ผ่านมา เราได้ปล่อยไม้ทดลอง Sandbox ไป {sandbox_count} ไม้ "
                     f"(ด้วยขนาด Micro-size 35% พร้อม Hard SL บนกระดาน) เพื่อเสาะหาจุดเข้าไม่สมมาตร (Asymmetric Edge) "
-                    f"ผลลัพธ์กำลังถูกนำเข้าสู่คลังความจำสภา เพื่อเรียนรู้ว่าจังหวะ Squeeze หรือ Divergence นี้คุ้มค่าที่จะพัฒนาเป็นกลยุทธ์หลักหรือไม่"
+                    f"ผลลัพธ์กำลังถูกนำเข้าสู่คลังความจำสภา เพื่อสะสมข้อมูลสู่การเลื่อนขั้นเป็นกลยุทธ์หลัก"
                 )
             else:
                 scout_note = (
@@ -601,10 +633,15 @@ class DailyCouncilDebrief:
                 pen_names = ", ".join(penalties.keys())
                 veto_audit_note += f" [ลงโทษปรับลดน้ำหนักฝ่าย {pen_names} เนื่องจากแม่นยำต่ำกว่าเกณฑ์]"
 
+        prom_note = ""
+        if newly_prom:
+            p_names = ", ".join(f.get("factor_name", "") for f in newly_prom)
+            prom_note = f" 🎓 [มติสภา: อนุมัติเลื่อนขั้นสูตร '{p_names}' สู่ระบบหลักเป็น Pre-Council Alpha Gate เริ่มคัดกรองทันที]"
+
         closing_text = (
             f"มติสภาที่ประชุม: กำหนดสภาวะตลาดเป็น '{regime}' ท่าทีความเสี่ยง '{stance}' "
             f"เกณฑ์ความเชื่อมั่นขั้นต่ำ {min_score:.0f}% (Caution Mode = {caution}) "
-            f"ปรับสเกลเป้ากำไร TP={tp_mult:.2f}x | จุดกันทุน Breakeven=+{be_r:.1f}R.{veto_audit_note} "
+            f"ปรับสเกลเป้ากำไร TP={tp_mult:.2f}x | จุดกันทุน Breakeven=+{be_r:.1f}R.{veto_audit_note}{prom_note} "
             f"สั่งการให้ทุกฝ่ายบันทึก Directives นี้เข้าสู่ Blackboard เพื่อบังคับใช้จริงใน 24 ชม. ข้างหน้า ปิดประชุมครับ"
         )
         dialogue.append({
@@ -624,6 +661,7 @@ class DailyCouncilDebrief:
             "entry_window_atr_mult": entry_atr_mult,
             "veto_penalties": penalties,
             "specialist_weights": {spec: 0.08 for spec in penalties.keys()} if penalties else {},
+            "promoted_alpha_gates": prom_audit.get("active_promoted_gates") or [],
         }
         return dialogue, meta
 
@@ -758,6 +796,7 @@ class DailyCouncilDebrief:
             "entry_window_atr_mult": float(meta.get("entry_window_atr_mult", 1.0)),
             "veto_penalties": meta.get("veto_penalties") or {},
             "specialist_weights": meta.get("specialist_weights") or {},
+            "promoted_alpha_gates": meta.get("promoted_alpha_gates") or [],
             "updated_at": _format_dt(now),
             "source": "daily_council_debrief",
         }
@@ -904,6 +943,28 @@ class DailyCouncilDebrief:
             if penalties:
                 pen_names = ", ".join(penalties.keys())
                 lines.append(f"• ⚖️ <b>ลงโทษปรับลดน้ำหนักฝ่ายขี้ระแวง:</b> <code>{pen_names}</code> (ความแม่นยำต่ำกว่า 40%)")
+
+        # 4. Alpha Factor Promotion Graduation Banner
+        prom_audit = stats.get("promotion_audit") or {}
+        newly_prom = prom_audit.get("newly_promoted") or []
+        if newly_prom:
+            lines.extend([
+                "",
+                "🎓 <b>สภาอนุมัติเลื่อนขั้นสูตรคณิตศาสตร์ (Auto-Promotion):</b>",
+            ])
+            for f in newly_prom:
+                ls = f.get("live_stats") or {}
+                f_name = f.get("factor_name")
+                lines.append(
+                    f"• 👑 <b>{f_name}</b> ผ่านการทดสอบกระดานจริง (เทรดจริง {ls.get('live_trades_count')} ไม้ | "
+                    f"PF {ls.get('profit_factor')} | Win Rate {ls.get('win_rate_pct')}%) ➔ <b>เลื่อนขั้นเป็น Pre-Council Alpha Gate เรียบร้อย!</b>"
+                )
+        elif prom_audit.get("active_promoted_count", 0) > 0:
+            count = prom_audit.get("active_promoted_count")
+            lines.extend([
+                "",
+                f"🔬 <b>สูตรคณิตศาสตร์ประจำการในระบบหลัก:</b> {count} สูตรทำหน้าที่ Pre-Council Alpha Gate",
+            ])
 
         lines.extend([
             "",

@@ -20,6 +20,7 @@ from .daily_debrief import DailyCouncilDebrief
 from .alpha_forge import CouncilAlphaForge
 from .market_pulse import MarketSessionClock, CrossAssetPulseEngine
 from .veto_auditor import CouncilVetoAuditor
+from .promotion_evaluator import CouncilPromotionEvaluator
 
 __all__ = [
     "CentralBlackboard",
@@ -39,4 +40,5 @@ __all__ = [
     "MarketSessionClock",
     "CrossAssetPulseEngine",
     "CouncilVetoAuditor",
+    "CouncilPromotionEvaluator",
 ]

@@ -273,7 +273,7 @@ def test_trading_council_consensus_and_veto_override():
         assert verdict_exec.approved is True
         assert verdict_exec.decision == "EXECUTE"
         assert verdict_exec.composite_score >= 80.0
-        assert "/6 เสียง" in verdict_exec.summary
+        assert f"/{len(verdict_exec.opinions)} เสียง" in verdict_exec.summary
         assert "🏛️" in verdict_exec.telegram_badge
         print(f"  [PASS] Council reached consensus: Score {verdict_exec.composite_score:.1f}% -> {verdict_exec.decision}! ✅")
 

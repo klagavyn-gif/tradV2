@@ -1515,4 +1515,21 @@ COUNCIL_PROMOTION_MIN_WIN_RATE = _env_float("COUNCIL_PROMOTION_MIN_WIN_RATE", 48
 COUNCIL_PROMOTION_MIN_EXPECTANCY_PCT = _env_float("COUNCIL_PROMOTION_MIN_EXPECTANCY_PCT", 0.15)
 COUNCIL_PROMOTED_FACTORS_PATH = _env_str("COUNCIL_PROMOTED_FACTORS_PATH", ".data/council_research/promoted_production_factors.json")
 
+# ==============================================================================
+# Council QuantumLab: Extreme Parallel Sandbox & Recursive Prompt Evolution
+# ==============================================================================
+QUANTUM_LAB_ENABLED = _env_bool("QUANTUM_LAB_ENABLED", True)
+QUANTUM_LAB_SIMULATION_ONLY = _env_bool("QUANTUM_LAB_SIMULATION_ONLY", True)  # Strictly simulated, never touches live orders
+QUANTUM_LAB_CYCLE_DAYS = _env_int("QUANTUM_LAB_CYCLE_DAYS", 7)
+QUANTUM_LAB_DATA_DIR = _env_str("QUANTUM_LAB_DATA_DIR", ".data/quantum_lab")
+QUANTUM_LAB_JOURNAL_PATH = _env_str("QUANTUM_LAB_JOURNAL_PATH", ".data/quantum_lab/prompt_evolution_journal.json")
+QUANTUM_LAB_GRADUATED_PATH = _env_str("QUANTUM_LAB_GRADUATED_PATH", ".data/quantum_lab/graduated_quantum_alphas.json")
+QUANTUM_LAB_LIFETIME_PATH = _env_str("QUANTUM_LAB_LIFETIME_PATH", ".data/quantum_lab/quantum_lifetime_tracker.json")
+QUANTUM_LAB_MIN_GRADUATION_WEEKS = _env_int("QUANTUM_LAB_MIN_GRADUATION_WEEKS", 4)
+QUANTUM_LAB_MIN_GRADUATION_PF = _env_float("QUANTUM_LAB_MIN_GRADUATION_PF", 1.60)
+QUANTUM_LAB_MIN_GRADUATION_EXPECTANCY_PCT = _env_float("QUANTUM_LAB_MIN_GRADUATION_EXPECTANCY_PCT", 0.35)
+QUANTUM_LAB_MAX_CDC_CORRELATION = _env_float("QUANTUM_LAB_MAX_CDC_CORRELATION", 0.40)
+QUANTUM_LAB_FRICTION_PCT = _env_float("QUANTUM_LAB_FRICTION_PCT", 0.30)
+QUANTUM_LAB_NOTIFY_TELEGRAM = _env_bool("QUANTUM_LAB_NOTIFY_TELEGRAM", True)
+
 

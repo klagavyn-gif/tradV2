@@ -22,6 +22,9 @@ from .market_pulse import MarketSessionClock, CrossAssetPulseEngine
 from .veto_auditor import CouncilVetoAuditor
 from .promotion_evaluator import CouncilPromotionEvaluator
 
+from .quantum_lab import QuantumLabEngine, QuantumFactorEvaluation
+from .prompt_evolution import PromptEvolutionEngine
+
 __all__ = [
     "CentralBlackboard",
     "CouncilOpinion",
@@ -41,4 +44,7 @@ __all__ = [
     "CrossAssetPulseEngine",
     "CouncilVetoAuditor",
     "CouncilPromotionEvaluator",
+    "QuantumLabEngine",
+    "QuantumFactorEvaluation",
+    "PromptEvolutionEngine",
 ]

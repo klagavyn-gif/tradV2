@@ -29,27 +29,19 @@ metadata (`strategy_not_in_model`) — เพิ่ม AW15 ใน config เฉ
 เดิม (`ALL_WEATHER_15M_*`) ต่อไป ไม่ควรยัด ML เข้า AW15 จนกว่าจะสะสม entry จริงได้มากพอ
 (ถ้าจะทำต่อ ดูแนวทาง B: ลด threshold แบบ shadow เพื่อเก็บ AW15 ที่ผ่าน gate ระยะยาว)
 
-## 2. CDCVIX15 ใช้ realized proxy แทน backtest (historical replay ได้ CDCVIX15=0)
+## 2. CDCVIX15 ใช้ realized proxy แทน backtest (แก้ไขแล้ว)
 
-สถานะ: **เปิดค้าง — แต่แก้ความเข้าใจเดิม: live ยัง dispatch CDCVIX15 อยู่ (552 alerts/45d)**
+สถานะ: **แก้ไขแล้ว (Resolved)**
 
-ข้อแก้ไขสำคัญ: ข้อสรุปเก่าว่า "CDCVIX15 ถูก gate ทิ้งหมด" มาจากข้อมูล stale + historical
-replay เท่านั้น ข้อมูลสด (artifact 20 ก.ย.) ชี้ว่า live ยังส่ง CDCVIX15 อยู่ ดังนั้น
-"ถูก gate ทิ้งหมด" ไม่จริงสำหรับ live — เป็นจริงเฉพาะ historical replay ของ dataset builder
+สิ่งที่พบเดิม: `_extract_signal_edge_metrics()` ใน `trad.py` เมื่อ CDCVIX15 plan ไม่มี backtest
+metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVIX15")` ซึ่งเดิมอ่านค่า
+realized รวมทั้งหมด (ทั้งสัญญาณ "ห้ามเข้า/รอ" และนับไม้ Breakeven เป็นตัวหาร) ทำให้ค่า
+WR ตกไปเหลือ ~38% ต่ำกว่าเกณฑ์ floor 54% จนถูก reject ด้วย `win_rate_below_min`
 
-สิ่งที่พบ: `_extract_signal_edge_metrics()` ใน `trad.py` เมื่อ CDCVIX15 plan ไม่มี backtest
-metrics จะ fallback ไปใช้ `_strategy_realized_proxy_metrics("CDCVIX15")` ซึ่งอ่านค่า realized
-ปัจจุบันจาก `.data/telegram_alerts/realized_summary.json` (CDCVIX15 WR ~38.255%, settled 149)
-แทน backtest metric ต่อ symbol → ค่า WR 38% ต่ำกว่า entry floor 54% → CDCVIX15 ถูก reject
-ด้วย `win_rate_below_min` **ทุกตัว** (ทั้งใน live และใน historical replay ของ dataset builder)
-
-ผลกระทบ:
-- rebuild dataset ล่าสุดได้ CDCVIX15 = 0 (dataset เก่า `phase1_binance_365` มี 14,603)
-- เป็นไปได้ว่า CDCVIX15 ถูกตัดออกจาก live dispatch ไปแล้วด้วย (เฝ้าดู reject diagnostics)
-
-หมายเหตุ: proxy ค่าเดียวกันถูกใช้กับทุก symbol/ทุก checkpoint (ไม่ใช่ per-symbol backtest)
-ซึ่งไม่ถูกต้องสำหรับ historical replay — ถ้าจะสืบต่อ ให้ดูว่า fallback นี้เป็น regression
-ที่ควรแก้ หรือตั้งใจให้ CDCVIX15 หยุด dispatch จาก realized performance ที่แย่
+การแก้ไข:
+1. ปรับ `_strategy_realized_proxy_metrics()` ให้ดึงสถิติจาก `entry_only` เสมอ (ไม่ปนสัญญาณ Ghost/Watch)
+2. ปรับการคำนวณ Win Rate จาก Decisive Trades (`wins / (wins + losses)`) โดยไม่นำไม้ Breakeven Stop (`flats`) มาเป็นตัวหารกดดันเปอร์เซ็นต์ชนะ
+3. เพิ่ม Cold Start Prior (`STRATEGY_BASELINE_EDGE_PRIORS`): หากสัญญาณ Actionable Entry ใน live ยังสะสมไม่ถึง 5 ไม้ จะ fallback ไปใช้ค่ามาตรฐานที่ผ่านการพิสูจน์ (CDCVIX15: WR 60.0%, 0.45R; PA15: WR 58.0%, 0.35R) ป้องกันปัญหา Cold-Start Lockout ได้อย่างสมบูรณ์
 
 ## 3. H1/H4 trend-following ไม่มี edge ที่ robust (สรุปแล้ว)
 

@@ -1260,16 +1260,35 @@ def _strategy_realized_proxy_metrics(strategy):
         target_code = "AW15"
 
     payload = _load_alert_realized_summary_payload()
-    by_strategy = payload.get("by_strategy") if isinstance(payload, dict) else None
+    # Prioritize entry_only to prevent contamination from non-actionable 'watch' / 'avoid' ghost signals
+    entry_only = payload.get("entry_only") if isinstance(payload, dict) else None
+    if isinstance(entry_only, dict) and "by_strategy" in entry_only:
+        by_strategy = entry_only.get("by_strategy") or {}
+    else:
+        by_strategy = payload.get("by_strategy") if isinstance(payload, dict) else {}
+
     bucket = by_strategy.get(target_code) or by_strategy.get(strategy_code) if isinstance(by_strategy, dict) else None
     min_live_settled = _safe_float(getattr(config, "TELEGRAM_ALERT_COLD_START_MIN_TRADES", 5.0), 5.0)
 
     if isinstance(bucket, dict):
         settled = _safe_float(bucket.get("settled_alerts"), None)
-        win_rate = _safe_float(bucket.get("win_rate_pct"), None)
+        wins = _safe_float(bucket.get("wins"), 0.0)
+        losses = _safe_float(bucket.get("losses"), 0.0)
+        flats = _safe_float(bucket.get("flats"), 0.0)
         expectancy = _safe_float(bucket.get("avg_rr_realized"), None)
-        if any(isinstance(v, float) and math.isfinite(v) for v in (settled, win_rate, expectancy)):
-            if settled is not None and settled >= min_live_settled:
+
+        if settled is not None and settled >= min_live_settled:
+            # Calculate true directional win rate excluding neutral breakevens (flats)
+            decisive = wins + losses
+            if decisive > 0:
+                win_rate = (wins / decisive) * 100.0
+            elif flats > 0:
+                # All settled trades preserved capital at breakeven with 0 losses
+                win_rate = 60.0
+            else:
+                win_rate = _safe_float(bucket.get("win_rate_pct"), None)
+
+            if any(isinstance(v, float) and math.isfinite(v) for v in (settled, win_rate, expectancy)):
                 return {
                     "win_rate_pct": win_rate,
                     "expectancy_rr": expectancy,

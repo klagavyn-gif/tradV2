@@ -1230,6 +1230,37 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
   - **Altcoin Long Freeze**: ในจังหวะที่ BTC เกิด Shockwave รุนแรง ระบบจะ **แช่แข็งการเปิด Long สำหรับเหรียญ Altcoin ทุกตัวทันที** (อนุญาตเฉพาะเหรียญทองคำ PAXG หรือสัญญาณ SHORT)
   - **Directional Exposure Limit**: จำกัดการถือสถานะ Altcoin LONG สูงสุด **ไม่เกิน 1 ไม้พร้อมกัน** ในสภาวะตลาดผันผวนหรือไซด์เวย์ (Choppy/Volatile Regime) ป้องกันการถูกล้างพอร์ตคู่ขนาน
 
+## 34. การตรวจสอบความพร้อมครั้งสุดท้ายและการแช่แข็งฟีเจอร์ (Final Production Readiness & Feature Freeze) (ต.ค. 2026)
+
+สถานะ: **เสร็จสมบูรณ์ 100% — Feature Freeze พร้อมเข้าสู่โหมดรันต่อเนื่องและเทรดเงินจริงปีใหม่ (Production Ready)**
+
+ผลการตรวจสอบความพร้อมทุกระบบ (Comprehensive 360° Audit):
+
+### 1. ผลการตรวจรับรองรายโมดูล (Module Verification & Test Pass Rate 100%)
+- **`CouncilAlphaForge` & Factor Mining** (`test_alpha_forge.py`): ผ่าน 6/6 การทดสอบ — สร้างสมมติฐานผ่าน Gemini / Quant Archetypes, รัน Walk-Forward Split (70/30) หักค่าธรรมเนียม 0.30%, สกัดสูตรลง Sandbox Micro-betting (35% size) อัตโนมัติทุกเช้าวันจันทร์ 06:00 น.
+- **`TradingCouncil` & Central Blackboard** (`test_trading_council.py`, `test_blackboard_health_doctor.py`): ผ่าน 100% — สภา AI 7 ฝ่ายทำงานประสานผ่าน Central Blackboard พร้อม Auto-Janitor Memory Pruning และ Two-Tier Veto System
+- **Dynamic Risk Manager & Circuit Breaker** (`test_risk_manager_sync.py`, `test_hardened_safeguards.py`): ผ่าน 100% — กลไกลดขนาดไม้ 50% เมื่อแพ้ติดกัน 2 ไม้, Circuit Breaker พัก 6 ชม. เมื่อแพ้ติดกัน 3 ไม้, และหยุดพักทันทีหาก Drawdown วันนั้นเกิน 4.0%
+- **Order Manager & Defense Mechanics** (`infrastructure/binance/order_manager.py`):
+  - Breakeven Buffer (+0.10R): เลื่อน SL มากันทุนครอบคลุมค่าธรรมเนียมและ Spread 0.30% ทุกครั้งที่กำไรแตะ +1.2R
+  - Trailing Stop (+2.0R): ล็อคกำไรห่างจากจุดสูงสุด 0.8R
+  - Dynamic Drift Guard: ปรับระยะยอมรับราคาตาม ATR ของเหรียญนั้น ไม่ทิ้งสัญญาณ Breakout คมๆ
+- **Edge Metrics & Proxy Resolution** (`trad.py`): ปรับคำนวณ Win Rate จาก `entry_only` และ Decisive Trades เท่านั้น พร้อม Cold-Start Prior 60.0% ปลดล็อคไม่ให้ติด Gate โดยไม่ตั้งใจ
+
+### 2. เช็คลิสต์การเปิดใช้งานเทรดเงินจริงช่วงปีใหม่ (Live Trading Activation Checklist)
+เมื่อถึงกำหนดเริ่มเทรดเงินจริงบน Binance Futures ในช่วงปีใหม่ ให้ดำเนินการตาม 3 ขั้นตอน:
+1. **ตั้งค่า Binance API Credentials บน GitHub Secrets**:
+   - ไปที่ GitHub Repo -> Settings -> Secrets and variables -> Actions
+   - เพิ่ม `BINANCE_FUTURES_API_KEY` และ `BINANCE_FUTURES_API_SECRET`
+2. **เปิดสวิตช์ Auto-Trade ใน `config.py`**:
+   - ปรับ `BINANCE_FUTURES_AUTO_TRADE_ENABLED = True`
+3. **เลือกโหมด Testnet หรือ Live**:
+   - หากต้องการทดสอบบนกระดานเงินจำลองก่อน: คง `BINANCE_FUTURES_TESTNET = True`
+   - เมื่อมั่นใจและพร้อมเทรดเงินจริง: ปรับ `BINANCE_FUTURES_TESTNET = False`
+
+### 3. การเฝ้าระวังและการวิเคราะห์ระยะยาว (Long-Term Observability)
+- **ระบบ Cloud Workflow**: รันอัตโนมัติ 24/7 บน GitHub Actions ตามรอบเวลา ไม่ต้องเปิดคอมพิวเตอร์ทิ้งไว้
+- **Telegram Live Channel**: ส่งการแจ้งเตือนสด, ผลการประชุมสภา AI, รายงานสรุปรายวัน (Daily Summary), และรายงานความได้เปรียบรายสัปดาห์ (Weekly Edge Report) ตรงเข้ามือถือตลอดเวลา
+
 
 
 

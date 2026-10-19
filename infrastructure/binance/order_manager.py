@@ -198,9 +198,8 @@ class BinanceFuturesOrderManager:
         except Exception:
             pass
 
-        # 3.5. Anti-Chase / Price Drift Guard:
-        # If live market price has drifted too far in the direction of the trade (e.g. pumped > 0.8% away),
-        # entering now worsens the Risk:Reward ratio significantly. Skip chasing!
+        # 3.5. Anti-Chase / Price Drift Guard (Dynamic ATR-scaled):
+        # High-beta alts (SUI, DOGE) have wider ATRs. Scaling drift tolerance prevents missing valid moves on cloud runner delays.
         try:
             current_market_price = self.client.get_symbol_price(symbol)
             if current_market_price and current_market_price > 0 and entry_price > 0:
@@ -209,10 +208,15 @@ class BinanceFuturesOrderManager:
                 else:
                     drift_pct = ((entry_price - current_market_price) / entry_price) * 100.0
 
-                if drift_pct > self.max_entry_drift_pct:
+                initial_risk_pct = abs(entry_price - stop_loss) / entry_price * 100.0 if entry_price > 0 else 1.5
+                atr_scaled_drift = 0.35 * initial_risk_pct
+                # Tolerance is at least max_entry_drift_pct (0.80%), scaled up to max 1.50% based on coin volatility
+                effective_max_drift = min(1.50, max(self.max_entry_drift_pct, atr_scaled_drift))
+
+                if drift_pct > effective_max_drift:
                     logger.warning(
-                        "[OrderManager] Skipping entry for %s: price drifted by +%.2f%% (max allowed %.2f%%)",
-                        symbol, drift_pct, self.max_entry_drift_pct
+                        "[OrderManager] Skipping entry for %s: price drifted by +%.2f%% (effective max allowed %.2f%%)",
+                        symbol, drift_pct, effective_max_drift
                     )
                     return {
                         "success": False,
@@ -221,7 +225,7 @@ class BinanceFuturesOrderManager:
                         "entry_price": entry_price,
                         "current_price": current_market_price,
                         "drift_pct": round(drift_pct, 2),
-                        "max_drift_pct": self.max_entry_drift_pct,
+                        "max_drift_pct": round(effective_max_drift, 2),
                     }
         except Exception as pe:
             logger.debug("Could not verify price drift for %s: %s", symbol, pe)

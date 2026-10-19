@@ -238,6 +238,14 @@ class TradingCouncil:
 
         # 6. Formulate Verdict
         effective_min_score = float(directives.get("min_composite_score") or self.min_composite_score)
+
+        # Tiered Alpha Grading: Grade A Super Alpha gets preferential threshold (60.0%)
+        if candidate.get("promoted_alpha_verified"):
+            candidate["alpha_tier"] = "GRADE_A_SUPER_ALPHA"
+            effective_min_score = min(effective_min_score, 60.0)
+        else:
+            candidate["alpha_tier"] = "GRADE_B_CORE_ALPHA"
+
         caution_tag = " [⚠️ Caution Mode]" if directives.get("caution_mode") else ""
         is_sandbox_exploration = False
 

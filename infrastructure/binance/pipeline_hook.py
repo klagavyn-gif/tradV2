@@ -795,6 +795,34 @@ def execute_binance_auto_trade_pipeline(
                         })
                         continue
 
+            # Directional Cap Guard: Prevent holding 2 concurrent Altcoin LONGs during volatile/choppy regimes
+            cand_sig = str(c.get("signal") or "").upper()
+            clean_cand_sym = normalize_futures_symbol(cand_sym)
+            if cand_sig == "BUY" and clean_cand_sym not in ("BTCUSDT", "PAXGUSDT") and isinstance(open_positions, list) and open_positions:
+                open_alt_longs = [
+                    p.get("symbol") for p in open_positions
+                    if isinstance(p, dict)
+                    and _safe_float(p.get("positionAmt")) > 0
+                    and normalize_futures_symbol(str(p.get("symbol", ""))) not in ("BTCUSDT", "PAXGUSDT")
+                ]
+                if open_alt_longs:
+                    c_score = float(getattr(verdict, "composite_score", 0.0)) if verdict else 0.0
+                    is_caution = bool(council_directives.get("caution_mode", False))
+                    regime_str = str(council_directives.get("regime", "")).upper()
+                    is_choppy = "CHOP" in regime_str or "VOLATILE" in regime_str
+                    # In choppy/caution regime or score < 78.0, block 2nd simultaneous Altcoin LONG to avoid market dump cascade
+                    if c_score < 78.0 or is_caution or is_choppy:
+                        logger.warning(
+                            "[DirectionalCap] Blocked 2nd concurrent Altcoin LONG (%s): already holding %s. (Score=%.1f, Regime=%s, Caution=%s). Avoiding market-wide liquidation cascade.",
+                            cand_sym, open_alt_longs, c_score, regime_str, is_caution
+                        )
+                        results["executed_entries"].append({
+                            "success": False,
+                            "reason": "directional_long_cap_blocked",
+                            "symbol": cand_sym,
+                        })
+                        continue
+
             exec_res = order_mgr.execute_candidate(c, sizing_override=sizing_override)
             results["executed_entries"].append(exec_res)
             if exec_res.get("success"):

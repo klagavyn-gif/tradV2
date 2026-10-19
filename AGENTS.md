@@ -1208,6 +1208,37 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
   - จัดทำแผนผังหมวดหมู่สินทรัพย์ `SECTOR_MAP` (L1_HIGH_BETA, L1_CORE, MEME, RWA, GOLD_SAFE_HAVEN)
   - หากพอร์ตถือเหรียญในกลุ่ม `L1_HIGH_BETA` หรือ `MEME` อยู่แล้ว และมีเหรียญกลุ่มเดียวกันเข้ามา ระบบจะปฏิเสธการเปิดไม้ (`sector_correlation_blocked`) เว้นแต่ว่าสภาจะมีคะแนนฉันทามติสูงเป็นพิเศษ ($\ge 75\%$) และไม่ได้อยู่ใน Caution Mode
 
+## 33. การปลดล็อคข้อจำกัด 4 ประการสู่ความยืดหยุ่นและการทำงานได้จริง (Systemic Unlocking & Resilience Architecture) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified)**
+
+สืบเนื่องจากการตรวจสอบอย่างละเอียดร่วมกับผู้ใช้ ได้ดำเนินการปลดล็อคจุดคอขวดที่อาจทำให้ระบบหยุดชะงัก (Stagnation) หรือพังทลายจากตลาดภาพใหญ่ ครบทั้ง 4 ด้าน:
+
+### 1. Dynamic ATR-Scaled Entry Drift (`infrastructure/binance/order_manager.py`)
+- **ปัญหาเดิม**: หาก GitHub Actions คิวเริ่มรันช้าไป 2-3 นาที เหรียญที่มีความผันผวนสูง (เช่น SUI, DOGE) มักวิ่งนำไป 0.85% ทำให้ถูก Reject ด้วยกฎ Fixed Drift 0.80% สัญญาณ Breakout ดีๆ ถูกทิ้งหมด
+- **การแก้ไข**:
+  - ปรับเป็น `effective_max_drift = min(1.50, max(0.80, 0.35 * initial_risk_pct))`
+  - ขยายกรอบการยอมรับ Drift อัตโนมัติตามระยะ Stop Loss / ATR ของเหรียญนั้น (เช่น SUI ยอมรับได้ถึง 1.05% - 1.20%) ในขณะที่ยังคงบล็อคราคาที่พุ่งหลุดเกิน 1.50% ไว้อย่างปลอดภัย
+
+### 2. Tiered Alpha Grading (Grade A Super Alpha vs. Grade B Core Alpha) (`infrastructure/council/arbiter.py`)
+- **ปัญหาเดิม**: หากตั้งสูตรคณิตศาสตร์หลัก (Pre-Council Gate) เป็นเกณฑ์ตัดสิทธิ์เด็ดขาด สัปดาห์ใดที่ตลาดไม่ตรงเงื่อนไข พอร์ตจะเงียบสนิท ไม่มีการออกไม้ สถิติไม่เดิน
+- **การแก้ไข**:
+  - **Grade A (Super Alpha - สัญญาณตรงตามสูตรคณิตศาสตร์หลัก)**: ได้รับ Alpha Boost +15%, ปรับลดคะแนนสภาขั้นต่ำลงเหลือ 60.0% เพื่อไม่ให้ตกรถ และได้ขนาดไม้เต็ม 100% Notional (400 USDT)
+  - **Grade B (Core Alpha - สัญญาณ CDC ActionZone / PA15 ปกติที่ผ่าน R/R $\ge 1.0$)**: ยังคงส่งเข้าสภาตามปกติ (เกณฑ์ 65.0%) เทรดได้ต่อเนื่อง ไม่ทำให้พอร์ตหยุดชะงัก
+
+### 3. Two-Tier Veto System (Hard Veto vs. Soft Warning -12%) (`infrastructure/binance/derivatives_filter.py` & `infrastructure/council/specialists.py`)
+- **ปัญหาเดิม**: Derivatives หรือ Macro สั่ง Hard Veto บ่อยเกินไปแม้ในสภาวะ Funding ตึงตัวเพียงเล็กน้อย (+0.04%) ทำให้สภาเป็นอัมพาต (Veto Stagnation Loop)
+- **การแก้ไข**:
+  - **Hard Veto**: สงวนไว้เฉพาะภาวะฟองสบู่หรือวิกฤตแท้จริง (Funding Rate $\ge +0.06\%$ หรือ OI ทรุดหนัก $\le -5.0\%$)
+  - **Soft Warning**: ในระดับปานกลาง (+0.035% ถึง +0.060%) จะเปลี่ยนจากการ VETO เป็นการ **หักคะแนนความเชื่อมั่น -12%** หากสัญญาณตัวนั้นมีกราฟคมและสภาเห็นชอบ สัญญาก็ยังสามารถเปิดเทรดได้ด้วยขนาดไม้ที่ระมัดระวัง
+
+### 4. Correlation Blindness Defense (BTC Shockwave Altcoin Long Freeze & Directional Cap) (`infrastructure/binance/pipeline_hook.py`)
+- **ปัญหาเดิม**: ในช่วงที่ BTC ทุบกระจาย เหรียญ Altcoin ทั้งหมดจะร่วงตาม BTC 100% แม้จะอยู่คนละ Sector ทำให้โดน Double-Loss พร้อมกัน
+- **การแก้ไข**:
+  - **Altcoin Long Freeze**: ในจังหวะที่ BTC เกิด Shockwave รุนแรง ระบบจะ **แช่แข็งการเปิด Long สำหรับเหรียญ Altcoin ทุกตัวทันที** (อนุญาตเฉพาะเหรียญทองคำ PAXG หรือสัญญาณ SHORT)
+  - **Directional Exposure Limit**: จำกัดการถือสถานะ Altcoin LONG สูงสุด **ไม่เกิน 1 ไม้พร้อมกัน** ในสภาวะตลาดผันผวนหรือไซด์เวย์ (Choppy/Volatile Regime) ป้องกันการถูกล้างพอร์ตคู่ขนาน
+
+
 
 
 

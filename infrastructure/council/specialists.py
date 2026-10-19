@@ -172,15 +172,31 @@ class MacroSpecialist:
             if shock_eval and shock_eval.get("shock_active"):
                 should_veto, veto_reason = self.barrier.should_veto_candidate(candidate, shock_eval)
                 if should_veto:
-                    return CouncilOpinion(
-                        specialist_name=self.name,
-                        status="VETOED",
-                        confidence=0.0,
-                        veto=True,
-                        veto_reason=f"btc_shockwave_veto_{veto_reason}",
-                        metrics=shock_eval,
-                        note=f"Vetoed: BTC volatile expansion ({shock_eval.get('range_atr')}x ATR) contagion guard active",
-                    )
+                    cand_sig = str(candidate.get("signal") or "").upper()
+                    cand_sym = str(candidate.get("symbol") or "")
+                    range_atr = float(shock_eval.get("range_atr", 1.8))
+
+                    # If candidate is buying an altcoin during active shock -> Hard Veto (Altcoin Long Freeze)
+                    # If candidate is a defensive asset like PAXG (Gold) or a SHORT hedge -> Soft Warning
+                    if cand_sig == "BUY" and "PAXG" not in cand_sym:
+                        return CouncilOpinion(
+                            specialist_name=self.name,
+                            status="VETOED",
+                            confidence=0.0,
+                            veto=True,
+                            veto_reason=f"btc_shockwave_veto_{veto_reason}",
+                            metrics=shock_eval,
+                            note=f"Vetoed: BTC volatile expansion ({range_atr}x ATR) contagion guard active (Altcoin Long Freeze)",
+                        )
+                    else:
+                        return CouncilOpinion(
+                            specialist_name=self.name,
+                            status="CAUTION",
+                            confidence=55.0,
+                            veto=False,
+                            metrics=shock_eval,
+                            note=f"Warning: BTC elevated volatility ({range_atr}x ATR). Proceeding with defensive/hedge asset.",
+                        )
             return CouncilOpinion(
                 specialist_name=self.name,
                 status="APPROVED",

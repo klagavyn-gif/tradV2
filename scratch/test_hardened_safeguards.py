@@ -97,6 +97,58 @@ class TestHardenedSafeguards(unittest.TestCase):
         self.assertEqual(SECTOR_MAP["ONDOUSDT"], "RWA")
         self.assertEqual(SECTOR_MAP["PAXGUSDT"], "GOLD_SAFE_HAVEN")
 
+    def test_dynamic_atr_drift_allowance(self):
+        """Test that order manager allows wider drift for high-volatility coins instead of rigid 0.80%."""
+        mock_client = MagicMock()
+        mock_client.get_positions.return_value = []
+        mock_client.get_symbol_filters.return_value = {
+            "tickSize": "0.01", "stepSize": "0.1", "minQty": "0.1", "minNotional": "5.0"
+        }
+        mock_client.create_order.return_value = {"success": True, "orderId": 999}
+        mock_client.create_algo_order.return_value = {"success": True}
+
+        om = BinanceFuturesOrderManager(client=mock_client, max_entry_drift_pct=0.80)
+
+        # High-volatility coin (Risk = (100 - 97.0) / 100 = 3.0%, 0.35 * 3.0% = 1.05% allowed drift)
+        candidate = {
+            "symbol": "SUIUSDT",
+            "signal": "BUY",
+            "entry_price": 100.0,
+            "stop_loss": 97.0,
+            "alert_id": "test_drift_1",
+        }
+
+        # Case A: Price drifted +0.95% (exceeds 0.80%, but within 1.05% dynamic ATR drift) -> MUST PASS!
+        mock_client.get_symbol_price.return_value = 100.95
+        res_pass = om.execute_candidate(candidate)
+        self.assertTrue(res_pass["success"])
+
+        # Case B: Price runaway pump +2.0% -> MUST BE REJECTED!
+        mock_client.get_symbol_price.return_value = 102.00
+        res_reject = om.execute_candidate(candidate)
+        self.assertFalse(res_reject["success"])
+        self.assertEqual(res_reject["reason"], "price_drift_exceeded")
+
+    def test_two_tier_derivatives_veto(self):
+        """Test that moderate funding rate receives soft warning (-12%) while extreme funding gets hard vetoed."""
+        from infrastructure.binance.derivatives_filter import BinanceDerivativesFilter
+        df = BinanceDerivativesFilter()
+
+        # Case A: Moderate Funding (+0.040%) -> Soft warning, approved = True
+        with patch.object(df, "get_funding_rate", return_value=0.00040), \
+             patch.object(df, "get_open_interest_stats", return_value={"available": True, "delta_pct": 0.5, "trend": "NEUTRAL"}):
+            eval_soft = df.evaluate_candidate({"symbol": "SOL-USD", "signal": "BUY"})
+            self.assertTrue(eval_soft["approved"])
+            self.assertEqual(eval_soft["confidence_modifier"], -12.0)
+            self.assertIn("elevated_long_funding_+0.040%", eval_soft["warning_flags"])
+
+        # Case B: Extreme Bubble Funding (+0.070%) -> Hard Veto, approved = False
+        with patch.object(df, "get_funding_rate", return_value=0.00070), \
+             patch.object(df, "get_open_interest_stats", return_value={"available": True, "delta_pct": 0.5, "trend": "NEUTRAL"}):
+            eval_hard = df.evaluate_candidate({"symbol": "SOL-USD", "signal": "BUY"})
+            self.assertFalse(eval_hard["approved"])
+            self.assertIn("crowded_long_funding_bubble", eval_hard["veto_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

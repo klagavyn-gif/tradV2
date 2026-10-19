@@ -153,15 +153,19 @@ class BinanceDerivativesFilter:
         self,
         candidate: Dict[str, Any],
         *,
-        max_long_funding: float = 0.0004,   # +0.04%
-        min_short_funding: float = -0.0003, # -0.03%
+        max_long_funding: float = 0.00035,   # +0.035% Soft Warning threshold
+        max_hard_long_funding: float = 0.00060, # +0.060% Hard Veto threshold
+        min_short_funding: float = -0.00030, # -0.030% Soft Warning threshold
+        min_hard_short_funding: float = -0.00050, # -0.050% Hard Veto threshold
         oi_lookback_bars: int = 4,
         oi_confirm_min_pct: float = 1.0,
         oi_contract_max_pct: float = -2.0,
         veto_enabled: bool = True,
     ) -> Dict[str, Any]:
         """
-        Evaluate entry candidate against positioning and leverage filters.
+        Evaluate entry candidate against positioning and leverage filters using Two-Tier Veto.
+        - Extreme conditions -> Hard Veto (Immediate Block)
+        - Moderate conditions -> Soft Warning (Confidence Penalty -12%)
         Returns evaluation dict with approval status, warnings, and formatting badge.
         """
         raw_symbol = str(candidate.get("symbol") or "")
@@ -180,37 +184,47 @@ class BinanceDerivativesFilter:
         oi_delta = float(oi_stats.get("delta_pct") or 0.0)
         oi_avail = bool(oi_stats.get("available"))
 
-        # 1. Funding Rate Checks
+        # 1. Funding Rate Checks (Two-Tier: Soft Warning vs Hard Veto)
         if fr is not None:
-            if signal == "BUY" and fr >= max_long_funding:
-                warning_flags.append(f"high_funding_rate_{fr_pct:+.3f}%")
-                if veto_enabled:
-                    approved = False
-                    veto_reason = f"crowded_long_funding_{fr_pct:+.3f}%"
-            elif signal == "SELL" and fr <= min_short_funding:
-                warning_flags.append(f"negative_funding_rate_{fr_pct:+.3f}%")
-                if veto_enabled:
-                    approved = False
-                    veto_reason = f"crowded_short_funding_{fr_pct:+.3f}%"
+            if signal == "BUY":
+                if fr >= max_hard_long_funding:
+                    warning_flags.append(f"extreme_long_funding_{fr_pct:+.3f}%")
+                    if veto_enabled:
+                        approved = False
+                        veto_reason = f"crowded_long_funding_bubble_{fr_pct:+.3f}%"
+                elif fr >= max_long_funding:
+                    warning_flags.append(f"elevated_long_funding_{fr_pct:+.3f}%")
+                    conf_modifier -= 12.0  # Soft Warning penalty
+            elif signal == "SELL":
+                if fr <= min_hard_short_funding:
+                    warning_flags.append(f"extreme_short_funding_{fr_pct:+.3f}%")
+                    if veto_enabled:
+                        approved = False
+                        veto_reason = f"crowded_short_squeeze_risk_{fr_pct:+.3f}%"
+                elif fr <= min_short_funding:
+                    warning_flags.append(f"elevated_short_funding_{fr_pct:+.3f}%")
+                    conf_modifier -= 12.0  # Soft Warning penalty
 
-        # 2. Open Interest Momentum Checks
+        # 2. Open Interest Momentum Checks (Two-Tier: Soft Warning vs Hard Veto)
         if oi_avail:
             if signal == "BUY":
                 if oi_delta >= oi_confirm_min_pct:
                     conf_modifier += 2.0  # High conviction fresh capital inflow
+                elif oi_delta <= -5.0:
+                    warning_flags.append(f"severe_oi_collapse_{oi_delta:+.2f}%")
+                    conf_modifier -= 15.0
+                    if veto_enabled:
+                        approved = False
+                        veto_reason = f"severe_oi_liquidation_collapse_{oi_delta:+.2f}%"
                 elif oi_delta <= oi_contract_max_pct:
                     warning_flags.append(f"fakeout_oi_drop_{oi_delta:+.2f}%")
-                    conf_modifier -= 4.0
-                    # If extreme contraction (< -3.5%), veto buy fakeout
-                    if veto_enabled and oi_delta <= -3.5:
-                        approved = False
-                        veto_reason = f"fakeout_liquidation_oi_drop_{oi_delta:+.2f}%"
+                    conf_modifier -= 6.0  # Soft Warning penalty
             elif signal == "SELL":
                 if oi_delta >= oi_confirm_min_pct:
                     conf_modifier += 2.0  # Strong short expansion
                 elif oi_delta <= oi_contract_max_pct:
                     warning_flags.append(f"short_covering_oi_drop_{oi_delta:+.2f}%")
-                    conf_modifier -= 4.0
+                    conf_modifier -= 6.0
 
         # Construct readable summary badge for Telegram and reports
         fr_str = f"{fr_pct:+.3f}%" if fr is not None else "N/A"

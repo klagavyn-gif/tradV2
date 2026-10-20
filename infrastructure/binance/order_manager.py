@@ -252,21 +252,44 @@ class BinanceFuturesOrderManager:
         if exec_price <= 0:
             exec_price = entry_price
 
-        # 5. Place Protective Stop Loss via Algo Order API (Mandatory for Binance Futures)
+        # 5. Place Protective Stop Loss via Algo Order API with In-line Retries (Defense-in-Depth)
         opposite_side = "SELL" if signal == "BUY" else "BUY"
-        sl_client_id = f"trad_{alert_id}_sl"
         clean_sl_price = round_to_tick(stop_loss, tick_size)
+        sl_res = None
+        max_sl_retries = 3
 
-        sl_res = self.client.create_algo_order(
-            symbol=symbol,
-            side=opposite_side,
-            order_type="STOP_MARKET",
-            trigger_price=clean_sl_price,
-            close_position=True,
-            client_algo_id=sl_client_id,
-        )
-        if not sl_res.get("success"):
-            logger.error("Failed to place Stop Loss algo order for %s: %s", symbol, sl_res)
+        for sl_attempt in range(max_sl_retries):
+            sl_client_id = f"trad_{alert_id[:12]}_sl_{sl_attempt}" if sl_attempt > 0 else f"trad_{alert_id}_sl"
+            sl_res = self.client.create_algo_order(
+                symbol=symbol,
+                side=opposite_side,
+                order_type="STOP_MARKET",
+                trigger_price=clean_sl_price,
+                close_position=True,
+                client_algo_id=sl_client_id,
+            )
+            if sl_res and sl_res.get("success"):
+                if sl_attempt > 0:
+                    logger.info("Stop Loss algo order for %s succeeded on attempt %d", symbol, sl_attempt + 1)
+                break
+            else:
+                logger.warning(
+                    "Stop Loss placement attempt %d/%d failed for %s: %s",
+                    sl_attempt + 1,
+                    max_sl_retries,
+                    symbol,
+                    sl_res,
+                )
+                if sl_attempt < max_sl_retries - 1:
+                    time.sleep(0.5 * (sl_attempt + 1))
+
+        if not (sl_res and sl_res.get("success")):
+            logger.critical(
+                "CRITICAL: Failed to place Stop Loss algo order for %s after %d retries! Position is NAKED: %s",
+                symbol,
+                max_sl_retries,
+                sl_res,
+            )
 
         # 6. Place Trailing Stop Order via Algo Order API
         risk = abs(exec_price - stop_loss)
@@ -307,6 +330,7 @@ class BinanceFuturesOrderManager:
             "entry_order": entry_data,
             "sl_order": sl_res.get("data") if sl_res else None,
             "sl_success": bool(sl_res and sl_res.get("success")),
+            "sl_error": sl_res if not (sl_res and sl_res.get("success")) else None,
             "ts_order": ts_res.get("data") if ts_res else None,
             "ts_success": bool(ts_res and ts_res.get("success")),
         }

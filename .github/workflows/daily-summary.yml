@@ -53,7 +53,7 @@ jobs:
       PIP_PROGRESS_BAR: "off"
       SYMBOLS: ${{ github.event.inputs.symbols || 'BTC-USD,BNB-USD,SUI-USD,ONDO-USD,ADA-USD,ETH-USD' }}
       PERIOD: ${{ github.event.inputs.period || vars.PERIOD || '15m' }}
-      MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'yahoo' }}
+      MARKET_DATA_PROVIDER: ${{ vars.MARKET_DATA_PROVIDER || 'binance' }}
       MARKET_HISTORY_STORE_DIR: ${{ vars.MARKET_HISTORY_STORE_DIR || '' }}
       BINANCE_DEFAULT_QUOTE: ${{ vars.BINANCE_DEFAULT_QUOTE || 'USDT' }}
       BINANCE_KLINE_LIMIT: ${{ vars.BINANCE_KLINE_LIMIT || '1000' }}

@@ -150,16 +150,21 @@ def execute_binance_auto_trade_pipeline(
     # Sync settled outcomes into risk manager (filtered strictly to real executed trades)
     try:
         outcomes_path = helpers.get("alert_outcomes_file_path", lambda: ".data/telegram_alerts/realized_outcomes.json")()
+        has_outcomes = False
         if os.path.exists(outcomes_path):
             with open(outcomes_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
-            if isinstance(payload, dict) and "outcomes" in payload:
+            if isinstance(payload, dict) and "outcomes" in payload and payload["outcomes"]:
+                has_outcomes = True
                 risk_mgr.update_from_settled_outcomes(
                     payload["outcomes"],
                     leverage=leverage,
                     notional_per_trade=trade_notional,
                     executed_records=executed_records,
                 )
+        # Cold start / cache miss resilience: reconcile risk state directly from Binance API
+        if not has_outcomes and hasattr(risk_mgr, "reconcile_from_exchange"):
+            risk_mgr.reconcile_from_exchange(client=client)
     except Exception as e:
         logger.warning("Could not sync outcomes to RiskManager: %s", e)
 
@@ -826,6 +831,29 @@ def execute_binance_auto_trade_pipeline(
             exec_res = order_mgr.execute_candidate(c, sizing_override=sizing_override)
             results["executed_entries"].append(exec_res)
             if exec_res.get("success"):
+                sl_ok = bool(exec_res.get("sl_success"))
+                if not sl_ok:
+                    logger.critical(
+                        "[Auto-Trade] Immediate Stop Loss was NOT confirmed on exchange for %s! Invoking Watchdog emergency heal...",
+                        exec_res.get("symbol"),
+                    )
+                    try:
+                        heal_rep = watchdog.audit_and_heal(
+                            settled_outcomes=settled_outcomes,
+                            executed_records=executed_records,
+                        )
+                        if heal_rep.get("healed_actions"):
+                            logger.info(
+                                "[Auto-Trade] Emergency Watchdog heal succeeded for %s: %s",
+                                exec_res.get("symbol"),
+                                heal_rep["healed_actions"],
+                            )
+                            sl_ok = True
+                    except Exception as he:
+                        logger.critical("[Auto-Trade] Emergency Watchdog heal exception: %s", he)
+
+                sl_status_note = "(ตั้งคำสั่ง STOP_MARKET แล้ว)" if sl_ok else "🚨 <b>[ตั้งคำสั่งล้มเหลว - เรียก Watchdog กู้ชีพฉุกเฉิน!]</b>"
+
                 if aid:
                     executed_records[aid] = {
                         "alert_id": aid,
@@ -881,7 +909,7 @@ def execute_binance_auto_trade_pipeline(
                         f"<b>จำนวน:</b> {exec_res.get('quantity')} (มูลค่าสัญญา ~{float(exec_res.get('notional') or 0.0):.2f} USDT)\n"
                         f"<b>Margin ที่ใช้:</b> ~{margin_used:.2f} USDT ({leverage}x {margin_type})\n"
                         f"<b>ราคาเข้า:</b> {float(exec_res.get('entry_price') or 0.0):,}\n"
-                        f"<b>Stop Loss:</b> {float(exec_res.get('stop_loss') or 0.0):,} (ตั้งคำสั่ง STOP_MARKET แล้ว)\n"
+                        f"<b>Stop Loss:</b> {float(exec_res.get('stop_loss') or 0.0):,} {sl_status_note}\n"
                         f"<b>Trailing Stop:</b> เมื่อถึง +{ts_r}R จะเริ่มลาก SL ตามราคา ({trail_dist_r}R)"
                         f"{sizing_note}"
                         f"{bal_str}"

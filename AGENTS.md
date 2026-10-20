@@ -1281,6 +1281,36 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
 - Unit Tests (`scratch/test_quantum_lab.py`): ผ่าน 6/6 การทดสอบ (0.075s) ครอบคลุม Feature Enrichment (23 คอลัมน์), Safe Math DSL, Backtest Friction 0.30%, Error Taxonomy, Prompt Evolution Journaling, และ Graduation Gate
 - Multi-Symbol Live Simulation (`tools/run_quantum_lab.py --run-cycle`): ทดสอบดึงแท่งเทียน 1,000 bars บน BTCUSDT และ ETHUSDT จำลองไม้สำเร็จ วิเคราะห์จุดบอด และวิวัฒนาการก้าวสู่ Generation 1 ได้อย่างไร้รอยต่อ
 
+## 36. การทำ Forensic Code Analysis และระบบความปลอดภัยขั้นสูง (Forensic Code Hardening & Exchange-Reconciled Safeguards)
+
+สถานะ: **เสร็จสมบูรณ์และผ่านการทดสอบ 100% (74/74 Unit Tests Passed across 21 Test Files)**
+
+### 1. ข้อค้นพบและการปิดช่องโหว่ทางสถาปัตยกรรม (Forensic Findings Resolved)
+
+- **SEV-1 (Critical): ปิดช่องโหว่ Naked Position Window เมื่อคำสั่ง Stop Loss ล้มเหลว**
+  - **ปัญหาเดิม**: เมื่อคำสั่ง Entry (`MARKET`) จับคู่สำเร็จ แต่คำสั่ง Stop Loss (`STOP_MARKET`) ผ่าน Algo Order API ล้มเหลว (เช่น Binance timeout หรือ code -1001), `execute_candidate` เดิมส่งคืน `success: True` และ Telegram แจ้งเตือนหลอกว่า "ตั้งคำสั่ง STOP_MARKET แล้ว" โดยที่ Watchdog ไม่ได้ตรวจจับเนื่องจากรันไปแล้วก่อนหน้า ทำให้ Position ไร้ Stop Loss คุ้มกันที่ Leverage 20x นานถึง 15 นาที
+  - **การแก้ไข (Approach A)**:
+    1. ใน `infrastructure/binance/order_manager.py`: เพิ่มระบบ **In-line Retries อัตโนมัติ 3 ครั้ง** พร้อม Exponential Backoff และสร้าง `client_algo_id` ไม่ซ้ำกันในแต่ละรอบ
+    2. หากล้มเหลวครบ 3 ครั้ง จะส่งคืน `"sl_success": False` พร้อมรายละเอียด `"sl_error"` อย่างชัดเจน
+    3. ใน `infrastructure/binance/pipeline_hook.py`: ตรวจสอบ `sl_success` ทันที หากพบว่าล้มเหลว ระบบจะ **สั่งการ `watchdog.audit_and_heal()` แบบฉุกเฉินทันที** เพื่อวาง Stop Loss สำรอง ณ เสี้ยววินาทีนั้น พร้อมปรับข้อความ Telegram แจ้งเตือน `🚨 [ตั้งคำสั่งล้มเหลว - เรียก Watchdog กู้ชีพฉุกเฉิน!]` อย่างโปร่งใส ไม่หลอกผู้ใช้
+
+- **SEV-2 (High): เสริมเกราะป้องกัน State Loss จาก GitHub Actions Ephemeral Cache**
+  - **ปัญหาเดิม**: `risk_state.json` (ที่เก็บบันทึก `consecutive_losses`, `daily_loss_pct`, และ Circuit Breaker) พึ่งพา GitHub Actions Cache ซึ่งมีความเสี่ยงที่จะเกิด Cache Eviction หรือ Cache Miss ส่งผลให้เกณฑ์ความปลอดภัยถูกรีเซ็ตเป็น 0 ปลดล็อค Circuit Breaker โดยไม่ตั้งใจ
+  - **การแก้ไข (Approach A)**:
+    1. เพิ่มเมธอด `get_income_history()` ใน `infrastructure/binance/client.py` เพื่อดึงข้อมูลประวัติรายได้จริง (`/fapi/v1/income` ประเภท `REALIZED_PNL`) จาก Binance Futures API
+    2. เพิ่มเมธอด `reconcile_from_exchange(client)` ใน `infrastructure/binance/risk_manager.py`: หากตรวจพบว่าเป็นการเริ่มทำงานแบบ Cold Start หรือไม่มีไฟล์ประวัติ ระบบจะดึง Realized PnL ของวันนั้นจากกระดานเทรดจริงมาคำนวณ `daily_loss_pct` และ Loss Streak ซ้ำทันที ยึด Exchange เป็น Single Source of Truth ป้องกัน Circuit Breaker รั่วไหลอย่างสมบูรณ์
+
+- **SEV-3 (Medium): ขจัดปัญหา Key Collision ใน `LiveCardStore`**
+  - **ปัญหาเดิม**: `live_trade_messages.json` เดิมจัดเก็บการ์ดข้อความ Telegram โดยใช้สัญลักษณ์เหรียญ (เช่น `BTCUSDT`) เป็น Primary Key ทำให้เมื่อเหรียญเดิมเปิดเทรดซ้ำในอนาคต ข้อมูลของไม้เดิมจะถูกเขียนทับ
+  - **การแก้ไข**: ปรับ `infrastructure/notifications/telegram_gateway.py` ให้จัดเก็บการ์ดข้อความฉบับเต็มโดยมี Index ผูกกับ `aid_{alert_id}` โดยตรง ควบคู่ไปกับตัวชี้ไม้ล่าสุด ทำให้สามารถค้นหาและอัปเดตการ์ดข้อความของไม้เก่าและไม้ใหม่ของเหรียญเดียวกันได้อย่างอิสระโดยไม่ทับซ้อนกัน
+
+- **SEV-3 (Medium): แก้ไข Market Data Provider Drift ใน `daily-summary.yml`**
+  - ปรับค่าเริ่มต้นของ `MARKET_DATA_PROVIDER` ใน `.github/workflows/daily-summary.yml` จาก `yahoo` ให้เป็น `binance` สอดคล้องกับ `config.py` เพื่อป้องกันปัญหาการถูก Rate Limit หรือ Block IP จาก Yahoo Finance บน Cloud Runner
+
+### 2. ผลการทดสอบ
+- เพิ่มชุดทดสอบเฉพาะทาง `scratch/test_forensic_safeguards.py` (5 การทดสอบ): ผ่าน 100%
+- รันชุดทดสอบทั้งหมดในระบบ (74 การทดสอบ ครอบคลุม 21 ไฟล์): **ผ่าน 74/74 (100% OK)** ภายใน 3.516 วินาที ไร้ข้อผิดพลาดและไม่มี Regression
+
 
 
 

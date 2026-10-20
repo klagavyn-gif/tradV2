@@ -256,7 +256,7 @@ class BinanceFuturesWatchdog:
                     order_type="STOP_MARKET",
                     trigger_price=emergency_sl,
                     close_position=True,
-                    client_algo_id=f"heal_sl_{int(time.time())}",
+                    client_algo_id=f"heal_{sym[:3].lower()}_{int(time.time()*1000)%10000000}",
                 )
 
                 if heal_res.get("success"):

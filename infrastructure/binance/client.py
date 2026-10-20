@@ -265,6 +265,33 @@ class BinanceFuturesClient:
             return res.get("data", [])
         return []
 
+    def get_income_history(
+        self,
+        symbol: Optional[str] = None,
+        income_type: str = "REALIZED_PNL",
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetch income history from Binance Futures (/fapi/v1/income).
+        income_type options: REALIZED_PNL, FUNDING_FEE, COMMISSION, INSURANCE_CLEAR.
+        Used for authoritative exchange-reconciled PnL calculation across cloud runner runs.
+        """
+        params: Dict[str, Any] = {"limit": min(1000, max(1, limit))}
+        if symbol:
+            params["symbol"] = symbol.replace("-", "").replace("/", "").upper()
+        if income_type:
+            params["incomeType"] = income_type.upper()
+        if start_time:
+            params["startTime"] = int(start_time)
+        if end_time:
+            params["endTime"] = int(end_time)
+        res = self._request("GET", "/fapi/v1/income", params=params, signed=True)
+        if res.get("success") and isinstance(res.get("data"), list):
+            return res.get("data", [])
+        return []
+
     # --- Configuration ---
 
     def set_leverage(self, symbol: str, leverage: int = 1) -> Dict[str, Any]:

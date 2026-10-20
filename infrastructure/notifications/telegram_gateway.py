@@ -304,21 +304,26 @@ class LiveCardStore:
 
         data[sym_key] = card_entry
         if alert_id:
-            data[f"aid_{alert_id}"] = {"symbol_ref": sym_key}
+            # Store complete card under aid_{alert_id} to prevent symbol-level collision on future trades
+            data[f"aid_{alert_id}"] = dict(card_entry)
 
         self._save(data)
-        logger.info("[LiveCardStore] Registered card for %s (msg_id=%s)", sym_key, message_id)
+        logger.info("[LiveCardStore] Registered card for %s (aid=%s, msg_id=%s)", sym_key, alert_id, message_id)
         return card_entry
 
     def get_card(self, symbol: Optional[str] = None, alert_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Look up active card by symbol or alert_id."""
         data = self._load()
         if alert_id:
-            ref = data.get(f"aid_{alert_id}")
-            if isinstance(ref, dict) and ref.get("symbol_ref"):
-                card = data.get(ref["symbol_ref"])
-                if isinstance(card, dict) and card.get("message_id"):
-                    return card
+            aid_card = data.get(f"aid_{alert_id}")
+            if isinstance(aid_card, dict):
+                if aid_card.get("message_id"):
+                    return aid_card
+                # Legacy pointer backward compatibility
+                if aid_card.get("symbol_ref"):
+                    card = data.get(aid_card["symbol_ref"])
+                    if isinstance(card, dict) and card.get("message_id"):
+                        return card
         if symbol:
             sym_key = self._normalize_symbol(symbol)
             card = data.get(sym_key)
@@ -336,66 +341,104 @@ class LiveCardStore:
         new_stop_loss: Optional[float] = None,
         updated_message: Optional[str] = None,
     ) -> bool:
-        """Update an active card's state."""
+        """Update an active card's state across both aid and symbol indexes."""
         data = self._load()
-        target_key = None
+        matched_keys = []
+
+        if f"aid_{symbol_or_alert_id}" in data:
+            matched_keys.append(f"aid_{symbol_or_alert_id}")
 
         sym_key = self._normalize_symbol(symbol_or_alert_id)
         if sym_key in data:
-            target_key = sym_key
-        elif f"aid_{symbol_or_alert_id}" in data:
-            ref = data.get(f"aid_{symbol_or_alert_id}", {})
-            target_key = ref.get("symbol_ref")
+            matched_keys.append(sym_key)
 
-        if not target_key or target_key not in data:
+        if f"aid_{symbol_or_alert_id}" in matched_keys and sym_key not in matched_keys:
+            aid_entry = data[f"aid_{symbol_or_alert_id}"]
+            if isinstance(aid_entry, dict):
+                entry_sym = self._normalize_symbol(aid_entry.get("symbol") or "")
+                if entry_sym in data and data[entry_sym].get("alert_id") == symbol_or_alert_id:
+                    matched_keys.append(entry_sym)
+
+        if sym_key in matched_keys:
+            sym_entry = data[sym_key]
+            if isinstance(sym_entry, dict) and sym_entry.get("alert_id"):
+                aid_k = f"aid_{sym_entry['alert_id']}"
+                if aid_k in data and aid_k not in matched_keys:
+                    matched_keys.append(aid_k)
+
+        if not matched_keys:
             return False
 
-        card = data[target_key]
         now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        if status:
-            card["status"] = str(status)
-        if breakeven_active is not None:
-            card["breakeven_active"] = bool(breakeven_active)
-        if trailing_active is not None:
-            card["trailing_active"] = bool(trailing_active)
-        if new_stop_loss is not None:
-            card["stop_loss"] = float(new_stop_loss)
-        if updated_message:
-            card["original_message"] = updated_message
-        card["updated_at"] = now_str
+        for k in set(matched_keys):
+            card = data[k]
+            if not isinstance(card, dict) or not card.get("message_id"):
+                continue
+            if status:
+                card["status"] = str(status)
+            if breakeven_active is not None:
+                card["breakeven_active"] = bool(breakeven_active)
+            if trailing_active is not None:
+                card["trailing_active"] = bool(trailing_active)
+            if new_stop_loss is not None:
+                card["stop_loss"] = float(new_stop_loss)
+            if updated_message:
+                card["original_message"] = updated_message
+            card["updated_at"] = now_str
+            data[k] = card
 
-        data[target_key] = card
         self._save(data)
         return True
 
     def close_card(self, symbol_or_alert_id: str, outcome: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-        """Mark a card as CLOSED and record outcome summary."""
+        """Mark a card as CLOSED and record outcome summary across both aid and symbol indexes."""
         data = self._load()
-        target_key = None
+        matched_keys = []
+
+        if f"aid_{symbol_or_alert_id}" in data:
+            matched_keys.append(f"aid_{symbol_or_alert_id}")
 
         sym_key = self._normalize_symbol(symbol_or_alert_id)
         if sym_key in data:
-            target_key = sym_key
-        elif f"aid_{symbol_or_alert_id}" in data:
-            ref = data.get(f"aid_{symbol_or_alert_id}", {})
-            target_key = ref.get("symbol_ref")
+            matched_keys.append(sym_key)
 
-        if not target_key or target_key not in data:
+        if f"aid_{symbol_or_alert_id}" in matched_keys and sym_key not in matched_keys:
+            aid_entry = data[f"aid_{symbol_or_alert_id}"]
+            if isinstance(aid_entry, dict):
+                entry_sym = self._normalize_symbol(aid_entry.get("symbol") or "")
+                if entry_sym in data and data[entry_sym].get("alert_id") == symbol_or_alert_id:
+                    matched_keys.append(entry_sym)
+
+        if sym_key in matched_keys:
+            sym_entry = data[sym_key]
+            if isinstance(sym_entry, dict) and sym_entry.get("alert_id"):
+                aid_k = f"aid_{sym_entry['alert_id']}"
+                if aid_k in data and aid_k not in matched_keys:
+                    matched_keys.append(aid_k)
+
+        if not matched_keys:
             return None
 
-        card = data[target_key]
-        card["status"] = "CLOSED"
-        card["updated_at"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
-        if isinstance(outcome, dict):
-            card["close_result"] = outcome.get("outcome_result")
-            card["pnl_pct"] = outcome.get("pnl_pct")
-            card["rr_realized"] = outcome.get("rr_realized")
-            card["exit_reason"] = outcome.get("exit_reason")
+        primary_card = None
+        now_str = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        for k in set(matched_keys):
+            card = data[k]
+            if not isinstance(card, dict) or not card.get("message_id"):
+                continue
+            card["status"] = "CLOSED"
+            card["updated_at"] = now_str
+            if isinstance(outcome, dict):
+                card["close_result"] = outcome.get("outcome_result")
+                card["pnl_pct"] = outcome.get("pnl_pct")
+                card["rr_realized"] = outcome.get("rr_realized")
+                card["exit_reason"] = outcome.get("exit_reason")
+            data[k] = card
+            if not primary_card:
+                primary_card = card
 
-        data[target_key] = card
         self._save(data)
-        logger.info("[LiveCardStore] Closed card for %s", target_key)
-        return card
+        logger.info("[LiveCardStore] Closed card for %s", symbol_or_alert_id)
+        return primary_card
 
     def list_active_cards(self) -> List[Dict[str, Any]]:
         """Return all cards that are currently OPEN."""

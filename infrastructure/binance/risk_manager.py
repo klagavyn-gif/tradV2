@@ -175,6 +175,103 @@ class BinanceFuturesRiskManager:
         )
         return state
 
+    def reconcile_from_exchange(
+        self,
+        client: Any,
+        total_equity: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """
+        Reconcile daily loss and loss streak directly from Binance Futures API (/fapi/v1/income).
+        Used on cold start / cache miss or periodically to ensure risk metrics are backed by
+        the exchange's authoritative source of truth.
+        """
+        state = self.load_state()
+        if not client or not hasattr(client, "get_income_history"):
+            return state
+
+        try:
+            today_utc_dt = _utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_start_ms = int(today_utc_dt.timestamp() * 1000)
+
+            # Fetch up to 100 recent realized PnL entries from exchange
+            incomes = client.get_income_history(
+                income_type="REALIZED_PNL",
+                start_time=today_start_ms,
+                limit=100,
+            )
+            if not incomes:
+                return state
+
+            # Sort ascending by time
+            incomes = sorted(incomes, key=lambda x: int(x.get("time") or 0))
+
+            today_pnl = 0.0
+            today_losses_usdt = 0.0
+            today_trades_count = 0
+            consecutive_losses = 0
+            consecutive_wins = 0
+
+            for inc in incomes:
+                pnl = float(inc.get("income", 0.0))
+                today_pnl += pnl
+                today_trades_count += 1
+                if pnl < 0:
+                    today_losses_usdt += abs(pnl)
+                    consecutive_losses += 1
+                    consecutive_wins = 0
+                elif pnl > 0:
+                    consecutive_wins += 1
+                    consecutive_losses = 0
+
+            # Derive equity to compute loss %
+            equity = float(total_equity or 0.0)
+            if equity <= 0:
+                try:
+                    bal = client.get_usdt_balance()
+                    equity = float(bal.get("total", 0.0))
+                except Exception:
+                    equity = 1000.0
+
+            loss_pct = (today_losses_usdt / equity * 100.0) if equity > 0 else 0.0
+
+            state["daily_pnl_usdt"] = round(today_pnl, 4)
+            state["daily_loss_pct"] = round(loss_pct, 2)
+            state["daily_trades_count"] = today_trades_count
+            state["consecutive_losses"] = consecutive_losses
+            state["consecutive_wins"] = consecutive_wins
+
+            # Check if exchange realized losses breach daily max loss limit
+            if loss_pct >= self.daily_max_loss_pct and not state.get("circuit_breaker_active"):
+                until_eod = (today_utc_dt + timedelta(days=1)) - _utc_now()
+                hours_remaining = max(1.0, until_eod.total_seconds() / 3600.0)
+                state = self.trigger_circuit_breaker(
+                    reason=f"daily_drawdown_limit_{loss_pct:.1f}pct_exchange_reconciled",
+                    duration_hours=hours_remaining,
+                    state=state,
+                )
+                logger.warning(
+                    "[RiskManager] Exchange-reconciled daily loss breached %s%% (actual: %s%%). Circuit breaker activated until EOD UTC.",
+                    self.daily_max_loss_pct,
+                    loss_pct,
+                )
+            elif consecutive_losses >= self.loss_streak_max and not state.get("circuit_breaker_active"):
+                state = self.trigger_circuit_breaker(
+                    reason=f"loss_streak_{consecutive_losses}_exchange_reconciled",
+                    duration_hours=self.circuit_breaker_hours,
+                    state=state,
+                )
+                logger.warning(
+                    "[RiskManager] Exchange-reconciled loss streak reached %s. Circuit breaker activated for %sh.",
+                    consecutive_losses,
+                    self.circuit_breaker_hours,
+                )
+
+            self.save_state(state)
+            return state
+        except Exception as e:
+            logger.warning("[RiskManager] Failed to reconcile risk state from exchange: %s", e)
+            return state
+
     def update_from_settled_outcomes(
         self,
         outcomes: List[Dict[str, Any]],

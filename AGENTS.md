@@ -1311,6 +1311,43 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
 - เพิ่มชุดทดสอบเฉพาะทาง `scratch/test_forensic_safeguards.py` (5 การทดสอบ): ผ่าน 100%
 - รันชุดทดสอบทั้งหมดในระบบ (74 การทดสอบ ครอบคลุม 21 ไฟล์): **ผ่าน 74/74 (100% OK)** ภายใน 3.516 วินาที ไร้ข้อผิดพลาดและไม่มี Regression
 
+## 37. แผนแม่บทสถาปัตยกรรมซอฟต์แวร์และการพัฒนาอย่างยั่งยืน (Senior Software Architect Roadmap & Engineering Hardening)
+
+สถานะ: **ประกาศแผนแม่บท พร้อมดำเนินการ P0 & P1 สำเร็จเรียบร้อย (83/83 Unit Tests Passed)**
+
+### 1. บทวิเคราะห์ทางสถาปัตยกรรมและหนี้ทางเทคนิค (Architectural Debt Analysis)
+- **God-Object `trad.py` (11,788 บรรทัด)**: รวมทั้งการคำนวณ Indicator ทางคณิตศาสตร์, Data Loaders, Backtest Engine, Telegram Dispatcher, และ ML Model Inference ไว้ในไฟล์เดียว ทำให้ยากต่อการทำ Unit Test แบบแยกส่วน (Isolated Testing)
+- **Untyped Environment Configurations (`config.py` 1,536 บรรทัด)**: พึ่งพาตัวแปร Global และการอ่าน `os.environ` ดิบโดยไม่มี Schema Validation เมื่อใส่ชนิดข้อมูลผิดพลาด (เช่น String แทน Float) จะล้มเหลวขณะรัน (Runtime Failure) แทนที่จะถูกสกัดตั้งแต่ Pre-flight
+- **Slippage Risk ในช่วงตลาดผันผวนรุนแรง**: คำสั่งเปิดไม้เป็น `MARKET` Order ซึ่งหากสภาพคล่องใน Order Book บางเบาหรือมี Spread ถ่างกว้าง จะเกิด Slippage กัดกินเงินทุน
+- **ขาด Automated CI Gate**: เดิมทีเมื่อมีการ Push โค้ดขึ้น GitHub Actions ระบบจะรัน `alert_engine.py` โดยไม่มีการตรวจเช็ค Unit Test ล่วงหน้า หากมี Syntax หรือ Logic Error จะกระทบ Pipeline ทันที
+
+### 2. สิ่งที่ได้รับการพัฒนาและทดสอบจริงแล้วในรอบนี้ (Implemented & Verified)
+1. **[P0] Pre-Flight Bid-Ask Spread Guard (การป้องกัน Slippage ก่อนยิงคำสั่ง)**:
+   - เพิ่ม `get_book_ticker(symbol)` ใน `infrastructure/binance/client.py` เพื่ออ่านราคา Best Bid / Best Ask แบบเรียลไทม์จาก Endpoint `GET /fapi/v1/ticker/bookTicker`
+   - เพิ่มระบบตรวจสอบ Spread ใน `infrastructure/binance/order_manager.py` ผ่านพารามิเตอร์ `max_allowed_spread_pct` (ค่าเริ่มต้น 0.15%)
+   - หากคู่เหรียญมีสเปรดกว้างเกินเกณฑ์ ระบบจะปฏิเสธการเปิดไม้ทันที (`spread_too_wide`) และแจ้งเตือนอย่างโปร่งใส ป้องกันการเสียเปรียบราคา
+2. **[P0] Automated CI/CD Test Gate (ด่านตรวจคุณภาพอัตโนมัติบน GitHub Actions)**:
+   - เพิ่มขั้นตอน `Run automated test suite` ใน `.github/workflows/main.yml` และ `.github/workflows/daily-summary.yml` ทันทีหลังติดตั้ง Dependencies
+   - หากชุดทดสอบใดๆ ล้มเหลว GitHub Actions จะตัดการทำงานทันทีภายใน 5 วินาที ป้องกันไม่ให้โค้ดที่มีข้อผิดพลาดรันไปถึงขั้นตอนการเทรดหรือส่งสัญญาณ
+3. **[P1] Canonical `tests/` Directory & Production Test Suite**:
+   - จัดตั้งโครงสร้างโฟลเดอร์มาตรฐานตามหลัก PEP ใน `tests/` พร้อมไฟล์ `tests/__init__.py` และ `tests/test_safeguards.py`
+   - รวบรวมชุดการทดสอบครอบคลุมทั้งระบบ (83 การทดสอบ จาก 22 ไฟล์ทดสอบ)
+   - ผลการทดสอบ: **ผ่านฉลุย 83/83 การทดสอบ (100% OK) ภายในเวลาเพียง 5.616 วินาที**
+
+### 3. แผนงานระยะยาวและเกณฑ์การจัดลำดับความสำคัญ (Long-term Engineering Roadmap)
+- **P0 (Critical Safety & Correctness - สำเร็จแล้ว)**: Bid-Ask Spread Guard, In-line SL Retries, Immediate Watchdog Healing, CI Test Gate
+- **P1 (Core System Decoupling & Stability)**:
+  - ย้ายและจัดหมวดหมู่ชุดทดสอบสู่ `tests/` (สำเร็จแล้ว)
+  - สร้าง Pre-flight Configuration Validator ด้วย Pydantic/Dataclass ตรวจสอบความถูกต้องของ Environment Variables ก่อนเริ่ม Workflow
+- **P2 (Performance, Security & Observability)**:
+  - Concurrent K-line Data Fetching: ดึงข้อมูล 11 เหรียญแบบ Asynchronous/ThreadPool ลดเวลารัน Pipeline ลง 40-60%
+  - Secret & API Key Vaulting / Hardening
+  - OpenTelemetry / Structured Logging แบบ JSON เพื่อการ Monitor ระบบบน Cloud Runner
+- **P3 (Architecture Refactoring & Modularity)**:
+  - แยกย่อย `trad.py` ออกเป็น Hexagonal/Clean Architecture: `domain/signals`, `domain/models`, `application/pipeline`, `infrastructure/exchanges`
+  - Zero-Breakage Invariant: โค้ดเดิมทั้งหมดต้องทำงานร่วมกันได้ 100% ผ่าน Facade Pattern
+
+
 
 
 

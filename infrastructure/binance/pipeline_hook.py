@@ -184,6 +184,7 @@ def execute_binance_auto_trade_pipeline(
         kinetic_min_r=float(getattr(config, "BINANCE_FUTURES_KINETIC_MIN_R", 0.60)),
         harvester_trigger_r=float(getattr(config, "BINANCE_MOMENTUM_HARVESTER_TRIGGER_R", 3.0)),
         harvester_dist_r=float(getattr(config, "BINANCE_MOMENTUM_HARVESTER_DIST_R", 0.4)),
+        max_allowed_spread_pct=float(getattr(config, "BINANCE_FUTURES_MAX_SPREAD_PCT", 0.15)),
     )
 
     results = {

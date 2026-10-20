@@ -440,6 +440,9 @@ jobs:
           import xgboost
           print("Dependency check OK:", joblib.__version__, sklearn.__version__, xgboost.__version__)
           PY
+      - name: Run automated test suite
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"
       - name: Reset market data runtime cache
         run: |
           rm -f .yf_cache/cookies.db .yf_cache/cookies.db-shm .yf_cache/cookies.db-wal

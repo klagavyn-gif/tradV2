@@ -199,6 +199,25 @@ class BinanceFuturesClient:
             return float(res.get("data", {}).get("price") or 0.0)
         return None
 
+    def get_book_ticker(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        Fetch best bid and ask price/quantity from Binance Futures (/fapi/v1/ticker/bookTicker).
+        Lightweight endpoint (weight=1) used for pre-flight spread & liquidity validation.
+        """
+        clean_sym = symbol.replace("-", "").replace("/", "").upper()
+        res = self._request("GET", "/fapi/v1/ticker/bookTicker", params={"symbol": clean_sym})
+        if res.get("success") and isinstance(res.get("data"), dict):
+            d = res.get("data", {})
+            return {
+                "symbol": d.get("symbol"),
+                "bidPrice": float(d.get("bidPrice", 0.0)),
+                "bidQty": float(d.get("bidQty", 0.0)),
+                "askPrice": float(d.get("askPrice", 0.0)),
+                "askQty": float(d.get("askQty", 0.0)),
+                "time": int(d.get("time", 0)),
+            }
+        return None
+
     def get_klines(self, symbol: str, interval: str = "15m", limit: int = 30) -> List[List[Any]]:
         """Fetch public candlestick / kline data."""
         clean_sym = symbol.replace("-", "").replace("/", "").upper()

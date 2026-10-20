@@ -71,6 +71,7 @@ class BinanceFuturesOrderManager:
         harvester_trigger_r: float = 3.0,
         harvester_dist_r: float = 0.4,
         breakeven_buffer_r: float = 0.10,
+        max_allowed_spread_pct: float = 0.15,
     ):
         self.client = client
         self.trade_notional_usdt = float(trade_notional_usdt)
@@ -83,6 +84,7 @@ class BinanceFuturesOrderManager:
         self.trailing_dist_r = float(trailing_dist_r)
         self.risk_manager = risk_manager
         self.max_entry_drift_pct = float(max_entry_drift_pct)
+        self.max_allowed_spread_pct = float(max_allowed_spread_pct)
         self.kinetic_enabled = bool(kinetic_enabled)
         self.kinetic_min_seconds = float(kinetic_min_seconds)
         self.kinetic_min_r = float(kinetic_min_r)
@@ -229,6 +231,33 @@ class BinanceFuturesOrderManager:
                     }
         except Exception as pe:
             logger.debug("Could not verify price drift for %s: %s", symbol, pe)
+
+        # 3.6. Pre-Flight Bid-Ask Spread Guard (Anti-Slippage Defense):
+        # Prevents firing market orders into illiquid wicks or blown-out spreads (>0.15%)
+        try:
+            max_allowed_spread = float(getattr(self, "max_allowed_spread_pct", 0.15))
+            if hasattr(self.client, "get_book_ticker"):
+                book_ticker = self.client.get_book_ticker(symbol)
+                if book_ticker and book_ticker.get("askPrice", 0.0) > 0 and book_ticker.get("bidPrice", 0.0) > 0:
+                    ask_p = book_ticker["askPrice"]
+                    bid_p = book_ticker["bidPrice"]
+                    spread_pct = ((ask_p - bid_p) / ask_p) * 100.0
+                    if spread_pct > max_allowed_spread:
+                        logger.warning(
+                            "[OrderManager] Skipping entry for %s: Bid-Ask spread %.3f%% exceeds max allowed %.2f%% (Bid: %s, Ask: %s)",
+                            symbol, spread_pct, max_allowed_spread, bid_p, ask_p,
+                        )
+                        return {
+                            "success": False,
+                            "reason": "spread_too_wide",
+                            "symbol": symbol,
+                            "spread_pct": round(spread_pct, 4),
+                            "max_spread_pct": max_allowed_spread,
+                            "bid": bid_p,
+                            "ask": ask_p,
+                        }
+        except Exception as se:
+            logger.debug("Could not verify bid-ask spread for %s: %s", symbol, se)
 
         # 4. Send Entry Order (MARKET for immediate clean fill on M15)
         entry_client_id = f"trad_{alert_id}_ent"

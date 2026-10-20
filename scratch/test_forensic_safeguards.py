@@ -46,7 +46,7 @@ class TestForensicSafeguards(unittest.TestCase):
             "total": 1000.0,
             "available": 800.0,
         }
-        self.mock_client.place_order.return_value = {
+        self.mock_client.create_order.return_value = {
             "success": True,
             "data": {"avgPrice": "50000.0"},
         }
@@ -216,6 +216,62 @@ class TestForensicSafeguards(unittest.TestCase):
         self.assertEqual(kwargs["params"]["incomeType"], "REALIZED_PNL")
         self.assertEqual(kwargs["params"]["limit"], 20)
         self.assertTrue(kwargs["signed"])
+
+    def test_pre_flight_spread_guard_blocks_wide_spread(self):
+        """Test that OrderManager rejects market entry if bid-ask spread is wider than allowed threshold."""
+        # Spread: (50150 - 50000) / 50150 = 0.299% > 0.15% limit
+        self.mock_client.get_book_ticker.return_value = {
+            "symbol": "BTCUSDT",
+            "bidPrice": 50000.0,
+            "askPrice": 50150.0,
+        }
+
+        mgr = BinanceFuturesOrderManager(
+            client=self.mock_client,
+            trade_notional_usdt=400.0,
+            max_allowed_spread_pct=0.15,
+        )
+        candidate = {
+            "symbol": "BTC-USD",
+            "signal": "BUY",
+            "entry_price": 50000.0,
+            "stop_loss": 49000.0,
+            "alert_id": "test_spread_1",
+        }
+        res = mgr.execute_candidate(candidate)
+
+        self.assertFalse(res["success"])
+        self.assertEqual(res["reason"], "spread_too_wide")
+        self.assertGreater(res["spread_pct"], 0.15)
+        # Verify no order was sent to exchange
+        self.mock_client.create_order.assert_not_called()
+
+    def test_pre_flight_spread_guard_allows_tight_spread(self):
+        """Test that OrderManager allows entry when bid-ask spread is tight (<0.15%)."""
+        # Spread: (50010 - 50000) / 50010 = 0.02% < 0.15% limit
+        self.mock_client.get_book_ticker.return_value = {
+            "symbol": "BTCUSDT",
+            "bidPrice": 50000.0,
+            "askPrice": 50010.0,
+        }
+        self.mock_client.create_algo_order.return_value = {"success": True, "data": {"algoId": 12345}}
+
+        mgr = BinanceFuturesOrderManager(
+            client=self.mock_client,
+            trade_notional_usdt=400.0,
+            max_allowed_spread_pct=0.15,
+        )
+        candidate = {
+            "symbol": "BTC-USD",
+            "signal": "BUY",
+            "entry_price": 50000.0,
+            "stop_loss": 49000.0,
+            "alert_id": "test_spread_2",
+        }
+        res = mgr.execute_candidate(candidate)
+
+        self.assertTrue(res["success"])
+        self.mock_client.create_order.assert_called_once()
 
 
 if __name__ == "__main__":

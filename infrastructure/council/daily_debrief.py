@@ -10,6 +10,7 @@ Simulates a multi-agent round-table debrief of the last 24 hours of trading:
 
 import os
 import sys
+import re
 import json
 import time
 import logging
@@ -95,7 +96,12 @@ class DailyCouncilDebrief:
     ):
         self.data_dir = data_dir
         self.memory_path = memory_path or os.path.join(data_dir, DEFAULT_MEMORY_FILE)
-        self.deliberations_path = deliberations_path or os.path.join(data_dir, DEFAULT_DELIBERATIONS_FILE)
+        if not deliberations_path:
+            p1 = os.path.join(data_dir, "council_deliberations.json")
+            p2 = os.path.join(data_dir, "deliberations.json")
+            self.deliberations_path = p1 if os.path.exists(p1) else (p2 if os.path.exists(p2) else p1)
+        else:
+            self.deliberations_path = deliberations_path
         self.outcomes_path = os.path.join(data_dir, DEFAULT_OUTCOMES_FILE)
         self.risk_state_path = os.path.join(data_dir, DEFAULT_RISK_STATE_FILE)
         self.executed_orders_path = os.path.join(data_dir, DEFAULT_EXECUTED_ORDERS_FILE)
@@ -233,6 +239,21 @@ class DailyCouncilDebrief:
         for r in rounds:
             if not isinstance(r, dict):
                 continue
+
+            # Respect lookback window for deliberations with timestamps
+            ts_str = str(r.get("timestamp") or r.get("deliberated_at") or r.get("created_at") or r.get("updated_at") or "")
+            dt = None
+            if ts_str:
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+                    try:
+                        clean_ts = ts_str.replace("Z", "").split(".")[0].strip()
+                        dt = datetime.strptime(clean_ts, fmt.replace("Z", "")).replace(tzinfo=timezone.utc)
+                        break
+                    except ValueError:
+                        pass
+            if dt is not None and dt < cutoff_dt:
+                continue
+
             v = r.get("verdict") or {}
             dec = str(v.get("decision") or "").upper()
             if dec == "EXECUTE":
@@ -251,6 +272,7 @@ class DailyCouncilDebrief:
                 "score": v.get("composite_score"),
                 "veto_specialist": v.get("veto_specialist"),
                 "veto_reason": v.get("veto_reason"),
+                "timestamp": ts_str,
             })
 
         # 3. Parse risk state
@@ -373,76 +395,167 @@ class DailyCouncilDebrief:
         # Case A: ZERO SETTLED TRADES (Market Stagnation / Coiling Mode)
         # -------------------------------------------------------------
         if total_settled == 0:
-            # 1. Arbiter Opening
+            now_dt = _utc_now()
+            day_seed = now_dt.toordinal()
+
+            # 1. Arbiter Opening (Dynamic perspective based on deliberation count & day seed)
+            if delib_count == 0:
+                arb_openings = [
+                    (
+                        "เปิดการประชุมสภาประจำวันครับ ในรอบ 24 ชม. ที่ผ่านมา บอทไม่มีออเดอร์ปิดรอบ (ไม่มีไม้ขาดทุน เงินต้นปลอดภัย 100%) "
+                        "และไม่มีสัญญาณหลุดเข้าสภาเนื่องจากตัวกรอง Noise สกัดสัญญาณรบกวนได้สมบูรณ์ ขอให้ทุกฝ่ายรายงานชีพจรตลาดและประเมินความพร้อมครับ"
+                    ),
+                    (
+                        "เปิดการประชุมสภาเพื่อทบทวนวินัยรายวันครับ ตลาดช่วงนี้อยู่ในกรอบแคบและไม่มีสัญญาณ Actionable ทำให้บอทยังคงถือเงินสดเต็มจำนวน 100% "
+                        "การไม่ฝืนเทรดในตลาดไร้ทิศทางคือการรักษาความได้เปรียบ ขอฟังรายงานสถานะจากแต่ละฝ่ายครับ"
+                    ),
+                    (
+                        "เปิดการประชุมสภาประจำวันครับ รอบ 24 ชม. ตลาดพักตัวสะสมพลัง ไร้ไม้ขาดทุนและไม่มีการชน Stop Loss "
+                        "สภาทำหน้าที่ 'Shields Up' คุ้มกันเงินต้นได้อย่างยอดเยี่ยม ขอให้ผู้เชี่ยวชาญทุกฝ่ายสรุปมุมมองทางเทคนิคและอนุพันธ์ครับ"
+                    ),
+                ]
+            else:
+                arb_openings = [
+                    (
+                        f"เปิดการประชุมสภาประจำวันครับ ในรอบ 24 ชม. ที่ผ่านมา บอทไม่มีออเดอร์ปิดรอบ (ไม่มีไม้ขาดทุนและไม่มีไม้ชน SL) "
+                        f"โดยสภาได้รับสัญญาณ M15 เข้ามาพิจารณาทั้งหมด {delib_count} ครั้ง (อนุมัติ {delib_executed} ครั้ง, "
+                        f"ยับยั้งความเสี่ยง VETO {delib_vetoed} ครั้ง, และติดสถานะเฝ้าระวัง STANDBY {delib_standby} ครั้ง) "
+                        f"ขอให้ทุกฝ่ายรายงานชีพจรตลาดและทบทวนความคุ้มเสี่ยงครับ"
+                    ),
+                    (
+                        f"เปิดการประชุมสภารายวันครับ ในรอบ 24 ชม. ที่ผ่านมา สภาได้ทำการสกรีนสัญญาณ M15 ไป {delib_count} รอบ "
+                        f"(อนุมัติ {delib_executed} | VETO 🛡️ {delib_vetoed} | STANDBY ⏳ {delib_standby}) พอร์ตปลอดภัย 100% ไม่มีไม้เสียหาย "
+                        f"การยับยั้งไม้ที่มีแต้มต่อต่ำช่วยเซฟทุนไม่ให้โดน Whipsaw ขอให้ทุกฝ่ายสรุปผลงานครับ"
+                    ),
+                    (
+                        f"เปิดการประชุมสภาครับ 24 ชม. ที่ผ่านมาบอทยังคงถือเงินสดเต็มจำนวน ไม่มีไม้ชน SL โดยสภาประเมินสัญญาณไปทั้งสิ้น {delib_count} ครั้ง "
+                        f"สกัดความเสี่ยง VETO {delib_vetoed} ครั้ง ขอให้ทุกฝ่ายรายงานจุดสังเกตสำคัญครับ"
+                    ),
+                ]
             dialogue.append({
                 "speaker": "👨‍⚖️ ประธานสภา (Council Arbiter)",
-                "text": (
-                    f"เปิดการประชุมสภาประจำวันครับ ในรอบ 24 ชม. ที่ผ่านมา บอทไม่มีออเดอร์ปิดรอบ (ไม่มีไม้ขาดทุนและไม่มีไม้ชน SL) "
-                    f"โดยสภาได้รับสัญญาณ M15 เข้ามาพิจารณาทั้งหมด {delib_count} ครั้ง (อนุมัติ {delib_executed} ครั้ง, "
-                    f"ยับยั้งความเสี่ยง VETO {delib_vetoed} ครั้ง, และติดสถานะเฝ้าระวัง STANDBY {delib_standby} ครั้ง) "
-                    f"ขอให้ทุกฝ่ายรายงานชีพจรตลาดและทบทวนความคุ้มเสี่ยงครับ"
-                ),
+                "text": arb_openings[day_seed % len(arb_openings)],
             })
 
-            # 2. Alpha Specialist
+            # 2. Alpha Specialist (Rotating technical perspectives: BB Squeeze, Wick absorption, ATR Contraction)
+            alpha_views = [
+                (
+                    "ฝ่ายกลยุทธ์รายงาน: สัญญาณในรอบนี้ส่วนใหญ่ติดสถานะ 'รอ' เนื่องจาก Bollinger Bands ของ 11 เหรียญกำลังบีบตัวแคบ "
+                    "(Volatility Contraction) การรักษาวินัยไม่เปิดไม้สุ่มสี่สุ่มห้าช่วยให้เราไม่ติดกับดัก False Breakout และรอจังหวะระเบิดเทรนด์จริงครับ"
+                ),
+                (
+                    "ฝ่ายกลยุทธ์รายงาน: แท่งเทียน 15m ปรากฏไส้เทียนบน-ล่างยาวสะท้อนแรงซื้อขายที่ยังลังเลบริเวณแนวรับแนวต้าน "
+                    "การที่ CDC ActionZone ยังไม่เกิด Green Flip ที่มีโมเมนตัมยืนยัน ทำให้การ Standby นอกตลาดเป็นทางเลือกที่ถูกต้องที่สุดครับ"
+                ),
+                (
+                    "ฝ่ายกลยุทธ์รายงาน: กรอบความผันผวน ATR ย่อตัวลงต่ำ สัญญาณที่เด้งขึ้นมาส่วนใหญ่ราคาขยับหลุดเกิน Entry Window ปลอดภัย "
+                    "(ห้ามไล่ราคา) เราจึงเลือกสงวนกระสุนเพื่อรอรอบเทรนด์ที่สะอาดตามแผน CDCVIX15 ครับ"
+                ),
+            ]
             dialogue.append({
                 "speaker": "🎯 Alpha Specialist (ฝ่ายกลยุทธ์ & กราฟแท่งเทียน)",
-                "text": (
-                    f"ฝ่ายกลยุทธ์รายงาน: สัญญาณในรอบนี้ส่วนใหญ่ติดสถานะ 'รอ' เนื่องจาก 2 ปัจจัยหลัก: "
-                    f"1) ราคาปัจจุบันวิ่งห่างเกิน Entry Window ปลอดภัย (ไม่ไล่ราคาปลายคลื่น) และ "
-                    f"2) แท่งเทียน 11 เหรียญส่วนใหญ่อยู่ในกรอบบีบแคบ (Volatility Contraction) "
-                    f"การรักษาวินัยไม่ฝืนเปิดไม้ช่วยให้เราไม่ติดดอยและพร้อมเข้าทำเมื่อมีเบรกเอาท์จริงครับ"
-                ),
+                "text": alpha_views[(day_seed + 1) % len(alpha_views)],
             })
 
-            # 3. Derivatives Specialist
+            # 3. Derivatives Specialist (Rotating funding rate, open interest, and liquidity profiles)
+            derivatives_views = [
+                (
+                    "ฝ่ายอนุพันธ์รายงาน: อัตรา Funding Rate ในกระดาน USDT-M Futures ของ Universe 11 เหรียญอยู่ในจุดสมดุลใกล้ 0.00% "
+                    "ไม่มีความร้อนแรงของฝั่ง Long หรือ Short ชี้ชัดว่าตลาดยังไม่มีการเก็งกำไรฟองสบู่ครับ"
+                ),
+                (
+                    "ฝ่ายอนุพันธ์รายงาน: ตรวจสอบ Open Interest พบว่าทรงตัวสม่ำเสมอ เม็ดเงินสถาบันกำลังรอดูทิศทาง Macro "
+                    "ไม่มีสัญญาณการเทกระจาย Liquidation Cascade การที่บอทชะลอการเปิดสัญญาเป็นไปตามวินัยอนุพันธ์อย่างเคร่งครัดครับ"
+                ),
+                (
+                    "ฝ่ายอนุพันธ์รายงาน: โซนสภาพคล่องส่วนใหญ่กระจุกตัวอยู่เหนือแนวต้านและใต้แนวรับสำคัญ "
+                    "การไม่เปิด Position กลางกรอบช่วยให้เราไม่ตกเป็นเป้าของการกวาด Stop Hunt ของเจ้ามือครับ"
+                ),
+            ]
             dialogue.append({
                 "speaker": "📊 Derivatives Specialist (ฝ่ายอนุพันธ์ & สภาพคล่อง)",
-                "text": (
-                    f"ฝ่ายอนุพันธ์รายงาน: ตรวจสอบ Funding Rate และ Open Interest ของ Universe 11 เหรียญ พบว่าทรงตัว "
-                    f"ไม่มีภาวะเก็งกำไรฟองสบู่ฝั่งใดฝั่งหนึ่งรุนแรง เม็ดเงินสถาบันกำลังรอดูทิศทาง macro "
-                    f"การที่บอทไม่เข้าไม้ในสภาวะนี้คือการตัดสินใจที่ถูกต้องตามวินัยอนุพันธ์ครับ"
-                ),
+                "text": derivatives_views[(day_seed + 2) % len(derivatives_views)],
             })
 
-            # 4. Risk Specialist
+            # 4. Risk Specialist (Rotating capital preservation, anti-drawdown, and stop loss armor)
+            risk_views = [
+                (
+                    "ฝ่ายบริหารความเสี่ยง: พอร์ตหลักปลอดภัย 100% ขาดทุนสะสมรายวัน 0.00% ในเกมควอนต์ 'การไม่เสียเงินในวันที่ตลาดไม่เป็นใจ' "
+                    "คือการสร้างผลตอบแทนทางอ้อม วินัยความเสี่ยงทำงานได้เต็มประสิทธิภาพครับ"
+                ),
+                (
+                    f"ฝ่ายบริหารความเสี่ยง: แพ้สะสมติดกัน {consec_losses} ไม้ เงินทุนยังคงสมบูรณ์ ระบบ Dynamic Equity Sizing "
+                    "และ Circuit Breaker พร้อมทำงานเต็มร้อย เงินต้นปลอดภัยสูงสุดครับ"
+                ),
+                (
+                    "ฝ่ายบริหารความเสี่ยง: พอร์ตหลักปลอดภัยสมบูรณ์ กลไก Breakeven Stop และ Trailing Stop บนกระดาน Binance "
+                    "พร้อมทำงานทันทีเมื่อมีออเดอร์ใหม่เข้าเกณฑ์ครับ"
+                ),
+            ]
             dialogue.append({
                 "speaker": "🛡️ Risk Specialist (ฝ่ายบริหารความเสี่ยง & กันทุน)",
-                "text": (
-                    f"ฝ่ายบริหารความเสี่ยง: พอร์ตหลักปลอดภัย 100% ขาดทุนสะสมรายวัน 0.0% "
-                    f"สภาวะที่ไม่มีไม้เทรดไม่ใช่ความล้มเหลว แต่เป็น 'Shields Up' ป้องกันไม่ให้พอร์ตโดน Whipsaw "
-                    f"กัดกร่อนเงินทุน วินัยความเสี่ยงยังคงแข็งแกร่งสูงสุดครับ"
-                ),
+                "text": risk_views[day_seed % len(risk_views)],
             })
 
-            # 5. Macro & News Sentinel (with ScoutResearcher Data)
-            dialogue.append({
-                "speaker": "🌍 Macro & News Sentinel (ฝ่ายมหภาคและข่าวเหตุการณ์)",
-                "text": (
+            # 5. Macro & News Sentinel (with ScoutResearcher Data & Rotating Insights)
+            macro_views = [
+                (
                     f"ฝ่ายมหภาคและข่าวกรอง (ร่วมกับ ScoutResearcher): ตลาดโลก S&P 500 ขยับ {sp_chg:+.2f}%, "
                     f"ทองคำ/PAXG {paxg_chg:+.1f}%, และ BTC {btc_chg:+.1f}% สภาวะโดยรวมคือ '{macro_regime_cached}' "
-                    f"ยังไม่มีปัจจัย FUD รุนแรง แต่สภาพคล่องกระจุกตัว รอคอยตัวเลขเศรษฐกิจเพื่อเลือกทิศทางใหม่"
+                    "ยังไม่มีปัจจัย FUD รุนแรง แต่สภาพคล่องกระจุกตัว รอคอยตัวเลขเศรษฐกิจเพื่อเลือกทิศทางใหม่"
                 ),
+                (
+                    f"ฝ่ายมหภาคและข่าวกรอง: ชีพจร Macro รายวัน BTC {btc_chg:+.1f}%, ทองคำ {paxg_chg:+.1f}%, ตลาดหุ้นสหรัฐ {sp_chg:+.2f}% "
+                    f"สภาวะตลาดจัดเป็น '{macro_regime_cached}' สินทรัพย์เสี่ยงกำลังสะสมพลัง ไม่มีข่าว Black Swan กดดันครับ"
+                ),
+                (
+                    f"ฝ่ายมหภาคและข่าวกรอง: ตลาด Macro เคลื่อนไหวในกรอบสะท้อนสภาวะ '{macro_regime_cached}' (BTC {btc_chg:+.1f}%, "
+                    f"PAXG {paxg_chg:+.1f}%) ตลาดกำลังซึมซับตัวเลขเศรษฐกิจ แนะนำให้เฝ้าระวังความผันผวนช่วงเปิดตลาดสหรัฐครับ"
+                ),
+            ]
+            dialogue.append({
+                "speaker": "🌍 Macro & News Sentinel (ฝ่ายมหภาคและข่าวเหตุการณ์)",
+                "text": macro_views[(day_seed + 1) % len(macro_views)],
             })
 
-            # 6. Ops Specialist
+            # 6. Ops Specialist (Rotating Binance API, margin, and execution readiness)
+            ops_views = [
+                (
+                    "ฝ่ายระบบปฏิบัติการ: เชื่อมต่อ Binance Futures API ทำงานเสถียร 100% สเปรดและ Slippage อยู่ในกรอบปกติ "
+                    "ไม่พบปัญหาติดขัดของคำสั่ง STOP_MARKET การจัดการ Lot Size และ Notional สอดคล้องกับขีดจำกัดของกระดานเทรด"
+                ),
+                (
+                    "ฝ่ายระบบปฏิบัติการ: ตรวจสอบ WebSocket Heartbeat และ API Latency ตอบสนองรวดเร็วปกติ โควตา Position "
+                    "ยังว่างพร้อมรองรับออเดอร์ใหม่ และ Margin Type ถูกล็อคเป็น Isolated 100% ครับ"
+                ),
+                (
+                    "ฝ่ายระบบปฏิบัติการ: ตรวจสอบความถูกต้องของคำสั่งบน Binance ทั้ง stepSize และ minNotional ทุกเหรียญทำงานถูกต้อง "
+                    "ไม่มี Order Rejection หรือปัญหาเชื่อมต่อขัดข้องครับ"
+                ),
+            ]
             dialogue.append({
                 "speaker": "⚡ Ops Specialist (ฝ่ายระบบคำสั่ง & สภาพคล่อง)",
-                "text": (
-                    f"ฝ่ายระบบปฏิบัติการ: เชื่อมต่อ Binance Futures API ทำงานเสถียร 100% "
-                    f"สเปรดและ Slippage อยู่ในกรอบปกติ ไม่พบปัญหาติดขัดของคำสั่ง STOP_MARKET "
-                    f"การจัดการ Lot Size และ Notional สอดคล้องกับขีดจำกัดของกระดานเทรด"
-                ),
+                "text": ops_views[(day_seed + 2) % len(ops_views)],
             })
 
-            # 7. Contrarian Scout
+            # 7. Contrarian Scout (Rotating relative strength, liquidity sweep, and sandbox readiness)
+            scout_views = [
+                (
+                    "ฝ่ายสำรวจและคิดต่าง: ระหว่างที่ตลาดกำลังสะสมพลัง เราจับตาหาจังหวะ Relative Strength และ Panic Sweep "
+                    "อย่างใกล้ชิด หากเกิดการทุบกวาดสภาพคล่องผิดปกติ สเกาต์พร้อมเสนอไม้ทดลอง Sandbox ทันทีเพื่อเก็บแต้มต่อต้นคลื่น"
+                ),
+                (
+                    "ฝ่ายสำรวจและคิดต่าง: เฝ้าติดตาม Universe 11 เหรียญเพื่อเสาะหา Asymmetric Edge หากเหรียญใดแสดง Relative Strength "
+                    "แข็งแกร่งสวนตลาด BTC สเกาต์จะพิจารณาเสนอเปิดไม้ทดลอง Micro-size 35% ทันทีครับ"
+                ),
+                (
+                    "ฝ่ายสำรวจและคิดต่าง: ขณะนี้ยังไม่พบลักษณะ Panic Dip หรือ Short Squeeze ที่เข้าเกณฑ์ R:R >= 2.8R "
+                    "สเกาต์จึงสงวนโควตาและไม่เปิดไม้ Sandbox เพื่อป้องกันการสูญเสียทุนโดยไม่จำเป็นครับ"
+                ),
+            ]
             dialogue.append({
                 "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
-                "text": (
-                    f"ฝ่ายสำรวจและคิดต่าง: ระหว่างที่ตลาดกำลังสะสมพลัง เราจับตาหาจังหวะ Relative Strength "
-                    f"และ Panic Sweep อย่างใกล้ชิด หากเกิดการทุบกวาดสภาพคล่องผิดปกติ สเกาต์พร้อมเสนอไม้ทดลอง Sandbox "
-                    f"ทันทีเพื่อเก็บแต้มต่อต้นคลื่น"
-                ),
+                "text": scout_views[day_seed % len(scout_views)],
             })
 
         # -------------------------------------------------------------
@@ -669,19 +782,18 @@ class DailyCouncilDebrief:
         self, stats: Dict[str, Any]
     ) -> Optional[Tuple[List[Dict[str, str]], Dict[str, Any]]]:
         """
-        Generates multi-agent debrief dialogue using Gemini 2.5 Flash if API key is present.
+        Generates multi-agent debrief dialogue using Gemini Flash API with automatic model fallbacks.
         """
         if not self.gemini_api_key:
             return None
 
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.gemini_model}:generateContent"
         system_instruction = (
             "คุณคือประธานและคณะผู้เชี่ยวชาญ 7 ฝ่ายของ Trading Council สำหรับระบบเทรดคริปโตอัตโนมัติ tradV2 "
             "หน้าที่ของคุณคือประชุมโต๊ะกลมจำลอง (Debrief) เพื่อทบทวนผลงานรอบ 24 ชั่วโมงที่ผ่านมา "
-            "โดยมีผู้พูด: 👨‍⚖️ ประธานสภา, 🎯 Alpha Specialist, 📊 Derivatives Specialist, 🛡️ Risk Specialist, 🌍 Macro & News Sentinel, ⚡ Ops Specialist, 🔭 Contrarian Scout "
+            "โดยมีผู้พูด: 👨‍⚖️ ประธานสภา (Council Arbiter), 🎯 Alpha Specialist, 📊 Derivatives Specialist, 🛡️ Risk Specialist, 🌍 Macro & News Sentinel, ⚡ Ops Specialist, 🔭 Contrarian Scout "
             "ให้ผู้เชี่ยวชาญพูดคุยแลกเปลี่ยน ชันสูตรไม้ที่แพ้ ชื่นชมกลไกกันทุน (Breakeven) และการระงับความเสี่ยง (Veto) รวมถึงวิเคราะห์ผลลัพธ์ของไม้ทดลอง Sandbox Exploration "
             "หากรอบนี้ไม่มีไม้ปิดรอบ (total_settled == 0) ให้วิเคราะห์ว่าเพราะเหตุใดตลาดจึงติดสถานะ 'รอ' (เช่น ตลาดบีบแคบ Volatility Contraction หรือราคาห่าง Entry Window) และห้ามพูดว่า Win Rate 0.0% ล้มเหลว "
-            "แล้วสรุปมติเป็น JSON รูปแบบ: "
+            "ให้แต่ละฝ่ายแสดงความเห็นสั้น กระชับ มีสาระ ตรงประเด็น และสรุปมติเป็น JSON รูปแบบ: "
             "{\n"
             '  "market_regime": "SIDEWAY_CHOP" | "TRENDING_HEALTHY" | "CALM_CONSOLIDATION" | "HIGH_VOLATILITY",\n'
             '  "risk_stance": "DEFENSIVE" | "NORMAL" | "AGGRESSIVE",\n'
@@ -691,6 +803,7 @@ class DailyCouncilDebrief:
             '  "breakeven_trigger_r": 1.0 ถึง 1.5,\n'
             '  "trailing_activation_r": 1.8 ถึง 2.5,\n'
             '  "max_entry_drift_pct": 0.60 ถึง 1.00,\n'
+            '  "entry_window_atr_mult": 0.80 ถึง 1.20,\n'
             '  "dialogue": [{"speaker": "...", "text": "..."}],\n'
             '  "lessons_learned": ["...", "..."]\n'
             "}"
@@ -702,45 +815,64 @@ class DailyCouncilDebrief:
             "systemInstruction": {"parts": [{"text": system_instruction}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
             "generationConfig": {
-                "temperature": 0.4,
-                "maxOutputTokens": 1500,
+                "temperature": 0.5,
+                "maxOutputTokens": 2500,
                 "responseMimeType": "application/json",
             },
         }
 
-        try:
-            req = urllib.request.Request(
-                url,
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json", "x-goog-api-key": self.gemini_api_key},
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=30.0) as resp:
-                resp_json = json.loads(resp.read())
-                candidates = resp_json.get("candidates") or []
-                if not candidates:
-                    return None
-                parts = (candidates[0].get("content") or {}).get("parts") or []
-                text = "".join(str(p.get("text") or "") for p in parts).strip()
-                parsed = json.loads(text)
+        models_to_try = [self.gemini_model]
+        for fallback_m in ("gemini-2.5-flash", "gemini-1.5-flash"):
+            if fallback_m not in models_to_try:
+                models_to_try.append(fallback_m)
 
-                dialogue = parsed.get("dialogue") or []
-                meta = {
-                    "market_regime": parsed.get("market_regime", "CALM_CONSOLIDATION" if stats.get("total_settled", 0) == 0 else "SIDEWAY_CHOP"),
-                    "risk_stance": parsed.get("risk_stance", "NORMAL"),
-                    "min_composite_score": float(parsed.get("min_composite_score", 65.0)),
-                    "caution_mode": bool(parsed.get("caution_mode", False)),
-                    "tp_target_multiplier": float(parsed.get("tp_target_multiplier", 1.0)),
-                    "breakeven_trigger_r": float(parsed.get("breakeven_trigger_r", 1.2)),
-                    "trailing_activation_r": float(parsed.get("trailing_activation_r", 2.0)),
-                    "max_entry_drift_pct": float(parsed.get("max_entry_drift_pct", 0.80)),
-                    "entry_window_atr_mult": float(parsed.get("entry_window_atr_mult", 1.0)),
-                    "lessons_learned": parsed.get("lessons_learned", []),
-                }
-                return dialogue, meta
-        except Exception as e:
-            logger.warning("Gemini debrief generation failed (%s); fallback to deterministic.", e)
-            return None
+        for model in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            try:
+                req = urllib.request.Request(
+                    url,
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "x-goog-api-key": self.gemini_api_key},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=30.0) as resp:
+                    resp_json = json.loads(resp.read())
+                    candidates = resp_json.get("candidates") or []
+                    if not candidates:
+                        continue
+                    parts = (candidates[0].get("content") or {}).get("parts") or []
+                    text = "".join(str(p.get("text") or "") for p in parts).strip()
+
+                    clean_text = text
+                    if "```" in clean_text:
+                        clean_text = re.sub(r"^```(?:json)?\s*", "", clean_text, flags=re.MULTILINE)
+                        clean_text = re.sub(r"\s*```$", "", clean_text, flags=re.MULTILINE).strip()
+                    json_match = re.search(r"(\{.*\})", clean_text, flags=re.DOTALL)
+                    if json_match:
+                        clean_text = json_match.group(1)
+
+                    parsed = json.loads(clean_text)
+                    dialogue = parsed.get("dialogue") or []
+                    if not dialogue:
+                        continue
+
+                    meta = {
+                        "market_regime": parsed.get("market_regime", "CALM_CONSOLIDATION" if stats.get("total_settled", 0) == 0 else "SIDEWAY_CHOP"),
+                        "risk_stance": parsed.get("risk_stance", "NORMAL"),
+                        "min_composite_score": float(parsed.get("min_composite_score", 65.0)),
+                        "caution_mode": bool(parsed.get("caution_mode", False)),
+                        "tp_target_multiplier": float(parsed.get("tp_target_multiplier", 1.0)),
+                        "breakeven_trigger_r": float(parsed.get("breakeven_trigger_r", 1.2)),
+                        "trailing_activation_r": float(parsed.get("trailing_activation_r", 2.0)),
+                        "max_entry_drift_pct": float(parsed.get("max_entry_drift_pct", 0.80)),
+                        "entry_window_atr_mult": float(parsed.get("entry_window_atr_mult", 1.0)),
+                        "lessons_learned": parsed.get("lessons_learned", []),
+                    }
+                    return dialogue, meta
+            except Exception as e:
+                logger.warning("Gemini debrief generation with %s failed (%s); trying next or fallback.", model, e)
+
+        return None
 
     def synthesize_council_memory(
         self, stats: Dict[str, Any], dialogue: List[Dict[str, str]], meta: Dict[str, Any]

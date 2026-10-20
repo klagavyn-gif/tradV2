@@ -318,15 +318,24 @@ class DailyCouncilDebrief:
         daily_loss_pct = _safe_float(risk_state.get("daily_loss_pct"), 0.0)
         circuit_breaker_active = bool(risk_state.get("circuit_breaker_active", False))
 
-        # Check exploration sandbox orders
+        # Check exploration sandbox orders within lookback
         sandbox_executed = 0
+        def _is_recent_sandbox(rec: Any) -> bool:
+            if not isinstance(rec, dict) or not rec.get("is_sandbox_exploration"):
+                return False
+            ts_val = rec.get("executed_at") or rec.get("timestamp")
+            if not ts_val:
+                return True
+            rec_dt = _parse_timestamp_to_utc(ts_val)
+            return rec_dt is None or rec_dt >= cutoff_dt
+
         if isinstance(executed_orders, dict):
             sandbox_executed = sum(
-                1 for rec in executed_orders.values() if isinstance(rec, dict) and rec.get("is_sandbox_exploration")
+                1 for rec in executed_orders.values() if _is_recent_sandbox(rec)
             )
         elif isinstance(executed_orders, list):
             sandbox_executed = sum(
-                1 for rec in executed_orders if isinstance(rec, dict) and rec.get("is_sandbox_exploration")
+                1 for rec in executed_orders if _is_recent_sandbox(rec)
             )
 
         # 4. Cross-market macro intelligence from ScoutResearcher
@@ -576,23 +585,33 @@ class DailyCouncilDebrief:
             })
 
             # 7. Contrarian Scout (Rotating relative strength, liquidity sweep, and sandbox readiness)
-            scout_views = [
-                (
-                    "ฝ่ายสำรวจและคิดต่าง: ระหว่างที่ตลาดกำลังสะสมพลัง เราจับตาหาจังหวะ Relative Strength และ Panic Sweep "
-                    "อย่างใกล้ชิด หากเกิดการทุบกวาดสภาพคล่องผิดปกติ สเกาต์พร้อมเสนอไม้ทดลอง Sandbox ทันทีเพื่อเก็บแต้มต่อต้นคลื่น"
-                ),
-                (
-                    "ฝ่ายสำรวจและคิดต่าง: เฝ้าติดตาม Universe 11 เหรียญเพื่อเสาะหา Asymmetric Edge หากเหรียญใดแสดง Relative Strength "
-                    "แข็งแกร่งสวนตลาด BTC สเกาต์จะพิจารณาเสนอเปิดไม้ทดลอง Micro-size 35% ทันทีครับ"
-                ),
-                (
-                    "ฝ่ายสำรวจและคิดต่าง: ขณะนี้ยังไม่พบลักษณะ Panic Dip หรือ Short Squeeze ที่เข้าเกณฑ์ R:R >= 2.8R "
-                    "สเกาต์จึงสงวนโควตาและไม่เปิดไม้ Sandbox เพื่อป้องกันการสูญเสียทุนโดยไม่จำเป็นครับ"
-                ),
-            ]
+            if newly_prom:
+                p_names = ", ".join(f.get("factor_name", "") for f in newly_prom)
+                scout_text = (
+                    f"ฝ่ายสำรวจและคิดต่าง: ขอรายงานข่าวสำคัญต่อที่ประชุม! "
+                    f"สูตรคณิตศาสตร์ '{p_names}' ที่เรานำไปทดลองเทรด Sandbox ด้วยเงินจริง "
+                    f"ทำสถิติผ่านเกณฑ์การบ่มเพาะ (Profit Factor และ Win Rate ชนะขาดลอย) "
+                    f"ขอเสนอให้สภาออกมติเอกฉันท์เลื่อนขั้นสู่ระบบหลัก (Production) ในฐานะ Pre-Council Alpha Gate ครับ!"
+                )
+            else:
+                scout_views = [
+                    (
+                        "ฝ่ายสำรวจและคิดต่าง: ระหว่างที่ตลาดกำลังสะสมพลัง เราจับตาหาจังหวะ Relative Strength และ Panic Sweep "
+                        "อย่างใกล้ชิด หากเกิดการทุบกวาดสภาพคล่องผิดปกติ สเกาต์พร้อมเสนอไม้ทดลอง Sandbox ทันทีเพื่อเก็บแต้มต่อต้นคลื่น"
+                    ),
+                    (
+                        "ฝ่ายสำรวจและคิดต่าง: เฝ้าติดตาม Universe 11 เหรียญเพื่อเสาะหา Asymmetric Edge หากเหรียญใดแสดง Relative Strength "
+                        "แข็งแกร่งสวนตลาด BTC สเกาต์จะพิจารณาเสนอเปิดไม้ทดลอง Micro-size 35% ทันทีครับ"
+                    ),
+                    (
+                        "ฝ่ายสำรวจและคิดต่าง: ขณะนี้ยังไม่พบลักษณะ Panic Dip หรือ Short Squeeze ที่เข้าเกณฑ์ R:R >= 2.8R "
+                        "สเกาต์จึงสงวนโควตาและไม่เปิดไม้ Sandbox เพื่อป้องกันการสูญเสียทุนโดยไม่จำเป็นครับ"
+                    ),
+                ]
+                scout_text = scout_views[day_seed % len(scout_views)]
             dialogue.append({
                 "speaker": "🔭 Contrarian Scout (ฝ่ายสำรวจ & ความคิดต่าง)",
-                "text": scout_views[day_seed % len(scout_views)],
+                "text": scout_text,
             })
 
         # -------------------------------------------------------------

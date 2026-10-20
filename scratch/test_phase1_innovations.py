@@ -9,11 +9,11 @@ import sys
 import time
 
 # Safeguard terminal output encoding for Windows
-if hasattr(sys.stdout, "reconfigure"):
-    try:
+try:
+    if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+except Exception:
+    pass
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
@@ -314,9 +314,12 @@ def test_pipeline_hook_integration():
     test_config.BTC_SHOCKWAVE_BARRIER_ENABLED = True
     test_config.BTC_SHOCKWAVE_ATR_MULT = 1.8
     test_config.BTC_SHOCKWAVE_ABS_PCT = 1.5
-    test_config.BINANCE_DERIVATIVES_FILTER_ENABLED = False
     test_config.BINANCE_FUTURES_ALLOWED_STRATEGIES = "CDCVIX15"
     test_config.BINANCE_FUTURES_BLOCKED_SYMBOLS = ""
+    test_config.BINANCE_FUTURES_ALLOWED_SYMBOLS = "SUI-USD,SUIUSDT,BTC-USD,BTCUSDT"
+    test_config.NEWS_SENTINEL_ENABLED = False
+    test_config.NEWS_SENTINEL_CALENDAR_PATH = None
+    test_config.TRADING_COUNCIL_ENABLED = False
     test_config.BINANCE_FUTURES_KINETIC_STOP_ENABLED = True
     test_config.BINANCE_FUTURES_KINETIC_MIN_SECONDS = 7200.0
     test_config.BINANCE_FUTURES_KINETIC_MIN_R = 0.60

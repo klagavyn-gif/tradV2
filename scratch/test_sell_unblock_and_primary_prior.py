@@ -125,6 +125,8 @@ class TestSellUnblockAndPrimaryPrior(unittest.TestCase):
              patch.object(config, "BINANCE_FUTURES_API_SECRET", "dummy_secret"), \
              patch.object(config, "BINANCE_WATCHDOG_ENABLED", False), \
              patch.object(config, "BINANCE_DERIVATIVES_FILTER_ENABLED", False), \
+             patch.object(config, "BINANCE_FUTURES_BLOCKED_SYMBOLS", ""), \
+             patch.object(config, "BINANCE_FUTURES_ALLOWED_SYMBOLS", "BTC-USD,BTCUSDT"), \
              patch.object(config, "BTC_SHOCKWAVE_BARRIER_ENABLED", False):
             res = execute_binance_auto_trade_pipeline(
                 sent_candidates=[candidate],

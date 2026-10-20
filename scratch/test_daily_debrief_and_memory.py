@@ -15,7 +15,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -40,13 +40,19 @@ class TestDailyCouncilDebrief(unittest.TestCase):
         self.risk_state_path = os.path.join(self.test_dir, "risk_state.json")
         self.memory_path = os.path.join(self.test_dir, "council_memory.json")
 
+        now = datetime.now(timezone.utc)
+        t1 = (now - timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S UTC")
+        t2 = (now - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S UTC")
+        t3 = (now - timedelta(hours=2)).strftime("%Y-%m-%d %H:%M:%S UTC")
+        t4 = (now - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S UTC")
+
         # Seed outcomes
         outcomes_data = {
             "version": 1,
             "outcomes": [
                 {
                     "alert_id": "trade1",
-                    "timestamp": "2026-10-17 02:00:00 UTC",
+                    "timestamp": t1,
                     "symbol": "BTC-USD",
                     "signal": "BUY",
                     "outcome_status": "settled",
@@ -57,7 +63,7 @@ class TestDailyCouncilDebrief(unittest.TestCase):
                 },
                 {
                     "alert_id": "trade2",
-                    "timestamp": "2026-10-17 04:00:00 UTC",
+                    "timestamp": t2,
                     "symbol": "SUI-USD",
                     "signal": "BUY",
                     "outcome_status": "settled",
@@ -68,7 +74,7 @@ class TestDailyCouncilDebrief(unittest.TestCase):
                 },
                 {
                     "alert_id": "trade3",
-                    "timestamp": "2026-10-17 06:00:00 UTC",
+                    "timestamp": t3,
                     "symbol": "NEAR-USD",
                     "signal": "BUY",
                     "outcome_status": "settled",
@@ -80,7 +86,7 @@ class TestDailyCouncilDebrief(unittest.TestCase):
                 },
                 {
                     "alert_id": "trade4",
-                    "timestamp": "2026-10-17 07:00:00 UTC",
+                    "timestamp": t4,
                     "symbol": "ADA-USD",
                     "signal": "BUY",
                     "outcome_status": "settled",

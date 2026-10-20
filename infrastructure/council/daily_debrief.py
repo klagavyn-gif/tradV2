@@ -13,6 +13,7 @@ import sys
 import re
 import json
 import time
+import html
 import logging
 import argparse
 import urllib.request
@@ -29,6 +30,8 @@ DEFAULT_OUTCOMES_FILE = "realized_outcomes.json"
 DEFAULT_RISK_STATE_FILE = "risk_state.json"
 DEFAULT_EXECUTED_ORDERS_FILE = "binance_executed_orders.json"
 
+BANGKOK_TZ = timezone(timedelta(hours=7))
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -36,6 +39,58 @@ def _utc_now() -> datetime:
 
 def _format_dt(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _parse_timestamp_to_utc(ts_val: Any, default_tz: timezone = BANGKOK_TZ) -> Optional[datetime]:
+    """
+    Parse a timestamp from string or datetime object to a timezone-aware UTC datetime.
+    Correctly recognizes:
+    - Explicit 'UTC' suffix (e.g. '2026-10-20 12:00:00 UTC')
+    - ISO 8601 strings with Z or offsets (e.g. '2026-10-20T12:00:00Z', '2026-10-20T19:00:00+07:00')
+    - Naive strings (e.g. '2026-10-20 19:00:00') which are treated as Bangkok time (UTC+7),
+      consistent with get_thai_now() used throughout tradV2.
+    """
+    if not ts_val:
+        return None
+    if isinstance(ts_val, datetime):
+        if ts_val.tzinfo is None:
+            return ts_val.replace(tzinfo=default_tz).astimezone(timezone.utc)
+        return ts_val.astimezone(timezone.utc)
+
+    ts_str = str(ts_val).strip()
+    if not ts_str:
+        return None
+
+    # Handle explicit 'UTC' suffix
+    if ts_str.endswith("UTC"):
+        clean = ts_str[:-3].strip()
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                dt = datetime.strptime(clean.split(".")[0], fmt)
+                return dt.replace(tzinfo=timezone.utc)
+            except ValueError:
+                pass
+
+    # Handle ISO 8601 with Z or explicit +/- timezone offset
+    if "T" in ts_str or "+" in ts_str or ts_str.endswith("Z"):
+        try:
+            clean = ts_str.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(clean)
+            if dt.tzinfo is None:
+                return dt.replace(tzinfo=default_tz).astimezone(timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            pass
+
+    # Handle standard naive strings (defaulting to Bangkok UTC+7)
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(ts_str.split(".")[0], fmt)
+            return dt.replace(tzinfo=default_tz).astimezone(timezone.utc)
+        except ValueError:
+            pass
+
+    return None
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:
@@ -141,25 +196,15 @@ class DailyCouncilDebrief:
         for oc in outcomes_list:
             if not isinstance(oc, dict):
                 continue
-            ts_str = str(oc.get("settled_at") or oc.get("timestamp") or "")
-            dt = None
-            if ts_str:
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%dT%H:%M:%S"):
-                    try:
-                        dt = datetime.strptime(ts_str.replace("Z", "").split(".")[0], fmt).replace(
-                            tzinfo=timezone.utc
-                        )
-                        break
-                    except ValueError:
-                        pass
-            # If timestamp parsed, check cutoff; if no timestamp, keep recent
-            if dt is None or dt >= cutoff_dt:
+            ts_str = oc.get("settled_at") or oc.get("timestamp")
+            dt = _parse_timestamp_to_utc(ts_str)
+            if dt is not None and dt >= cutoff_dt:
                 filtered_outcomes.append(oc)
 
-        # Fallback: If no trades in lookback, take the last up to 6 settled trades
-        if not filtered_outcomes and outcomes_list:
-            settled = [oc for oc in outcomes_list if isinstance(oc, dict) and oc.get("outcome_status") == "settled"]
-            filtered_outcomes = settled[-6:] if settled else outcomes_list[-6:]
+        # Note: We do NOT inject phantom old trades when filtered_outcomes is empty.
+        # Having 0 settled trades in the lookback window is a valid market state
+        # (coiling/stagnation) and correctly triggers Case A (zero-trade debrief)
+        # without hallucinating old historical trades.
 
         wins = 0
         losses = 0
@@ -241,16 +286,8 @@ class DailyCouncilDebrief:
                 continue
 
             # Respect lookback window for deliberations with timestamps
-            ts_str = str(r.get("timestamp") or r.get("deliberated_at") or r.get("created_at") or r.get("updated_at") or "")
-            dt = None
-            if ts_str:
-                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S UTC", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
-                    try:
-                        clean_ts = ts_str.replace("Z", "").split(".")[0].strip()
-                        dt = datetime.strptime(clean_ts, fmt.replace("Z", "")).replace(tzinfo=timezone.utc)
-                        break
-                    except ValueError:
-                        pass
+            ts_str = r.get("timestamp") or r.get("deliberated_at") or r.get("created_at") or r.get("updated_at")
+            dt = _parse_timestamp_to_utc(ts_str)
             if dt is not None and dt < cutoff_dt:
                 continue
 

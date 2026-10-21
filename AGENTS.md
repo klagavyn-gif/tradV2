@@ -1411,3 +1411,36 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
 - ส่งผลการทดสอบ DSR, Permutation p-value, และ 99% VaR DD เข้า Telegram และบันทึกรายงาน Markdown (`.data/telegram_alerts/entry_edge_report.md`)
 - รองรับ Cold Start อย่างปลอดภัย (หากมีตัวอย่างต่ำกว่า 5 ไม้ จะขึ้นสถานะ `COLD_START_INSUFFICIENT_DATA` ไม่แครช)
 - ชุดทดสอบความแม่นยำ: `tests/test_statistical_validation.py` (ผ่าน 7/7 ข้อ รวมทั้งระบบ 90/90 ข้อในเวลา 5.8 วินาที)
+
+## 40. ระบบ Portfolio Bounded Volatility Parity (Equal Dollar Risk Contribution)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified with 96 Unit Tests)**
+
+### 1. ปัญหาและทฤษฎีอ้างอิง (The Risk Parity Edge)
+- **ปัญหาเดิม**: การใช้ Fixed 5% Margin คงที่ในทุกเหรียญ ทำให้เหรียญผันผวนสูง (High-Beta เช่น SUI ที่ Stop Loss 3.6%) สร้างความเสียหาย Dollar Loss เมื่อชน SL เป็น **3 เท่า** ของเหรียญผันผวนต่ำ (Low-Beta เช่น ETH ที่ Stop Loss 1.2%) ส่งผลให้เหรียญ High-Beta ครอบงำความเสี่ยงพอร์ต (Risk Dominance)
+- **ทฤษฎีอ้างอิง**:
+  - **Edward Qian (2005)**: *Risk Parity Portfolios: Efficient Portfolios Through True Diversification* (PanAgora Asset Management)
+  - **Cliff Asness, Andrea Frazzini, Lasse Pedersen (2012)**: *Leverage Aversion and Risk Parity* (Financial Analysts Journal)
+  - **Ed Seykota & Richard Dennis (Turtles System)**: ATR-based position sizing targeting constant dollar volatility per contract.
+
+### 2. โครงสร้างและการทำงาน (`infrastructure/binance/risk_manager.py`)
+1. **การคำนวณระยะ Stop Loss จริง**:
+   $$\text{Stop Distance \%} = \frac{|\text{Entry Price} - \text{Stop Loss}|}{\text{Entry Price}} \times 100\%$$
+2. **การปรับสัดส่วนตามความผันผวนส่วนกลับ (Inverse Volatility)**:
+   $$\text{Raw Vol Multiplier} = \frac{\text{Baseline Risk \% (1.80\%)}}{\text{Stop Distance \%}}$$
+3. **การจำกัดขอบเขตความปลอดภัย (Safety Bounded Clamps)**:
+   $$\text{Vol Multiplier} = \text{Clamp}(\text{Raw Vol Multiplier}, \min=0.60, \max=1.35)$$
+   - เหรียญผันผวนสูง (เช่น SUI เสี่ยง 3.6%): Multiplier $= 1.8 / 3.6 = 0.50 \rightarrow \mathbf{0.60}$ (ลดขนาดไม้ลง 40% ป้องกันพอร์ตโดนกระชาก)
+   - เหรียญผันผวนต่ำ (เช่น ETH เสี่ยง 1.2%): Multiplier $= 1.8 / 1.2 = 1.50 \rightarrow \mathbf{1.35}$ (เพิ่มขนาดไม้ได้ไม่เกิน 35% ป้องกัน Overleverage)
+4. **การประสานงานกับ Loss Streak Throttling**:
+   - หากแพ้ติดกัน 2 ไม้ ($0.5\text{x}$) และเปิดเหรียญซิ่ง ($0.6\text{x}$) ตัวคูณจะประสานงานกันแบบ Multiplicative ($0.5 \times 0.6 = \mathbf{0.30x}$) และ Clamp ไม่ให้ต่ำกว่า `minNotional`
+
+### 3. การกำหนดค่า (Feature Flag Configuration ใน `config.py`)
+```python
+BINANCE_FUTURES_VOLATILITY_PARITY_ENABLED = False  # ค่าเริ่มต้นปิดไว้เพื่อความปลอดภัยของ Code Freeze
+BINANCE_FUTURES_VOLATILITY_BASE_RISK_PCT = 1.80    # ค่าเฉลี่ยความเสี่ยง SL ของตระกร้าเหรียญ
+BINANCE_FUTURES_VOLATILITY_MIN_MULT = 0.60         # ตัวคูณต่ำสุด (ลดขนาดไม้ลงได้มากสุด 40%)
+BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูงสุด (ขยายขนาดไม้ได้ไม่เกิน 35%)
+```
+- ชุดทดสอบความแม่นยำ: `tests/test_volatility_parity.py` (ผ่าน 6/6 ข้อ รวมทั้งระบบ 96/96 ข้อในเวลา 5.8 วินาที)
+

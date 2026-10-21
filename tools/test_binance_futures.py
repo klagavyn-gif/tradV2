@@ -294,8 +294,10 @@ def main():
             be_trigger = sample_candidate["entry_price"] + (order_mgr.breakeven_r * risk)
             ts_trigger = sample_candidate["entry_price"] + (order_mgr.trailing_r * risk)
             callback_pct = round(min(5.0, max(0.1, (order_mgr.trailing_dist_r * risk / sample_candidate["entry_price"]) * 100.0)), 1)
+            vol_status = f"{sizing['volatility_multiplier']}x (Active, SL: {sizing['stop_dist_pct']}%)" if sizing.get("volatility_parity_active") else "Disabled (1.0x)"
             print(f"   Target Notional: {notional} USDT (Margin: ~{sizing['final_margin']} USDT @ {order_mgr.leverage}x)")
             print(f"   Sizing Mode:     {sizing['sizing_mode']} (Multiplier: {sizing['multiplier']}x, Reason: {sizing['multiplier_reason']})")
+            print(f"   Vol Parity:      {vol_status}")
             print(f"   Order Quantity:  {qty} {f['baseAsset']}")
             print(f"   Initial SL:      {round_to_tick(sample_candidate['stop_loss'], f['tickSize'])}")
             print(f"   BE Trigger (+{order_mgr.breakeven_r}R): {round_to_tick(be_trigger, f['tickSize'])} (Move SL to Entry)")

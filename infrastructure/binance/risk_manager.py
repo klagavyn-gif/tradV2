@@ -44,6 +44,10 @@ class BinanceFuturesRiskManager:
         win_streak_scale_enable: bool = True,
         win_streak_scale_mult: float = 1.25,
         only_executed: Optional[bool] = None,
+        volatility_parity_enabled: Optional[bool] = None,
+        volatility_base_risk_pct: Optional[float] = None,
+        volatility_min_mult: Optional[float] = None,
+        volatility_max_mult: Optional[float] = None,
     ):
         self.state_file_path = state_file_path or os.path.join(
             ".data", "telegram_alerts", "risk_state.json"
@@ -66,6 +70,24 @@ class BinanceFuturesRiskManager:
                 self.only_executed = True
         else:
             self.only_executed = bool(only_executed)
+
+        if volatility_parity_enabled is None:
+            try:
+                import config
+                self.volatility_parity_enabled = bool(getattr(config, "BINANCE_FUTURES_VOLATILITY_PARITY_ENABLED", False))
+                self.volatility_base_risk_pct = float(getattr(config, "BINANCE_FUTURES_VOLATILITY_BASE_RISK_PCT", 1.80))
+                self.volatility_min_mult = float(getattr(config, "BINANCE_FUTURES_VOLATILITY_MIN_MULT", 0.60))
+                self.volatility_max_mult = float(getattr(config, "BINANCE_FUTURES_VOLATILITY_MAX_MULT", 1.35))
+            except Exception:
+                self.volatility_parity_enabled = False
+                self.volatility_base_risk_pct = 1.80
+                self.volatility_min_mult = 0.60
+                self.volatility_max_mult = 1.35
+        else:
+            self.volatility_parity_enabled = bool(volatility_parity_enabled)
+            self.volatility_base_risk_pct = float(volatility_base_risk_pct if volatility_base_risk_pct is not None else 1.80)
+            self.volatility_min_mult = float(volatility_min_mult if volatility_min_mult is not None else 0.60)
+            self.volatility_max_mult = float(volatility_max_mult if volatility_max_mult is not None else 1.35)
 
     def load_state(self) -> Dict[str, Any]:
         """Load persistent risk state from disk or return clean initial state."""
@@ -484,7 +506,8 @@ class BinanceFuturesRiskManager:
         fallback_notional: float = 400.0,
     ) -> Dict[str, Any]:
         """
-        Calculate adaptive notional and margin size with streak throttling and equity scaling.
+        Calculate adaptive notional and margin size with streak throttling, equity scaling,
+        and bounded volatility parity (Equal Dollar Risk contribution).
         """
         state = self.load_state()
         loss_streak = state.get("consecutive_losses", 0)
@@ -514,9 +537,33 @@ class BinanceFuturesRiskManager:
                 multiplier = self.win_streak_scale_mult
                 multiplier_reason = f"win_streak_scale_{win_streak}"
 
-        calculated_notional = base_notional * multiplier
+        # 3. Bounded Volatility Parity (Equal Dollar Risk Sizing)
+        vol_multiplier = 1.0
+        stop_dist_pct = None
+        vol_parity_active = False
 
-        # 3. Min/Max Clamping
+        if self.volatility_parity_enabled and isinstance(candidate, dict):
+            entry_p = float(candidate.get("entry_price") or 0.0)
+            sl_p = float(candidate.get("stop_loss") or 0.0)
+            raw_risk = candidate.get("risk_pct")
+
+            if raw_risk is not None:
+                try:
+                    stop_dist_pct = float(raw_risk)
+                except Exception:
+                    stop_dist_pct = None
+
+            if (stop_dist_pct is None or stop_dist_pct <= 0.0) and entry_p > 0.0 and sl_p > 0.0:
+                stop_dist_pct = abs(entry_p - sl_p) / entry_p * 100.0
+
+            if stop_dist_pct is not None and stop_dist_pct > 0.0:
+                raw_vol_mult = self.volatility_base_risk_pct / stop_dist_pct
+                vol_multiplier = max(self.volatility_min_mult, min(self.volatility_max_mult, raw_vol_mult))
+                vol_parity_active = True
+
+        calculated_notional = base_notional * multiplier * vol_multiplier
+
+        # 4. Min/Max Clamping
         final_notional = max(self.min_notional_usdt, min(self.max_notional_usdt, calculated_notional))
         final_margin = final_notional / max(1, leverage)
 
@@ -526,6 +573,10 @@ class BinanceFuturesRiskManager:
             "base_notional": round(base_notional, 2),
             "multiplier": multiplier,
             "multiplier_reason": multiplier_reason,
+            "volatility_multiplier": round(vol_multiplier, 3),
+            "volatility_parity_active": vol_parity_active,
+            "stop_dist_pct": round(stop_dist_pct, 3) if stop_dist_pct is not None else None,
+            "volatility_base_risk_pct": self.volatility_base_risk_pct if vol_parity_active else None,
             "sizing_mode": sizing_mode,
             "loss_streak": loss_streak,
             "win_streak": win_streak,

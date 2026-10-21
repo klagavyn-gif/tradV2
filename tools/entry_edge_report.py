@@ -13,6 +13,11 @@ from urllib.parse import urlencode
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from domain.analysis.statistical_validator import run_statistical_validation
+
 DEFAULT_OUTCOMES_PATH = PROJECT_ROOT / ".data" / "telegram_alerts" / "realized_outcomes.json"
 DEFAULT_MARKDOWN_PATH = PROJECT_ROOT / ".data" / "telegram_alerts" / "entry_edge_report.md"
 DEFAULT_JSON_PATH = PROJECT_ROOT / ".data" / "telegram_alerts" / "entry_edge_report.json"
@@ -334,8 +339,55 @@ def _render_markdown(payload):
             _fmt(overall.get("net_avg_pnl_pct"), 2, "%"),
         ),
         "",
-        "## Exit Reasons",
     ]
+    stat = payload.get("statistical_validation") or {}
+    if stat.get("status") == "COMPLETED":
+        moments = stat.get("moments") or {}
+        sharpe = stat.get("sharpe_tests") or {}
+        perm = stat.get("permutation_test") or {}
+        dd = stat.get("drawdown_stress_test") or {}
+        lines.extend([
+            "## Statistical Validation (Anti-Overfitting & DSR)",
+            "- verdict: **{}**".format(stat.get("overall_verdict")),
+            "- rationale: {}".format(stat.get("verdict_reason")),
+            "- moments: mean_ret={} | stdev={} | skewness={} | kurtosis={}".format(
+                _fmt(moments.get("mean_net_return_pct"), 2, "%"),
+                _fmt(moments.get("stdev_net_return_pct"), 2, "%"),
+                _fmt(moments.get("skewness")),
+                _fmt(moments.get("kurtosis")),
+            ),
+            "- probabilistic_sharpe_ratio (PSR vs 0): {} (observed SR={})".format(
+                _fmt(sharpe.get("psr_vs_zero"), 4),
+                _fmt(sharpe.get("observed_sr"), 4),
+            ),
+            "- deflated_sharpe_ratio (DSR penalized for {} trials): {} (hurdle SR={}, pass={})".format(
+                stat.get("n_trials_penalized"),
+                _fmt(sharpe.get("deflated_sharpe_ratio"), 4),
+                _fmt(sharpe.get("sr_hurdle"), 4),
+                sharpe.get("dsr_passed_95"),
+            ),
+            "- monte_carlo_permutation: p_value={} (significant_95={}, significant_99={})".format(
+                _fmt(perm.get("p_value"), 4),
+                perm.get("is_significant_95"),
+                perm.get("is_significant_99"),
+            ),
+            "- monte_carlo_drawdown ({} sims): historical_dd={} | median_dd={} | 95%_VaR_dd={} | 99%_VaR_dd={} | worst_sim_dd={}".format(
+                perm.get("simulations_count") or 5000,
+                _fmt(dd.get("historical_max_dd_pct"), 2, "%"),
+                _fmt(dd.get("median_max_dd_pct"), 2, "%"),
+                _fmt(dd.get("var_95_max_dd_pct"), 2, "%"),
+                _fmt(dd.get("var_99_max_dd_pct"), 2, "%"),
+                _fmt(dd.get("worst_simulated_dd_pct"), 2, "%"),
+            ),
+            "",
+        ])
+    elif stat.get("status") == "INSUFFICIENT_SAMPLE":
+        lines.extend([
+            "## Statistical Validation (Anti-Overfitting & DSR)",
+            "- verdict: **{}** ({})".format(stat.get("overall_verdict"), stat.get("verdict_reason")),
+            "",
+        ])
+    lines.append("## Exit Reasons")
     exit_reasons = payload.get("exit_reasons") or {}
     if exit_reasons:
         for name, count in exit_reasons.items():
@@ -416,6 +468,19 @@ def _telegram_summary(payload):
             _fmt(benchmark.get("btc_buyhold_pct"), 1, "%"),
             _fmt(benchmark.get("basket_buyhold_pct"), 1, "%"),
         ))
+    stat = payload.get("statistical_validation") or {}
+    if stat.get("status") == "COMPLETED":
+        sharpe = stat.get("sharpe_tests") or {}
+        perm = stat.get("permutation_test") or {}
+        dd = stat.get("drawdown_stress_test") or {}
+        lines.append("🛡️ <b>Stat Validation</b>: DSR {} (p={}) | 99% VaR DD {} [{}]".format(
+            _fmt(sharpe.get("deflated_sharpe_ratio"), 2),
+            _fmt(perm.get("p_value"), 3),
+            _fmt(dd.get("var_99_max_dd_pct"), 1, "%"),
+            stat.get("overall_verdict"),
+        ))
+    elif stat.get("status") == "INSUFFICIENT_SAMPLE":
+        lines.append("🛡️ <b>Stat Validation</b>: Insufficient sample (need >= 5)")
     by_strategy = payload.get("by_strategy") or []
     if by_strategy:
         lines.append("by strategy:")
@@ -462,6 +527,8 @@ def build_parser():
     parser.add_argument("--since", default="", help="Only include alerts on/after this date (YYYY-MM-DD)")
     parser.add_argument("--cost-bps", type=float, default=30.0, help="Round-trip cost in basis points")
     parser.add_argument("--target-settled", type=int, default=100, help="Settled entry sample target")
+    parser.add_argument("--monte-carlo-sims", type=int, default=5000, help="Number of Monte Carlo simulations")
+    parser.add_argument("--n-trials", type=int, default=0, help="Number of candidate trials for DSR penalty (0 = auto)")
     parser.add_argument("--notify-telegram", action="store_true", help="Send the summary to Telegram")
     parser.add_argument("--output-path", default=str(DEFAULT_MARKDOWN_PATH))
     parser.add_argument("--json-output-path", default=str(DEFAULT_JSON_PATH))
@@ -500,6 +567,22 @@ def main(argv=None):
             benchmark = _benchmark(min(start_ts), max(end_ts))
         except Exception as exc:
             benchmark = {"available": False, "error": str(exc)}
+    by_strategy = _group_stats(settled, lambda row: str(row.get("strategy") or "UNKNOWN").upper(), cost_pct)
+    by_signal = _group_stats(settled, lambda row: str(row.get("signal") or "UNKNOWN").upper(), cost_pct)
+    by_symbol = _group_stats(settled, lambda row: str(row.get("symbol") or "UNKNOWN").upper(), cost_pct)
+    by_month = _group_stats(
+        settled,
+        lambda row: (_parse_timestamp(row.get("timestamp")) or datetime.min).strftime("%Y-%m"),
+        cost_pct,
+    )
+
+    n_trials = int(args.n_trials) if args.n_trials and args.n_trials > 0 else max(1, len(by_symbol) or 11)
+    stat_validation = run_statistical_validation(
+        settled,
+        n_trials=n_trials,
+        cost_bps=float(args.cost_bps),
+        n_simulations=int(args.monte_carlo_sims),
+    )
 
     report = {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -510,6 +593,8 @@ def main(argv=None):
             "since": str(args.since or "").strip() or None,
             "cost_bps": float(args.cost_bps),
             "target_settled": target,
+            "monte_carlo_sims": int(args.monte_carlo_sims),
+            "n_trials": n_trials,
         },
         "source_window_days": (payload or {}).get("window_days"),
         "entry_rows": len(filtered),
@@ -520,16 +605,13 @@ def main(argv=None):
             "reached_target": bool(overall.get("settled") or 0) >= target,
         },
         "overall": overall,
+        "statistical_validation": stat_validation,
         "benchmark": benchmark,
         "exit_reasons": _exit_reason_counts(settled),
-        "by_strategy": _group_stats(settled, lambda row: str(row.get("strategy") or "UNKNOWN").upper(), cost_pct),
-        "by_signal": _group_stats(settled, lambda row: str(row.get("signal") or "UNKNOWN").upper(), cost_pct),
-        "by_symbol": _group_stats(settled, lambda row: str(row.get("symbol") or "UNKNOWN").upper(), cost_pct),
-        "by_month": _group_stats(
-            settled,
-            lambda row: (_parse_timestamp(row.get("timestamp")) or datetime.min).strftime("%Y-%m"),
-            cost_pct,
-        ),
+        "by_strategy": by_strategy,
+        "by_signal": by_signal,
+        "by_symbol": by_symbol,
+        "by_month": by_month,
     }
 
     markdown = _render_markdown(report)

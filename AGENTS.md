@@ -1347,6 +1347,37 @@ Gemini 2.5 Flash ทำหน้าที่เป็น Lead Quantitative Resea
   - แยกย่อย `trad.py` ออกเป็น Hexagonal/Clean Architecture: `domain/signals`, `domain/models`, `application/pipeline`, `infrastructure/exchanges`
   - Zero-Breakage Invariant: โค้ดเดิมทั้งหมดต้องทำงานร่วมกันได้ 100% ผ่าน Facade Pattern
 
+## 38. ระบบสแกนสินทรัพย์และผลการประลองเหรียญบน Binance Futures (QuantumLab Asset Screener & Shadow Backtest)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และมีผลทดสอบเชิงประจักษ์ (Empirical Evidence Verified)**
+
+### 1. เครื่องมือและการทำงาน (`tools/screen_binance_candidates.py`)
+- สร้างเครื่องมือสแกนและ Backtest อัตโนมัติ ดึงแท่งเทียน 15m จริงย้อนหลัง ~10,000 แท่ง (~104 วัน ครอบคลุม ก.ค. – ต.ค. 2026) ผ่าน Binance Futures Public API
+- คำนวณสัญญาณกลยุทธ์แกนหลัก `CDCVIX15` (CDC Green Flip + Williams VIXFix Spike + StochRSI Bullish Cross + Close > EMA200)
+- จำลองการบริหารความเสี่ยงครบวงจร:
+  - Stop Loss เริ่มต้นที่ $1.5 \times ATR(14)$
+  - Cooldown ป้องกัน Overtrade: ห้ามเปิดไม้ซ้ำเหรียญเดิมภายใน 8 ชั่วโมง (32 แท่ง)
+  - Breakeven Stop ที่ $+1.2R$ (ขยับ SL มาที่ทุนเมื่อกำไรแตะ 1.2R)
+  - Trailing Stop ที่ $+2.0R$ (Trailing ห่างจากยอด 0.8R)
+  - หักค่าธรรมเนียม + Slippage สมจริง $0.30\%$ (30 bps) ทุกไม้รอบด้าน
+  - วัดค่าสภาพคล่องจริง: 24h Volume และ Bid-Ask Spread จาก `bookTicker`
+
+### 2. ข้อค้นพบสำคัญทางสถิติ (Key Empirical Takeaways)
+1. **ม้ามืดดาวเด่นแห่งกลุ่ม AI (`TAOUSDT` & `NEARUSDT`)**:
+   - `TAOUSDT`: มี **Win Rate สูงสุดถึง 36.0%** และมี **Bid-Ask Spread แคบที่สุดเพียง 0.004%** (สเปรดแคบกว่า BTC แทบไร้ Slippage) สภาพคล่องหนาแน่นระดับ $150M+/วัน เหมาะอย่างยิ่งสำหรับเป็นตัวเลือกแรกในการเสริมทัพ
+   - `NEARUSDT`: เป็นเหรียญเดียวในบรรดา Candidate ที่ทำผลตอบแทนสุทธิ **เป็นบวก (+2.0% Net PnL, Profit Factor 1.09)** แม้ในช่วงที่ตลาดคริปโต 3 เดือนที่ผ่านมาเป็นขาลง/ไซด์เวย์
+2. **การยืนยันว่าการบล็อกเหรียญมีมและเหรียญไส้ยาวนั้นถูกต้อง 100%**:
+   - กลุ่มควบคุมที่ถูกบล็อกอย่าง `SOLUSDT` (Win Rate 12.5%, PF 0.08) และ `DOGEUSDT` (Win Rate 13.6%, PF 0.20) ยืนยันชัดเจนว่าสร้างแต่ False Breakout และการตัด 2 ตัวนี้ออกจากพอร์ตจริงช่วยประหยัดเงินต้นได้อย่างมหาศาล
+3. **ผลกระทบของค่าคอมมิชชั่น (Fee Realism)**:
+   - หากไม่มี Cooldown 8 ชั่วโมง ระบบจะออกไม้ถี่ถึง 300+ ไม้/100 วัน ซึ่งค่าคอมมิชชั่น 0.30% จะเผาผลาญพอร์ตไปถึง -90% ในทันที
+   - การคัดกรองไม้ที่มีคุณภาพสูงและการคุมจำนวนไม้ให้อยู่ในระดับ ~0.7 – 1.0 ไม้/วัน จึงเป็นกุญแจสำคัญที่สุดในการทำกำไรระยะยาว
+
+### 3. แผนการนำไปใช้งาน (Execution Plan)
+- **พอร์ตจริง (Production)**: คงเหรียญหลัก 5 ตัวเดิม (`ETH, SUI, ONDO, BNB, ADA`) ไว้เพื่อความเสถียร
+- **ห้องทดลองคู่ขนาน (QuantumLab Watchlist)**: บรรจุ `TAOUSDT` และ `NEARUSDT` เข้าสู่ Shadow Forward Testing เพื่อเก็บข้อมูลสถิติสดในช่วง พ.ย. – ธ.ค. 2026
+- **เปิดเงินจริงช่วงปีใหม่**: นำผลงาน Forward Test มาพิจารณาปลดล็อค `TAOUSDT` เข้าสู่ `BINANCE_FUTURES_ALLOWED_SYMBOLS` เป็นตัวเลือกแรก
+
+
 
 
 

@@ -101,6 +101,25 @@ def evaluate_quantum_expression(expression: str, df: pd.DataFrame) -> pd.Series:
     def sigmoid(s: pd.Series) -> pd.Series:
         return 1.0 / (1.0 + np.exp(-s.clip(-20, 20)))
 
+    def ts_rank(s: pd.Series, period: int = 20) -> pd.Series:
+        """Rolling percentile rank of current bar (0.0 to 1.0) within window (WorldQuant/Qlib primitive)."""
+        p = int(period)
+        if p <= 1:
+            return pd.Series(0.5, index=s.index)
+        return s.rolling(window=p, min_periods=1).apply(
+            lambda x: (np.sum(x[-1] >= x) - 1.0) / max(len(x) - 1, 1),
+            raw=True,
+        ).fillna(0.5)
+
+    def ts_corr(x: pd.Series, y: pd.Series, period: int = 20) -> pd.Series:
+        """Rolling Pearson correlation between two series."""
+        p = int(period)
+        return x.rolling(window=p, min_periods=max(3, p // 2)).corr(y).fillna(0.0)
+
+    def signed_power(s: pd.Series, exponent: float = 2.0) -> pd.Series:
+        """Sign-preserving non-linear magnitude transformation."""
+        return np.sign(s) * (np.abs(s) ** float(exponent))
+
     safe_env: Dict[str, Any] = {
         "__builtins__": {},
         "np": np,
@@ -122,6 +141,9 @@ def evaluate_quantum_expression(expression: str, df: pd.DataFrame) -> pd.Series:
         "decay_linear": decay_linear,
         "clamp": clamp,
         "sigmoid": sigmoid,
+        "ts_rank": ts_rank,
+        "ts_corr": ts_corr,
+        "signed_power": signed_power,
     }
 
     # Inject DataFrame columns
@@ -206,6 +228,16 @@ def enrich_quantum_features(
     direction_10 = (close - close.shift(10).bfill()).abs()
     volatility_10 = (close - close.shift(1).bfill()).abs().rolling(10, min_periods=1).sum()
     out["efficiency_ratio"] = direction_10 / (volatility_10 + 1e-9)
+
+    # 5b. Institutional Price-Volume & VWAP Microstructure (Qlib / WorldQuant Style)
+    ret1 = close.pct_change(1).fillna(0.0)
+    out["pv_correlation"] = ret1.rolling(14, min_periods=3).corr(volume).fillna(0.0)
+
+    typical_price = (high + low + close) / 3.0
+    vol_sum20 = volume.rolling(20, min_periods=1).sum()
+    pv_sum20 = (typical_price * volume).rolling(20, min_periods=1).sum()
+    vwap20 = pv_sum20 / (vol_sum20 + 1e-9)
+    out["vwap_deviation"] = ((close - vwap20) / (atr14 + 1e-9)).fillna(0.0)
 
     # 6. Intermarket Cross-Asset Ratios (Synthetic pairs)
     cross_dfs = cross_dfs or {}

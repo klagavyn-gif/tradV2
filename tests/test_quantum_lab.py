@@ -72,7 +72,8 @@ class TestQuantumLab(unittest.TestCase):
         expected_cols = [
             "body", "upper_wick", "lower_wick", "atr14", "atr_pct",
             "vol_skew", "wick_absorption", "bb_width", "fractal_pinch",
-            "kinetic_energy", "efficiency_ratio", "paxg_btc_ratio", "paxg_divergence"
+            "kinetic_energy", "efficiency_ratio", "paxg_btc_ratio", "paxg_divergence",
+            "pv_correlation", "vwap_deviation"
         ]
         for col in expected_cols:
             self.assertIn(col, df_rich.columns, f"Missing feature: {col}")
@@ -84,11 +85,17 @@ class TestQuantumLab(unittest.TestCase):
         """Verify safe execution of mathematical expressions and rejection of dangerous code."""
         df = enrich_quantum_features(create_mock_candles(100))
 
-        # 1. Valid radical expression
-        valid_expr = "(wick_absorption > 1.2) & (kinetic_energy > 0.5) & (efficiency_ratio > 0.3)"
+        # 1. Valid radical expression with WorldQuant/Qlib primitives
+        valid_expr = "(wick_absorption > 1.2) & (kinetic_energy > 0.5) & (ts_rank(close, 20) > 0.4) & (pv_correlation > 0.0)"
         res = evaluate_quantum_expression(valid_expr, df)
         self.assertIsInstance(res, pd.Series)
         self.assertEqual(len(res), len(df))
+
+        # 1b. Test signed_power and ts_corr
+        power_expr = "signed_power(ts_corr(close, volume, 14), 2.0)"
+        res_power = evaluate_quantum_expression(power_expr, df)
+        self.assertIsInstance(res_power, pd.Series)
+        self.assertEqual(len(res_power), len(df))
 
         # 2. Forbidden keyword: import
         with self.assertRaises(ValueError):

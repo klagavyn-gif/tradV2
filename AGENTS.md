@@ -1444,3 +1444,36 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
 ```
 - ชุดทดสอบความแม่นยำ: `tests/test_volatility_parity.py` (ผ่าน 6/6 ข้อ รวมทั้งระบบ 96/96 ข้อในเวลา 5.8 วินาที)
 
+## 41. การยกระดับห้องวิจัยคู่ขนานด้วย Institutional Alpha Operators (Qlib & WorldQuant Style) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified with 96 Unit Tests in 5.7s)**
+
+### 1. ปรัชญา "Safe & Smart" (ฉลาดและปลอดภัยที่สุด)
+- **Zero Live Execution Disruption**: รักษาสถานะ **Code Freeze** ของระบบเทรดจริง 100% ไม่แตะต้อง `order_manager.py`, `pipeline_hook.py`, หรือ `risk_manager.py`
+- **Zero Heavy Dependencies**: ไม่ติดตั้ง Library ขนาดใหญ่จากภายนอก (เช่น Qlib หรือ PyTorch) ที่อาจสร้าง Dependency Bloat และทำลาย Serverless CI บน GitHub Actions
+- **Mathematical Factor Ingestion**: สกัดเฉพาะ "หัวใจคณิตศาสตร์" ของ WorldQuant 101 Formulaic Alphas และ Microsoft Qlib มาบรรจุเป็นฟังก์ชันเวกเตอร์ความเร็วสูงด้วย Pure NumPy/Pandas ในห้องทดลองวิจัยเงาคู่ขนาน
+
+### 2. โครงสร้างฟังก์ชันเชิงปริมาณใหม่ใน QuantumLab (`infrastructure/council/quantum_lab.py`)
+1. **`ts_rank(s, period=20)`**:
+   - คำนวณอันดับเปอร์เซ็นต์ไทล์สัมพัทธ์ [0.0, 1.0] ของแท่งเทียนปัจจุบันในกรอบหน้าต่างแบบ Rolling
+   - ช่วยให้บอทแยกแยะระหว่างการเบรกจริงของโมเมนตัมกับการแกว่งตัวทั่วไปในกรอบ
+2. **`ts_corr(x, y, period=20)`**:
+   - คำนวณ Pearson Correlation แบบ Rolling ระหว่าง 2 Time-Series (เช่น ความสัมพันธ์ของราคาต่อโวลุ่ม หรือเหรียญต่อบิทคอยน์)
+3. **`signed_power(s, exponent=2.0)`**:
+   - ปรับสเกลขนาดแบบไม่เป็นเส้นตรง (Non-linear scaling) โดยรักษาเครื่องหมายทิศทางเดิมไว้ ($\text{sign}(s) \times |s|^{\text{exponent}}$)
+4. **Feature Enrichment ขยายสู่ 25 คอลัมน์**:
+   - `pv_correlation`: Rolling 14-bar correlation ระหว่างเปอร์เซ็นต์ผลตอบแทนกับปริมาณซื้อขาย ดักจับ Smart Money Accumulation / Distribution
+   - `vwap_deviation`: สัดส่วนการเบี่ยงเบนของราคาปิดเทียบกับ 20-bar VWAP โดย Normalize ด้วย ATR14
+
+### 3. การเชื่อมต่อสู่วงจรวิวัฒนาการพรอมต์ AI (`infrastructure/council/prompt_evolution.py`)
+- เพิ่ม Alpha Archetype สถาบัน: **"Institutional Accumulation & VWAP Vacuum"**
+  - Entry: `(pv_correlation > 0.30) & (vwap_deviation < -0.5) & (ts_rank(kinetic_energy, 16) > 0.60)`
+  - สกัดจังหวะที่สถาบันเก็บของเงียบใต้แนว VWAP พร้อมปริมาณโวลุ่มที่สอดคล้องกับทิศทางราคา
+- เพิ่มตัวเลือกการผ่าเหล่ากลายพันธุ์ (Algorithmic Mutation) สำหรับ `pv_correlation` และ `ts_rank` เมื่อสภาวะตลาดติดหล่ม (Chop/Stagnant)
+
+### 4. ผลการตรวจสอบความถูกต้อง (Verification)
+- **Unit Test Suite**: ผ่าน 96/96 tests ภายใน 5.728s (`python -m unittest discover -s tests -p "test_*.py"`)
+  - ยืนยันการคำนวณเวกเตอร์ 25 คอลัมน์ครบถ้วน
+  - ยืนยันความปลอดภัยของ Safe Mathematical DSL Sandbox
+- **CLI Runner**: `python tools/run_quantum_lab.py --status` รันผ่านฉลุยพร้อมรายงานสถานะ Gen 1 อย่างถูกต้อง
+

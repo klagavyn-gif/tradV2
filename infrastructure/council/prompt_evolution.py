@@ -59,6 +59,13 @@ SEED_HYPOTHESES_GEN1 = [
         "entry_expression": "(paxg_divergence < -0.8) & (vol_skew < -0.5) & (zscore(close, 20) < -1.2)",
         "exit_expression": "(paxg_divergence > 1.0) | (zscore(close, 20) > 1.8)",
     },
+    {
+        "factor_name": "Institutional Accumulation & VWAP Vacuum",
+        "direction": "BUY",
+        "hypothesis": "เข้าซื้อเมื่อราคาและโวลุ่มสัมพันธ์กันสูง (pv_correlation > 0.30) พร้อมราคาพักตัวต่ำกว่า VWAP (vwap_deviation < -0.5) และพลังงานจลน์ฟื้นตัว",
+        "entry_expression": "(pv_correlation > 0.30) & (vwap_deviation < -0.5) & (ts_rank(kinetic_energy, 16) > 0.60)",
+        "exit_expression": "(pv_correlation < -0.2) | (vwap_deviation > 1.2)",
+    },
 ]
 
 

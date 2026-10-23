@@ -11,6 +11,8 @@ __pycache__/
 !.data/telegram_alerts/realized_report.md
 !.data/telegram_alerts/risk_state.json
 !.data/telegram_alerts/binance_executed_orders.json
+!.data/telegram_alerts/entry_edge_report.json
+!.data/telegram_alerts/entry_edge_report.md
 
 .data/archive/*
 !.data/archive/v1_pre_oct2026/

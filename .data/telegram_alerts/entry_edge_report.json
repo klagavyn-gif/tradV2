@@ -1,0 +1,273 @@
+{
+  "generated_at": "2026-10-21 19:10:17",
+  "artifact_type": "entry_edge_report",
+  "request": {
+    "outcomes_path": "C:\\Users\\กวินท์\\AppData\\Local\\Temp\\tmpwhr3v147.json",
+    "days": 45.0,
+    "since": null,
+    "cost_bps": 30.0,
+    "target_settled": 100,
+    "monte_carlo_sims": 5000,
+    "n_trials": 2
+  },
+  "source_window_days": null,
+  "entry_rows": 25,
+  "sample_progress": {
+    "settled": 25,
+    "target": 100,
+    "progress_pct": 25.0,
+    "reached_target": false
+  },
+  "overall": {
+    "settled": 25,
+    "wins": 14,
+    "losses": 10,
+    "flats": 1,
+    "win_rate_pct": 56.00000000000001,
+    "win_rate_ci95_pct": [
+      37.06733186979878,
+      73.33436111893266
+    ],
+    "avg_rr": null,
+    "median_rr": null,
+    "avg_rr_ci95": [
+      null,
+      null
+    ],
+    "avg_pnl_pct": 1.028,
+    "avg_risk_pct": 1.5,
+    "net_win_rate_pct": 56.00000000000001,
+    "net_win_rate_ci95_pct": [
+      37.06733186979878,
+      73.33436111893266
+    ],
+    "net_avg_rr": 0.4853333333333334,
+    "net_avg_rr_ci95": [
+      -0.040000000000000015,
+      1.0133333333333332
+    ],
+    "net_avg_pnl_pct": 0.728
+  },
+  "statistical_validation": {
+    "status": "COMPLETED",
+    "sample_size": 25,
+    "n_trials_penalized": 2,
+    "moments": {
+      "mean_net_return_pct": 0.728,
+      "stdev_net_return_pct": 2.11,
+      "skewness": 0.168,
+      "kurtosis": 1.624,
+      "per_trade_sharpe": 0.3451
+    },
+    "sharpe_tests": {
+      "observed_sr": 0.3451,
+      "psr_vs_zero": 0.9577,
+      "sr_hurdle": 0.1061,
+      "deflated_sharpe_ratio": 0.8839,
+      "dsr_passed_95": false
+    },
+    "permutation_test": {
+      "sample_size": 25,
+      "observed_mean": 0.728,
+      "p_value": 0.04299,
+      "is_significant_95": true,
+      "is_significant_99": false,
+      "simulations_count": 5000
+    },
+    "drawdown_stress_test": {
+      "historical_max_dd_pct": 2.09,
+      "median_max_dd_pct": 4.82,
+      "var_95_max_dd_pct": 7.77,
+      "var_99_max_dd_pct": 9.34,
+      "worst_simulated_dd_pct": 12.98
+    },
+    "overall_verdict": "PROVISIONAL_PASS_WATCH",
+    "verdict_reason": "Directional edge is significant (p=0.0430), but DSR (0.884) is under 0.95 hurdle due to testing 2 assets. Accumulate more sample."
+  },
+  "benchmark": {
+    "start": "2026-10-01",
+    "end": "2026-10-20",
+    "available": true,
+    "btc_buyhold_pct": -1.76,
+    "basket_buyhold_pct": -6.7,
+    "by_symbol": {
+      "BTC-USD": -1.76,
+      "ETH-USD": -8.22,
+      "DOGE-USD": -11.9,
+      "ADA-USD": -8.35,
+      "XRP-USD": -10.03,
+      "BNB-USD": -3.46,
+      "SOL-USD": -10.21,
+      "TRX-USD": -0.99,
+      "PAXG-USD": -0.73,
+      "ONDO-USD": -7.96,
+      "SUI-USD": -10.1
+    }
+  },
+  "exit_reasons": {
+    "unknown": 25
+  },
+  "by_strategy": [
+    {
+      "settled": 25,
+      "wins": 14,
+      "losses": 10,
+      "flats": 1,
+      "win_rate_pct": 56.00000000000001,
+      "win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "avg_rr": null,
+      "median_rr": null,
+      "avg_rr_ci95": [
+        null,
+        null
+      ],
+      "avg_pnl_pct": 1.028,
+      "avg_risk_pct": 1.5,
+      "net_win_rate_pct": 56.00000000000001,
+      "net_win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "net_avg_rr": 0.4853333333333334,
+      "net_avg_rr_ci95": [
+        -0.040000000000000015,
+        1.0133333333333332
+      ],
+      "net_avg_pnl_pct": 0.728,
+      "name": "CDCVIX15"
+    }
+  ],
+  "by_signal": [
+    {
+      "settled": 25,
+      "wins": 14,
+      "losses": 10,
+      "flats": 1,
+      "win_rate_pct": 56.00000000000001,
+      "win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "avg_rr": null,
+      "median_rr": null,
+      "avg_rr_ci95": [
+        null,
+        null
+      ],
+      "avg_pnl_pct": 1.028,
+      "avg_risk_pct": 1.5,
+      "net_win_rate_pct": 56.00000000000001,
+      "net_win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "net_avg_rr": 0.4853333333333334,
+      "net_avg_rr_ci95": [
+        -0.040000000000000015,
+        1.0133333333333332
+      ],
+      "net_avg_pnl_pct": 0.728,
+      "name": "BUY"
+    }
+  ],
+  "by_symbol": [
+    {
+      "settled": 13,
+      "wins": 7,
+      "losses": 6,
+      "flats": 0,
+      "win_rate_pct": 53.84615384615385,
+      "win_rate_ci95_pct": [
+        29.143795714506005,
+        76.79393219046169
+      ],
+      "avg_rr": null,
+      "median_rr": null,
+      "avg_rr_ci95": [
+        null,
+        null
+      ],
+      "avg_pnl_pct": 0.9307692307692308,
+      "avg_risk_pct": 1.5,
+      "net_win_rate_pct": 53.84615384615385,
+      "net_win_rate_ci95_pct": [
+        29.143795714506005,
+        76.79393219046169
+      ],
+      "net_avg_rr": 0.4205128205128205,
+      "net_avg_rr_ci95": [
+        -0.33333333333333326,
+        1.1589743589743593
+      ],
+      "net_avg_pnl_pct": 0.6307692307692309,
+      "name": "SUI-USD"
+    },
+    {
+      "settled": 12,
+      "wins": 7,
+      "losses": 4,
+      "flats": 1,
+      "win_rate_pct": 58.333333333333336,
+      "win_rate_ci95_pct": [
+        31.951131254954973,
+        80.67396863412435
+      ],
+      "avg_rr": null,
+      "median_rr": null,
+      "avg_rr_ci95": [
+        null,
+        null
+      ],
+      "avg_pnl_pct": 1.1333333333333333,
+      "avg_risk_pct": 1.5,
+      "net_win_rate_pct": 58.333333333333336,
+      "net_win_rate_ci95_pct": [
+        31.951131254954973,
+        80.67396863412435
+      ],
+      "net_avg_rr": 0.5555555555555556,
+      "net_avg_rr_ci95": [
+        -0.15555555555555556,
+        1.3222222222222222
+      ],
+      "net_avg_pnl_pct": 0.8333333333333331,
+      "name": "ONDO-USD"
+    }
+  ],
+  "by_month": [
+    {
+      "settled": 25,
+      "wins": 14,
+      "losses": 10,
+      "flats": 1,
+      "win_rate_pct": 56.00000000000001,
+      "win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "avg_rr": null,
+      "median_rr": null,
+      "avg_rr_ci95": [
+        null,
+        null
+      ],
+      "avg_pnl_pct": 1.028,
+      "avg_risk_pct": 1.5,
+      "net_win_rate_pct": 56.00000000000001,
+      "net_win_rate_ci95_pct": [
+        37.06733186979878,
+        73.33436111893266
+      ],
+      "net_avg_rr": 0.4853333333333334,
+      "net_avg_rr_ci95": [
+        -0.040000000000000015,
+        1.0133333333333332
+      ],
+      "net_avg_pnl_pct": 0.728,
+      "name": "2026-10"
+    }
+  ]
+}

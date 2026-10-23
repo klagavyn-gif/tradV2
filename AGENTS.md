@@ -1614,4 +1614,39 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
   - `tests/test_symbolic_mutator.py`: ผ่านครบ 5/5 tests (0.428s)
   - `tests/test_alpha_stress_gauntlet.py`: ผ่านครบ 3/3 tests (0.129s)
 
+## 47. ระบบสำรวจความรู้โลกและสังเคราะห์พรอมต์วิจัยรายเดือน (Global Horizon Scout & Dynamic Meta-Prompt Engine) (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 109/109 Tests Pass (Verified Baseline)**
+
+### 1. วัตถุประสงค์และกลไกแก้กับดัก Echo Chamber
+- **ปัญหาเดิม**: ระบบ AI ที่วิวัฒนาการตัวเองภายในห้องปิด (Self-Reflective Loop) มีความเสี่ยงที่จะติดหล่ม Local Optima หรือวนซ้ำอยู่กับองค์ความรู้เดิมที่ระบบมี (เช่น วนเวียนอยู่กับ Moving Average, RSI หรือ Carter Squeeze)
+- **ความต้องการของผู้ใช้**: ให้ระบบออกไปสำรวจงานวิจัยใหม่ๆ ทั่วโลก (arXiv, GitHub, Hugging Face, Quant Blogs) เดือนละ 1 ครั้ง โดยให้ระบบ **สร้างและวิวัฒนาการ Search Meta-Prompt ขึ้นมาใหม่ทุกเดือน** ตามปัญหาและจุดผิดพลาดจริงของระบบ เพื่อประหยัด Token และไม่ติดกับดักวนซ้ำ
+
+### 2. โครงสร้างระบบ (`infrastructure/council/global_horizon_scout.py`)
+1. **Performance Audit & Failure Mode Extraction**:
+   - วิเคราะห์ผลลัพธ์การเทรดจริงรอบ 30 วันล่าสุดจาก `realized_outcomes.json` หรือ Simulated Paper Tracker
+   - จำแนก Error Taxonomy หลัก (`FALSE_BREAKOUT_WHIPSAW`, `MOMENTUM_STAGNATION`, `GENERAL_MARKET_CHOP`)
+2. **Dynamic Meta-Prompt Synthesizer**:
+   - ปรับแต่งคำค้นหาและหัวข้อวิจัยตาม Error Mode ที่พบล่าสุดโดยอัตโนมัติ
+   - **Core Knowledge Blacklist**: ป้องกันการค้นคว้าซ้ำซ้อนอย่างเด็ดขาด โดยปฏิเสธเนื้อหาที่เป็นพื้นฐาน (เช่น Moving Average ทั่วไป, RSI พื้นฐาน, Carter Squeeze เดิม, SMC ทั่วไป, Qlib base)
+3. **Structured Discovery & Curated Fallback**:
+   - รองรับ Gemini 2.5 Flash API (Structured JSON output)
+   - หากไม่มี API Key หรืออยู่ใน Offline Testing จะสลับใช้ **Curated Institutional Scout** คัดกรองงานวิจัยระดับโลกที่พิสูจน์แล้ว (เช่น EvolveTrade 2026, Salesforce Moirai 2.0, Microsoft RD-Agent)
+4. **Knowledge Compendium Persistence**:
+   - บันทึกรายงานสรุปและสูตร DSL เวกเตอร์ตัวอย่างลงในคลังความรู้ถาวร: `.agents/knowledge/monthly_digests/YYYY-MM_HORIZON_DIGEST.md`
+
+### 3. การทำงานอัตโนมัติและเครื่องมือรัน
+- **GitHub Actions Workflow**: `.github/workflows/global-horizon-monthly.yml`
+  - ทำงานอัตโนมัติทุกวันที่ 1 ของเดือน เวลา 07:00 น. (UTC+7) (`cron: '0 0 1 * *'`)
+  - รันสำรวจ สังเคราะห์พรอมต์ใหม่ ดึงงานวิจัย และทำ Git Commit & Push กลับเข้าคลังความรู้ `.agents/knowledge/monthly_digests/` อัตโนมัติ
+- **CLI Runner**: `python tools/run_global_horizon_scout.py`
+  - รองรับ `--run-cycle`, `--dry-run`, `--notify-telegram`, และ `--status`
+  - รองรับ Windows Console Encoding (`cp874`) โดยใช้ Safe Output ไม่เกิดปัญหาแครช
+
+### 4. ผลการตรวจสอบความถูกต้อง (Verification)
+- **Unit Test Suite**: ผ่านครบ **109/109 tests** ภายใน 6.387s (`python -m unittest discover -s tests -p "test_*.py"`)
+  - `tests/test_global_horizon_scout.py`: ผ่านครบ 5/5 tests (0.029s) ครอบคลุม audit, prompt evolution, curated fallback, markdown persistence และ cycle execution
+- **Cycle Execution**: รันจริงสร้าง `.agents/knowledge/monthly_digests/2026-10_HORIZON_DIGEST.md` สำเร็จสมบูรณ์
+
+
 

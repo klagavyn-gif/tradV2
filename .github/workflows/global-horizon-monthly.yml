@@ -1,0 +1,88 @@
+name: Council Global Horizon Scout Monthly
+
+on:
+  schedule:
+    # 00:00 UTC on the 1st of every month (07:00 AM Thai Time UTC+7)
+    - cron: '0 0 1 * *'
+  workflow_dispatch:
+    inputs:
+      month:
+        description: 'Specific month key to audit and discover (e.g. 2026-11)'
+        required: false
+        default: ''
+      notify_telegram:
+        description: 'Broadcast Monthly Horizon digest to Telegram'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: council-global-horizon-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  harvest_monthly_intelligence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_PROGRESS_BAR: "off"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install numpy pandas requests yfinance
+          fi
+
+      - name: Run Global Horizon Intelligence Harvester
+        run: |
+          ARGS="--run-cycle"
+          if [ "${{ github.event.inputs.notify_telegram || 'true' }}" = "true" ]; then
+            ARGS="$ARGS --notify-telegram"
+          fi
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            ARGS="$ARGS --month ${{ github.event.inputs.month }}"
+          fi
+          python tools/run_global_horizon_scout.py $ARGS
+
+      - name: Commit & Push Monthly Knowledge Digest
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .agents/knowledge/monthly_digests/
+          if git diff --staged --quiet; then
+            echo "No new monthly knowledge digests to commit."
+          else
+            git commit -m "chore(knowledge): update monthly global horizon intelligence digest [skip ci]"
+            git push origin HEAD:${{ github.ref }}
+          fi
+
+      - name: Upload Monthly Knowledge Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-horizon-knowledge-digests
+          path: .agents/knowledge/monthly_digests/**
+          if-no-files-found: ignore
+          retention-days: 90

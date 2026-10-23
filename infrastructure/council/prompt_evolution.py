@@ -66,6 +66,13 @@ SEED_HYPOTHESES_GEN1 = [
         "entry_expression": "(pv_correlation > 0.30) & (vwap_deviation < -0.5) & (ts_rank(kinetic_energy, 16) > 0.60)",
         "exit_expression": "(pv_correlation < -0.2) | (vwap_deviation > 1.2)",
     },
+    {
+        "factor_name": "Compressed Squeeze Spring Breakout",
+        "direction": "BUY",
+        "hypothesis": "เข้าซื้อเมื่อเกิดสภาวะ Volatility Squeeze อัดสปริงอย่างรุนแรง (squeeze_ratio < 0.95 หรือ squeeze_on == 1) และเริ่มระเบิดตัวพร้อมโมเมนตัมเร่งขึ้น (squeeze_momentum > 0.10) และพลังงานจลน์ฟื้นตัว",
+        "entry_expression": "(squeeze_ratio < 0.95) & (squeeze_momentum > 0.10) & (ts_rank(kinetic_energy, 14) > 0.60) & (rel_vol > 1.05)",
+        "exit_expression": "(squeeze_momentum < -0.10) | (ts_rank(close, 20) < 0.20)",
+    },
 ]
 
 
@@ -293,11 +300,11 @@ class PromptEvolutionEngine:
 
 [AVAILABLE DSL PRIMITIVES]
 - Candle morphology: body, upper_wick, lower_wick, atr14, atr_pct
-- Microstructure: vol_skew, wick_absorption, upper_absorption
-- Volatility: bb_width, fractal_pinch, efficiency_ratio, rel_vol
+- Microstructure & Flow: vol_skew, wick_absorption, upper_absorption, pv_correlation, vwap_deviation
+- Volatility & Compression: bb_width, fractal_pinch, efficiency_ratio, rel_vol, squeeze_ratio (BB/KC width ratio < 1.0 = squeeze), squeeze_on (1.0 = in squeeze, 0.0 = fired), squeeze_momentum
 - Physics: kinetic_energy (Volume * Price acceleration^2 with sign)
-- Intermarket ratios: paxg_btc_ratio, paxg_divergence, eth_btc_ratio, btc_mom_diff
-- Operators: ts_mean(s, p), ts_std(s, p), ts_max(s, p), ts_min(s, p), ts_lag(s, p), delta(s, p), zscore(s, p), decay_linear(s, p), clamp(s, min, max)
+- Intermarket ratios: paxg_btc_ratio, paxg_divergence, eth_btc_ratio, asset_btc_ratio, btc_mom_diff
+- Operators: ts_mean(s, p), ts_std(s, p), ts_max(s, p), ts_min(s, p), ts_lag(s, p), delta(s, p), zscore(s, p), decay_linear(s, p), clamp(s, min, max), ts_rank(s, p), ts_corr(x, y, p), signed_power(s, exp), ts_slope(s, p)
 
 [REQUIRED OUTPUT FORMAT: STRICT JSON]
 {{
@@ -412,6 +419,29 @@ class PromptEvolutionEngine:
                     "hypothesis": "เข้าซื้อจากจุดบีบอัดและล็อคกำไรทันทีเมื่อค่า Bollinger Band Width ขยายตัวเกินระดับวิกฤต",
                     "entry_expression": "(fractal_pinch < 0.80) & (delta(close, 3) > 1.0 * atr14)",
                     "exit_expression": "(bb_width > ts_mean(bb_width, 20) * 1.8) | (delta(close, 1) < -0.8 * atr14)",
+                },
+            ]
+
+        elif dom_failure == "CHOP_BLEED":
+            evolved_prompt = (
+                f"[Gen {generation} Pivot] สัปดาห์ก่อนหน้าขาดทุนสะสมจากภาวะตลาดไซด์เวย์ (Chop Bleed) "
+                f"มุ่งเน้นการใช้ Volatility Squeeze (BB/KC Squeeze) ดักจับจังหวะสปริงบีบตัวแคบ (squeeze_ratio < 0.95 หรือ squeeze_on == 1) "
+                f"และรอให้เกิดการคลายตัวระเบิดเทรนด์ (squeeze_momentum > 0) เพื่อไม่ให้โดนค่าฟีและ Whipsaw กัดกิน"
+            )
+            hypotheses = [
+                {
+                    "factor_name": f"G{generation} Compressed Squeeze Spring",
+                    "direction": "BUY",
+                    "hypothesis": "เข้าซื้อเฉพาะเมื่อเกิด Squeeze อัดสปริงอย่างรุนแรง (squeeze_ratio < 0.95) และเริ่มคลายตัวพร้อมโมเมนตัมเร่งขึ้น",
+                    "entry_expression": "(squeeze_ratio < 0.95) & (squeeze_momentum > 0.10) & (ts_rank(kinetic_energy, 14) > 0.60)",
+                    "exit_expression": "(squeeze_momentum < -0.10) | (delta(close, 2) < -1.0 * atr14)",
+                },
+                {
+                    "factor_name": f"G{generation} Squeeze Breakout Velocity",
+                    "direction": "BUY",
+                    "hypothesis": "จับจังหวะหลุดกรอบ Squeeze ด้วยวอลุ่มและโมเมนตัมเร่งตัว",
+                    "entry_expression": "(squeeze_on > 0.5) & (ts_rank(close, 20) > 0.70) & (rel_vol > 1.20)",
+                    "exit_expression": "(squeeze_on < 0.5) & (squeeze_momentum < 0.0)",
                 },
             ]
 

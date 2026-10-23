@@ -1,0 +1,70 @@
+{
+  "version": 1,
+  "created_at": "2026-10-19 14:32:33 UTC",
+  "current_generation": 1,
+  "generations": [
+    {
+      "generation": 1,
+      "evolved_at": "2026-10-19 14:32:33 UTC",
+      "synthesis_mode": "ALGORITHMIC_EVOLUTIONARY_MUTATOR",
+      "market_regime": "NORMAL",
+      "prompt_text": "[Gen 1 Radical Pivot] ผลลัพธ์ไซด์เวย์ไม่พัฒนา ทำการเปลี่ยนสมมติฐานแบบสุดโต่ง: สำรวจมิติอัตราส่วนข้ามสินทรัพย์ (ETH/BTC และ PAXG/BTC) เพื่อค้นหาจังหวะที่เหรียญเกิด Relative Valuation Dislocation ข้ามกระดาน",
+      "post_mortem_summary": {
+        "status": "EVALUATED",
+        "total_simulated_trades": 19,
+        "avg_profit_factor": 0.02,
+        "avg_net_expectancy_pct": -0.116,
+        "dominant_failure_mode": "UNKNOWN",
+        "failure_mode_breakdown": {
+          "GENERAL_NOISE": 1,
+          "UNKNOWN": 2
+        },
+        "best_factor": "Kinetic Asymmetric Wick Burst",
+        "worst_factor": "Fractal Pinch Intermarket Thrust",
+        "is_stagnant": true
+      },
+      "hypotheses": [
+        {
+          "factor_name": "G1 Extreme Intermarket Dislocation",
+          "direction": "BUY",
+          "hypothesis": "เข้าซื้อเมื่อเหรียญล้าหลังภาพรวมตลาดเกิน 2 Standard Deviation แต่แรงดูดซับไส้ล่างเริ่มทำงาน",
+          "entry_expression": "(zscore(close, 24) < -1.8) & (wick_absorption > 1.6) & (rel_vol > 1.2)",
+          "exit_expression": "(zscore(close, 24) > 0.5) | (upper_absorption > 2.0)"
+        },
+        {
+          "factor_name": "G1 Gold-Crypto Capitulation Vacuum",
+          "direction": "BUY",
+          "hypothesis": "เข้าซื้อช่วงที่ทองคำพุ่งแรงสุดขีดเทียบกับคริปโต (PAXG/BTC > 1.5 SD) ซึ่งเป็นสถิติจุดกลับตัวของตลาดใหญ่",
+          "entry_expression": "(paxg_divergence < -1.5) & (vol_skew < -0.7) & (efficiency_ratio > 0.35)",
+          "exit_expression": "(paxg_divergence > 0.5) | (delta(close, 2) < -1.0 * atr14)"
+        }
+      ],
+      "prior_cycle_evaluations": [
+        {
+          "factor_name": "Kinetic Asymmetric Wick Burst",
+          "pf": 0.05,
+          "exp": -0.348,
+          "win_rate": 5.3,
+          "trades": 19,
+          "primary_failure": "GENERAL_NOISE"
+        },
+        {
+          "factor_name": "Fractal Pinch Intermarket Thrust",
+          "pf": 0.0,
+          "exp": 0.0,
+          "win_rate": 0.0,
+          "trades": 0,
+          "primary_failure": null
+        },
+        {
+          "factor_name": "Safe-Haven Divergence Reversal",
+          "pf": 0.0,
+          "exp": 0.0,
+          "win_rate": 0.0,
+          "trades": 0,
+          "primary_failure": null
+        }
+      ]
+    }
+  ]
+}

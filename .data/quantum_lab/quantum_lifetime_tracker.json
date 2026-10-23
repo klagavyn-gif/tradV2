@@ -1,0 +1,65 @@
+{
+  "Kinetic Asymmetric Wick Burst": {
+    "factor_name": "Kinetic Asymmetric Wick Burst",
+    "hypothesis": "เข้าซื้อเมื่อเกิดการดูดซับสภาพคล่องฝั่งลึก (Wick Absorption > 1.5) พร้อมแรงเร่งจลน์ Kinetic Energy ระเบิดตัว",
+    "entry_expression": "(wick_absorption > 1.5) & (kinetic_energy > 1.8) & (rel_vol > 1.2)",
+    "exit_expression": "(upper_absorption > 2.0) | (kinetic_energy < -1.0)",
+    "direction": "BUY",
+    "consecutive_passing_weeks": 0,
+    "total_evaluations": 1,
+    "lifetime_trades": 19,
+    "lifetime_profit_factor": 0.05,
+    "lifetime_expectancy": -0.348,
+    "history": [
+      {
+        "date": "2026-10-19 14:32:33 UTC",
+        "pf": 0.05,
+        "exp": -0.348,
+        "win_rate": 5.3,
+        "trades": 19
+      }
+    ]
+  },
+  "Fractal Pinch Intermarket Thrust": {
+    "factor_name": "Fractal Pinch Intermarket Thrust",
+    "hypothesis": "เข้าซื้อจังหวะ Volatility บีบอัดตัวสุดขีด (Fractal Pinch < 0.8) ก่อนการขยายตัว โดยมีโมเมนตัมเหนือ BTC",
+    "entry_expression": "(fractal_pinch < 0.85) & (delta(close, 2) > 0) & (efficiency_ratio > 0.45) & (rel_vol > 1.1)",
+    "exit_expression": "(fractal_pinch > 2.2) | (delta(close, 3) < -1.5 * atr14)",
+    "direction": "BUY",
+    "consecutive_passing_weeks": 0,
+    "total_evaluations": 1,
+    "lifetime_trades": 0,
+    "lifetime_profit_factor": 0.0,
+    "lifetime_expectancy": 0.0,
+    "history": [
+      {
+        "date": "2026-10-19 14:32:33 UTC",
+        "pf": 0.0,
+        "exp": 0.0,
+        "win_rate": 0.0,
+        "trades": 0
+      }
+    ]
+  },
+  "Safe-Haven Divergence Reversal": {
+    "factor_name": "Safe-Haven Divergence Reversal",
+    "hypothesis": "เข้าซื้อคริปโตเมื่อเริ่มเกิดสัญญาณ Divergence กลับทิศกับทองคำ (PAXG/BTC เริ่มหักหัวลง) ยืนยันเงินไหลกลับเข้า Risk-on",
+    "entry_expression": "(paxg_divergence < -0.8) & (vol_skew < -0.5) & (zscore(close, 20) < -1.2)",
+    "exit_expression": "(paxg_divergence > 1.0) | (zscore(close, 20) > 1.8)",
+    "direction": "BUY",
+    "consecutive_passing_weeks": 0,
+    "total_evaluations": 1,
+    "lifetime_trades": 0,
+    "lifetime_profit_factor": 0.0,
+    "lifetime_expectancy": 0.0,
+    "history": [
+      {
+        "date": "2026-10-19 14:32:33 UTC",
+        "pf": 0.0,
+        "exp": 0.0,
+        "win_rate": 0.0,
+        "trades": 0
+      }
+    ]
+  }
+}

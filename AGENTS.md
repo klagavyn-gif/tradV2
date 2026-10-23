@@ -1477,3 +1477,91 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
   - ยืนยันความปลอดภัยของ Safe Mathematical DSL Sandbox
 - **CLI Runner**: `python tools/run_quantum_lab.py --status` รันผ่านฉลุยพร้อมรายงานสถานะ Gen 1 อย่างถูกต้อง
 
+## 42. การผสาน John Carter's Volatility Squeeze (BB/KC) และ Linear Regression Slope เข้าสู่ QuantumLab (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 100% (Verified with 96 Unit Tests in 6.0s)**
+
+### 1. วัตถุประสงค์และการแก้ปัญหา
+- ในช่วงที่ตลาดติดหล่ม ไซด์เวย์บีบตัว (Chop/Sideway) การเทรดซี้ซั้วจะทำให้โดนค่าธรรมเนียมและ False Breakout กัดกิน
+- ยกระดับห้องวิจัยเงาคู่ขนาน `QuantumLab` ให้มีเซ็นเซอร์ตรวจจับ **"สปริงที่กำลังถูกกดอัด (Volatility Compression)"** ตามหลักการของ John Carter's TTM Squeeze เพื่อรอจับจังหวะคลายตัวระเบิดเทรนด์ (Squeeze Release / Expansion) ร่วมกับ CDC ActionZone โดยระบบ Live Execution ยังคงรักษาสถานะ **Code Freeze 100%**
+
+### 2. โครงสร้างคณิตศาสตร์และฟีเจอร์ใหม่ใน QuantumLab (`infrastructure/council/quantum_lab.py`)
+1. **`squeeze_ratio`**:
+   - อัตราส่วนความกว้างของ Bollinger Bands (20, 2.0 std) เทียบกับ Keltner Channel (20, 1.5 ATR):
+     $$\text{Squeeze Ratio} = \frac{\text{BB Upper} - \text{BB Lower}}{\text{KC Upper} - \text{KC Lower}}$$
+   - หากค่าน้อยกว่า $1.0$ (โดยเฉพาะ $< 0.90$) แปลว่าตลาดกำลังอัดตัวรุนแรงผิดปกติ
+2. **`squeeze_on`**:
+   - แฟล็กไบนารี $(1.0 / 0.0)$ ระบุว่าเส้น Bollinger Bands ทั้งหมดบีบตัวเข้าไปอยู่ข้างในกรอบ Keltner Channel
+3. **`squeeze_momentum`**:
+   - Carter Squeeze Momentum Oscillator: คำนวณระยะเบี่ยงเบนของราคาปิดเทียบกับกึ่งกลาง Donchian 20-bar และ SMA20 ปรับนอร์มัลไลซ์ด้วย ATR14
+4. **`ts_slope(s, period=14)`**:
+   - Rolling Ordinary Least Squares (OLS) Linear Regression Slope: คำนวณความชันทิศทางของ Time-Series แบบเวกเตอร์ความเร็วสูงตามมาตรฐาน WorldQuant/Qlib
+5. **Feature Matrix ขยายสู่ 28 คอลัมน์**:
+   - รวมฟีเจอร์ทั้งหมดเป็น 28 คอลัมน์เวกเตอร์พร้อมใช้ใน DSL Sandbox
+
+### 3. การเชื่อมต่อสู่วงจรวิวัฒนาการพรอมต์ AI (`infrastructure/council/prompt_evolution.py`)
+- เพิ่ม Alpha Archetype เมล็ดพันธุ์: **"Compressed Squeeze Spring Breakout"**
+  - Entry: `(squeeze_ratio < 0.95) & (squeeze_momentum > 0.10) & (ts_rank(kinetic_energy, 14) > 0.60) & (rel_vol > 1.05)`
+  - Exit: `(squeeze_momentum < -0.10) | (ts_rank(close, 20) < 0.20)`
+- เพิ่มตัวตรวจจับข้อผิดพลาด `dom_failure == "CHOP_BLEED"` ใน Algorithmic Quant Mutator: เมื่อบอทพบว่าการขาดทุนเกิดจากภาวะตลาด Sideway จะทำการผ่าเหล่าสมมติฐานวิจัยไปสู่กลุ่ม **Compressed Squeeze Spring** ทันทีโดยอัตโนมัติ
+
+### 4. ผลการตรวจสอบความถูกต้อง (Verification)
+- **Unit Test Suite**: ผ่านครบ **96/96 tests** ภายใน 6.037s (`python -m unittest discover -s tests -p "test_*.py"`)
+  - ยืนยันคอลัมน์ใหม่ 28 คอลัมน์ไม่มี NaN
+  - ยืนยันความปลอดภัยของ DSL Expression `(squeeze_ratio < 0.95) & (squeeze_momentum > 0.0) & (ts_slope(close, 14) > 0.0)`
+- **CLI Runner**: `python tools/run_quantum_lab.py --status` รันผ่านฉลุย
+
+## 43. สรุปผล Deep Research ระบบ: กฎคงสภาพ (System Invariants) และแนวทางต่อยอด (ต.ค. 2026)
+
+สถานะ: **บันทึกเป็นสถาปัตยกรรมอ้างอิงมาตรฐาน (System Reference Baseline) — Verified 96/96 Tests**
+
+### 1. สถาปัตยกรรมและกฎคงสภาพที่ไม่ควรละเมิด (Core System Invariants)
+1. **Serverless Execution Boundary**:
+   - ระบบทำงานแบบ Polling ทุก 15 นาทีผ่าน GitHub Actions (`*/15 * * * *`) ภายใต้ `concurrency: trad-run` ป้องกัน Race Condition
+   - ห้ามติดตั้ง Heavy External Frameworks (เช่น CCXT, Celery, Redis, PyTorch, Docker) ที่ทำลาย Lightweight Fast CI (< 6s test suite)
+2. **Execution & Risk Boundaries (Live Whitelist)**:
+   - สัญญาณเทรดจริง Whitelist: เฉพาะ `CDCVIX15` เท่านั้น (`BINANCE_FUTURES_ALLOWED_STRATEGIES = "CDCVIX15"`)
+   - Universe เทรดจริง: เฉพาะ 5 เหรียญหลัก `BNB, SUI, ONDO, ADA, ETH` (ควบคุมผ่าน GitHub Workflow)
+   - Margin Type: **ISOLATED 100%** เท่านั้น ห้ามใช้ Cross Margin
+   - Equity Risk per Trade: 5.0% Margin (Leverage 20x) ถือพร้อมกันไม่เกิน 2 ตำแหน่ง (สำรองเงินสด $\ge 90\%$)
+   - Loss Streak Protection: แพ้ 2 ไม้ลดขนาด 50% ($0.5x$), แพ้ 3 ไม้ Circuit Breaker พัก 6 ชม., ขาดทุนรายวัน $\ge 4.0\%$ หยุดเทรดจนหมดวัน UTC
+3. **Protective Trade Lifecycle Hierarchy**:
+   - Initial Stop Loss: Dynamic ATR(14)
+   - Breakeven Stop: แตะ $+1.2R$ MFE ขยับ SL ไปที่ Entry $+ 0.10R$ Buffer บน Binance Exchange ทันที
+   - Trailing Stop: แตะ $+2.0R$ MFE เปิด Trailing Stop ระยะ $0.8R$
+   - Profit Harvester: แตะ $+3.0R$ MFE บีบระยะ Trailing เหลือ $0.4R$
+   - Kinetic Stop: ถือครบ 24 แท่ง (6 ชม.) กำไร $< +0.60R$ ขยับ SL มาที่ Entry เพื่อปลดล็อก Margin
+4. **Research Isolation (Two-World Paradigm)**:
+   - ระบบแบ่งแยกขาดจากกัน: **Live Trading (Code Freeze)** vs **QuantumLab / Prompt Evolution (Shadow Research)**
+   - โมเดลหรือสูตรอัลฟ่าใหม่ต้องผ่านเกณฑ์ **Deflated Sharpe Ratio (DSR $\ge 0.95$)** และ **Monte Carlo Permutation ($p < 0.05$)** ก่อนเสนอ Arbiter เลื่อนขั้นเท่านั้น
+
+### 2. สิ่งที่ระบบ "ไม่มี / ไม่พบข้อมูล" (Fact-Checked Gaps)
+- **ไม่มี WebSocket Stream**: ปัจจุบันไม่มี WebSocket รับข้อมูล Tick-by-Tick หรือ L2 Orderbook Depth (ใช้ REST API 15m polling)
+- **ไม่มี Cross-Exchange Routing**: เชื่อมต่อเฉพาะ Binance USDT-M Futures ไม่มีคำสั่งข้ามกระดานอื่น
+- **ไม่มี HFT / FIX Protocol**: สถาปัตยกรรมไม่ได้ออกแบบสำหรับความเร็วระดับ Microsecond
+
+### 3. แผนการต่อยอดสำหรับ Agent และทีมนักพัฒนาในอนาคต (Forward Roadmap)
+- **Phase A**: ปล่อยให้ `CDCVIX15` รันบน 5 เหรียญหลักเพื่อพิสูจน์ Edge ตัวเลขสถิติรอบ 6-12 เดือน
+- **Phase B**: ใช้ QuantumLab รันสมมติฐาน `squeeze_ratio` และ `squeeze_momentum` เพื่อทดสอบว่าสามารถคัดกรองไม้ Sideway เพิ่ม Win Rate จาก 60% สู่ 65%+ ได้จริงหรือไม่ โดยไม่แตะต้องโค้ด Live Execution
+- **Phase C**: หากต้องการยกระดับสู่ Real-time Execution ให้พิจารณาแยก Dedicated Container สำหรับ WebSocket Orderbook Monitor เฉพาะทาง แทนที่จะนำไปรวมใน Serverless CI ปัจจุบัน
+
+## 44. คลังงานวิจัยระดับโลกและแผนผังป้องกันกับดัก (Global Quant Research & Never-Repeat Anti-Patterns Matrix)
+
+สถานะ: **บันทึกคลังความรู้มาตรฐาน (Knowledge Compendium) — `.agents/knowledge/QUANT_RESEARCH_COMPENDIUM.md`**
+
+### 1. โครงการ Open-Source อ้างอิงระดับโลก (GitHub & Hugging Face)
+- **NautilusTrader** (`nautechsystems/nautilus_trader`): สถาปัตยกรรม Zero Code Divergence (ตรรกะ Backtest และ Live ต้องเป็นชุดเดียวกัน 100%)
+- **Microsoft Qlib** (`microsoft/qlib`): ตัวดำเนินการคณิตศาสตร์ Rolling Alpha (Alpha158) และ Automated Research Journaling (นำมาใช้ใน QuantumLab แล้ว)
+- **Hummingbot** (`hummingbot/hummingbot`): การสกัด Orderbook Microstructure & Imbalance เพื่อตรวจจับสภาพคล่องที่ผิดปกติ
+- **Hugging Face Time-Series Models**: Amazon Chronos, Google TimesFM, และ PatchTST — **คำเตือนสำคัญ:** ใช้สำหรับทำนาย **Volatility Regime หรือ Fat-Tailed Risk** เท่านั้น ห้ามใช้ทำนายราคาปิดตรงๆ เพราะมี Brownian Noise สูง
+
+### 2. บาป 7 ประการและเกราะป้องกัน (The 7 Quantitative Anti-Patterns)
+1. **Overfitting / Data Snooping**: ป้องกันด้วย Deflated Sharpe Ratio (DSR $\ge 0.95$) และ 5,000 Monte Carlo Permutations
+2. **Overlapping Data Leakage**: ป้องกันด้วย Purged & Embargoed Cross-Validation (López de Prado 2018)
+3. **Training on Rejected Data (AW15 Trap)**: ห้ามยัดเยียด ML ให้กับสัญญาณที่ไม่มี Organic Edge (คงไว้ที่ Statistical Gate)
+4. **Fee & Slippage Blindness**: ต้องหักต้นทุนขั้นต่ำ 0.30%/รอบ เสมอ และคุม Bid-Ask Spread ไม่เกิน 0.15%
+5. **Profit Decay**: บังคับใช้ บันได 3 ขั้น (Breakeven +1.2R $\rightarrow$ Trailing 0.8R $\rightarrow$ Harvester 0.4R)
+6. **Unbounded High-Beta Risk**: ป้องกันด้วย Portfolio Bounded Volatility Parity $[0.60x, 1.35x]$
+7. **Same-Bar Lookahead Bias**: ตัดสินแท่งเทียนชนทั้ง TP และ SL เป็น Loss (`same_bar_stop_and_target`) เสมอ
+
+

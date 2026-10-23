@@ -40,3 +40,5 @@ aw15_step*.txt
 .tmp_*
 .vscode/
 .data/heartbeat/
+scratch/
+.data/test_deliberations.json

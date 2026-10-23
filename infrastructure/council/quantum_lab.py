@@ -116,6 +116,27 @@ def evaluate_quantum_expression(expression: str, df: pd.DataFrame) -> pd.Series:
         p = int(period)
         return x.rolling(window=p, min_periods=max(3, p // 2)).corr(y).fillna(0.0)
 
+    def ts_slope(s: pd.Series, period: int = 14) -> pd.Series:
+        """Rolling linear regression slope of series s over window period (WorldQuant/Qlib style)."""
+        p = int(period)
+        if p <= 1:
+            return pd.Series(0.0, index=s.index)
+        x = np.arange(p, dtype=float)
+        x_mean = (p - 1.0) / 2.0
+        x_dev = x - x_mean
+        denom = float(np.sum(x_dev ** 2))
+        if denom <= 0:
+            return pd.Series(0.0, index=s.index)
+
+        def _calc_slope(chunk: np.ndarray) -> float:
+            if len(chunk) < 2:
+                return 0.0
+            cur_x_dev = x_dev[-len(chunk):]
+            y_dev = chunk - np.mean(chunk)
+            return float(np.sum(cur_x_dev * y_dev) / denom)
+
+        return s.rolling(window=p, min_periods=max(2, p // 2)).apply(_calc_slope, raw=True).fillna(0.0)
+
     def signed_power(s: pd.Series, exponent: float = 2.0) -> pd.Series:
         """Sign-preserving non-linear magnitude transformation."""
         return np.sign(s) * (np.abs(s) ** float(exponent))
@@ -144,6 +165,7 @@ def evaluate_quantum_expression(expression: str, df: pd.DataFrame) -> pd.Series:
         "ts_rank": ts_rank,
         "ts_corr": ts_corr,
         "signed_power": signed_power,
+        "ts_slope": ts_slope,
     }
 
     # Inject DataFrame columns
@@ -208,11 +230,28 @@ def enrich_quantum_features(
     out["wick_absorption"] = lower_wick / (body + 1e-9)
     out["upper_absorption"] = upper_wick / (body + 1e-9)
 
-    # 4. Bollinger Band & Volatility Compression
+    # 4. Bollinger Band & Volatility Compression (including John Carter BB/KC Squeeze)
     sma20 = close.rolling(20, min_periods=1).mean()
     std20 = close.rolling(20, min_periods=1).std().fillna(0.0)
     out["bb_width"] = (std20 * 4.0) / (sma20 + 1e-9)
     out["fractal_pinch"] = out["bb_width"] / ((atr14 / close) + 1e-9)
+
+    # 4b. Volatility Squeeze: Bollinger Bands (20, 2.0) vs Keltner Channel (20, 1.5 ATR)
+    bb_upper = sma20 + (2.0 * std20)
+    bb_lower = sma20 - (2.0 * std20)
+    kc_upper = sma20 + (1.5 * atr14)
+    kc_lower = sma20 - (1.5 * atr14)
+    bb_span = np.maximum(bb_upper - bb_lower, 0.0)
+    kc_span = np.maximum(kc_upper - kc_lower, 1e-9)
+    out["squeeze_ratio"] = (bb_span / kc_span).fillna(1.0)
+    out["squeeze_on"] = ((bb_lower > kc_lower) & (bb_upper < kc_upper)).astype(float)
+
+    # Squeeze Momentum Oscillator (Normalized Donchian/SMA displacement by ATR)
+    donchian_mid20 = (
+        high.rolling(20, min_periods=1).max() + low.rolling(20, min_periods=1).min()
+    ) / 2.0
+    squeeze_basis = close - ((donchian_mid20 + sma20) / 2.0)
+    out["squeeze_momentum"] = (squeeze_basis / (atr14 + 1e-9)).fillna(0.0)
 
     # 5. Non-linear Kinetic Momentum & Volume Flow
     vol_mean20 = volume.rolling(20, min_periods=1).mean()

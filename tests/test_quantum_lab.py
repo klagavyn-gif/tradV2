@@ -73,7 +73,8 @@ class TestQuantumLab(unittest.TestCase):
             "body", "upper_wick", "lower_wick", "atr14", "atr_pct",
             "vol_skew", "wick_absorption", "bb_width", "fractal_pinch",
             "kinetic_energy", "efficiency_ratio", "paxg_btc_ratio", "paxg_divergence",
-            "pv_correlation", "vwap_deviation"
+            "pv_correlation", "vwap_deviation",
+            "squeeze_ratio", "squeeze_on", "squeeze_momentum"
         ]
         for col in expected_cols:
             self.assertIn(col, df_rich.columns, f"Missing feature: {col}")
@@ -96,6 +97,12 @@ class TestQuantumLab(unittest.TestCase):
         res_power = evaluate_quantum_expression(power_expr, df)
         self.assertIsInstance(res_power, pd.Series)
         self.assertEqual(len(res_power), len(df))
+
+        # 1c. Test Volatility Squeeze (BB/KC) and ts_slope
+        squeeze_expr = "(squeeze_ratio < 0.95) & (squeeze_momentum > 0.0) & (ts_slope(close, 14) > 0.0)"
+        res_squeeze = evaluate_quantum_expression(squeeze_expr, df)
+        self.assertIsInstance(res_squeeze, pd.Series)
+        self.assertEqual(len(res_squeeze), len(df))
 
         # 2. Forbidden keyword: import
         with self.assertRaises(ValueError):

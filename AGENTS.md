@@ -1648,5 +1648,26 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
   - `tests/test_global_horizon_scout.py`: ผ่านครบ 5/5 tests (0.029s) ครอบคลุม audit, prompt evolution, curated fallback, markdown persistence และ cycle execution
 - **Cycle Execution**: รันจริงสร้าง `.agents/knowledge/monthly_digests/2026-10_HORIZON_DIGEST.md` สำเร็จสมบูรณ์
 
+## 48. คลังฐานข้อมูลงานวิจัยอ้างอิงและแผนผังป้องกันการทำซ้ำ (Master System Research Manifest) (ต.ค. 2026)
+
+สถานะ: **บันทึกคลังความรู้มาตรฐานหลัก — `.agents/knowledge/SYSTEM_RESEARCH_MANIFEST.md`**
+
+### 1. วัตถุประสงค์
+- สร้างฐานข้อมูลองค์ความรู้กลางที่แบ่งขอบเขตอย่างชัดเจน เพื่อให้นักพัฒนาและ AI Agent ในอนาคตสามารถต่อยอดระบบได้อย่างแม่นยำ **"ไม่สร้างซ้ำซ้อนกับของเดิม (No Redundancy)"** และ **"ไม่วนกลับไปทำสิ่งที่พิสูจน์แล้วว่าล้มเหลว (No Anti-Patterns)"**
+
+### 2. โครงสร้าง 4 เสาหลักขององค์ความรู้
+1. **The Completed Bedrock (สิ่งที่มีอยู่แล้วสมบูรณ์ — ห้ามสร้างซ้ำ):**
+   - Live Binance Futures Connector, Dynamic Risk & Circuit Breaker, Bounded Volatility Parity `[0.60x, 1.35x]`, Derivatives Alpha Filter, 3-Tier Kinetic Escalator, AST Sandbox 28 Features, GP-Tree Symbolic Mutator ใน RAM, Adversarial Gauntlet, Statistical DSR / Monte Carlo Validation, และ Global Horizon Scout
+2. **The System Graveyard (สุสานไอเดียที่ทดลองแล้วล้มเหลว — ห้ามทำซ้ำ):**
+   - ML บน Rejected Candidates (AW15), Simple H1/H4 Trend Following บน Alts, Fixed TP/SL โดยไม่มี Trailing (Profit Decay), Unbounded Risk Parity, LLM-only Code Generation, และ Heavy Frameworks Bloat
+3. **The Validated Edge (สูตรและกลไกที่พิสูจน์ผลทางสถิติแล้ว):**
+   - `CDCVIX15` บน 5 เหรียญหลัก (Net Win Rate $\ge 60.7\%$, PF $\ge 3.54$), Multiplicative Drawdown Clamping, เกณฑ์คัดกรอง DSR $\ge 0.95$ และ Permutation $p < 0.05$
+4. **The Uncharted Frontiers (พื้นที่วิจัยใหม่ที่ไม่ทับซ้อน — แหล่งต่อยอดในอนาคต):**
+   - *Frontier 1:* Bayesian Thompson Sampling Capital Allocator (Core 85% vs Explorer 15%)
+   - *Frontier 2:* Dynamic Volatility Cone (ปรับระยะ Trailing ตามระดับพายุความผันผวน)
+   - *Frontier 3:* Synthetic Order Flow & CVD Proxy (ดึง Taker Delta Ratio โดยไม่ต้องใช้ WebSocket)
+   - *Frontier 4:* Cross-Asset Momentum Spillover (การส่งผ่านโมเมนตัมจาก BTC สู่ Altcoins)
+
+
 
 

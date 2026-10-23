@@ -28,6 +28,7 @@
   - `tests/test_global_horizon_scout.py`: 5 tests pass (0.03s)
 - **Dependencies**: Zero heavy bloat (รันบน Python stdlib, NumPy, Pandas, Requests)
 - **Knowledge Compendiums**:
+  - `SYSTEM_RESEARCH_MANIFEST.md` (Master System Research Manifest: Bedrock, Graveyard, Validated Edge & 4 Uncharted Frontiers)
   - `QUANT_RESEARCH_COMPENDIUM.md` (NautilusTrader, Qlib, Hummingbot, Hugging Face TSFMs + 7 Anti-Patterns)
   - `AUTONOMOUS_EVOLUTION_COMPENDIUM.md` (6-Level Evolution Scale, Microsoft RD-Agent, AlphaGen, EvolveTrade 2026, Moirai 2.0 + 3 High-ROI Proposals)
   - `.agents/knowledge/monthly_digests/2026-10_HORIZON_DIGEST.md` (Initial monthly harvest digest)
@@ -37,4 +38,5 @@
 - ปล่อยให้ Live Execution (`CDCVIX15` 5 เหรียญหลัก) รันตามรอบปกติเพื่อสะสมตัวอย่างสถิติ
 - ปล่อยให้ Global Horizon Scout รันทุกวันที่ 1 ของเดือนเพื่อนำความรู้ใหม่เข้ามาในระบบ
 - รักษาการทำงานแบบประหยัด Token ตามแนวทาง `token-saver` เสมอ
+- ก่อนเริ่มวิจัยหรือต่อยอดฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับ `SYSTEM_RESEARCH_MANIFEST.md` เสมอ เพื่อป้องกันการทำซ้ำ
 

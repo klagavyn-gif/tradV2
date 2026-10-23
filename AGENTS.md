@@ -1564,4 +1564,54 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
 6. **Unbounded High-Beta Risk**: ป้องกันด้วย Portfolio Bounded Volatility Parity $[0.60x, 1.35x]$
 7. **Same-Bar Lookahead Bias**: ตัดสินแท่งเทียนชนทั้ง TP และ SL เป็น Loss (`same_bar_stop_and_target`) เสมอ
 
+## 45. การวิเคราะห์ระดับวิวัฒนาการของระบบ (Self-Evolution Maturity) และแผนงานวิจัยสู่อนาคต (ต.ค. 2026)
+
+สถานะ: **บันทึกคลังความรู้มาตรฐาน — `.agents/knowledge/AUTONOMOUS_EVOLUTION_COMPENDIUM.md`**
+
+### 1. ระดับวิวัฒนาการปัจจุบันของ tradV2: **ระดับ 3.2 (Semi-Autonomous Sandbox Evolution)**
+- **จุดแข็ง:** Two-World Paradigm ป้องกันทุนจริง, Safe AST DSL (28 features), Multi-Agent Council + Error Taxonomy, Graduation Gate เข้มงวด (10 ไม้, PF $\ge 1.45$)
+- **คอขวดที่ต้องก้าวข้ามสู่ระดับ 4:**
+  1. *Prompt-to-Expression Bottleneck*: LLM คิดค้น String Expression ผ่าน Prompt เปลือง Token และสุ่มเสี่ยง
+  2. *All-or-Nothing Strategy Allocation*: Live ยังคงผูกขาด `CDCVIX15` ตัวเดียว ไม่มี dynamic weights
+  3. *Unsupervised Regime Blindness*: ใช้อินดิเคเตอร์เดี่ยว ขาดการจัดกลุ่ม Macro Market Regime
+  4. *Lack of Synthetic Stress Testing*: ไม่มีบททดสอบ Flash Crash Replay ก่อนปล่อยเข้า Sandbox
+
+### 2. งานวิจัยและโครงการระดับโลกที่นำมาต่อยอด
+- **Microsoft RD-Agent (`microsoft/RD-Agent`)**: Co-STEER สำหรับ Quant Factor Mining (Research $\rightarrow$ Development $\rightarrow$ Evaluation)
+- **AlphaGen (`ICT-FinD-Lab/alphagen`)**: Formulaic Alpha Generation ผ่าน Genetic Programming (GP) และ Expression Trees ในหน่วยความจำ (ฟรีและเร็วมาก)
+- **EvolveTrade (`arXiv:2609.17632`, 2026)**: Experience-Driven Policy Refinement ปรับปรุง prompt/rule ของ Agent จาก Execution Traces
+- **Salesforce Moirai 2.0 (`Salesforce/moirai-2.0-R-small`)**: Time Series Foundation Model บน Hugging Face ใช้สำหรับคาดการณ์ Volatility Cone ไม่ใช่ทำนายราคาปิด
+
+### 3. ข้อเสนอ 3 ไอเดียคุ้มค่าสูง ไม่ทับซ้อนกับระบบเดิม (High ROI, Non-Redundant)
+1. **GP-Tree Symbolic Mutator (QuantumLab)**: นำการกลายพันธุ์แบบ Genetic Expression Tree มาสร้างสูตรใน RAM (5,000 สูตร/2 วินาที, Token = 0) โดยใช้ LLM เฉพาะตั้งต้นสมมติฐาน
+2. **Adversarial Counterfactual Gauntlet**: สคริปต์ Replay แท่งเทียนช่วงวิกฤติ (FTX Collapse, Luna Crash, Black Monday ส.ค. 2024) และ Stationary Block Bootstrap ก่อนอนุญาตให้เข้า Sandbox
+3. **Bayesian Thompson Sampling Dynamic Allocator**: จัดสรรพอร์ตเป็น Core (85% CDCVIX15) และ Explorer (15% Sandbox Alpha) ปรับสัดส่วนตามผลงานจริงแบบไดนามิก ป้องกัน Drawdown ใหญ่
+
+## 46. การสร้างระบบ GP-Tree Symbolic Mutator และ Adversarial Stress Gauntlet (ต.ค. 2026)
+
+สถานะ: **สร้างเสร็จสมบูรณ์ และผ่านการทดสอบ 104/104 Tests Pass (Verified Baseline)**
+
+### 1. GP-Tree Symbolic Mutator (`infrastructure/council/symbolic_mutator.py`)
+- **กลไก**: Genetic Programming Syntax Tree ทำงานใน RAM 100% สกัดสูตร DSL เข้าโครงสร้าง AST Node (`CompareNode`, `LogicalNode`, `TsFuncNode`, `FeatureNode`, `ConstantNode`)
+- **Genetic Operators**:
+  - `mutate_constants`: ปรับจูนค่าตัวเลขแบบ Gaussian Jitter $\pm 15\%$
+  - `mutate_operators`: สลับเครื่องหมายเปรียบเทียบ ($>$ $\leftrightarrow$ $<$) หรือตรรกศาสตร์ ($\&$ $\leftrightarrow$ $|$)
+  - `mutate_subtree`: สุ่มสร้างกิ่งเงื่อนไขใหม่มาเสียบแทนกิ่งเดิม
+  - `crossover`: แลกเปลี่ยนกิ่งระหว่าง 2 สูตรสายพันธุ์ดี
+- **Pareto Frontier**: คัดสรรสูตรที่ไม่ถูกบดบัง (Non-dominated) บนระนาบ 2 มิติ: **Max Net Expectancy vs Min Complexity (จำนวน Node)** ป้องกัน Overfitting
+- **ผลลัพธ์**: สร้างและทดสอบสูตรนับพันใน RAM ได้ภายใน 0.43 วินาที โดยไม่เสีย Token API แม้แต่บาทเดียว
+
+### 2. Adversarial Stress Gauntlet (`tools/run_alpha_stress_gauntlet.py`)
+- **กลไก**: สคริปต์สถาบันจำลองสภาวะวิกฤติตลาดและสลับมิติเวลาเพื่อตรวจจับความเปราะบางของอัลฟ่าก่อนปล่อยเข้า Sandbox
+- **3 มิติการทดสอบ**:
+  1. *Historical Flash Crash Scenarios*: Replay แท่งเทียนวิกฤติ 3 เหตุการณ์ (Luna Death Spiral, FTX Liquidation Cascade, และ 2024 Black Monday)
+  2. *Adversarial Friction Doubling*: อัดฉีดต้นทุนค่าฟีและสเปรด $2x$ ($0.60\%$ Round-Trip) เพื่อตรวจจับการพังทลายของอัลฟ่า
+  3. *Stationary Block Bootstrapping (Politis & Romano 1994)*: สลับแท่งเทียนแบบบล็อกลูกโซ่เพื่อคำนวณ Bootstrap $p$-value ($p < 0.05$ จึงจะถือว่า Edge มีนัยสำคัญทางสถิติ)
+- **CLI Runner**: `python tools/run_alpha_stress_gauntlet.py --bootstraps 100`
+
+### 3. ผลการตรวจสอบความถูกต้อง (Verification)
+- **Unit Test Suite**: ผ่านครบ **104/104 tests** ภายใน 6.257s
+  - `tests/test_symbolic_mutator.py`: ผ่านครบ 5/5 tests (0.428s)
+  - `tests/test_alpha_stress_gauntlet.py`: ผ่านครบ 3/3 tests (0.129s)
+
 

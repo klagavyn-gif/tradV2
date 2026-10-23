@@ -15,16 +15,21 @@
 
 ## [2] Current Milestone (สถานะงานล่าสุด)
 - ผสานตัวแปร John Carter's Volatility Squeeze (BB/KC) และ `ts_slope` ใน QuantumLab เรียบร้อย
-- จัดทำรายงาน Deep Research ระบบครบ 4 ด้าน และบันทึกกฎคงสภาพใน Section 43 ของ `AGENTS.md`
-- ติดตั้ง Antigravity Skills: `token-saver` และ `project-memory` ประจำโปรเจกต์
-- จัดทำคลังงานวิจัยระดับโลกและตารางป้องกันกับดัก: `.agents/knowledge/QUANT_RESEARCH_COMPENDIUM.md`
+- จัดทำรายงานวิเคราะห์ระดับวิวัฒนาการตนเอง (Level 3.2 -> Level 4) และคลังงานวิจัยระดับโลก: `.agents/knowledge/AUTONOMOUS_EVOLUTION_COMPENDIUM.md`
+- สร้าง **GP-Tree Symbolic Mutator** (`infrastructure/council/symbolic_mutator.py`): กลายพันธุ์และแลกเปลี่ยนกิ่งสูตรใน RAM ค้นหาบน Pareto Frontier (Token = 0)
+- สร้าง **Adversarial Stress Gauntlet** (`tools/run_alpha_stress_gauntlet.py`): ทดสอบทนทานต่อวิกฤติ (Luna, FTX, Black Monday ส.ค. 2024), Stationary Block Bootstrap และ Friction Doubling (0.60%)
 
 ## [3] Verification Baseline (สถานะการตรวจสอบ)
-- **Unit Test Suite**: 96/96 tests pass ภายใน 5.89 วินาที (`python -m unittest discover -s tests -p "test_*.py"`)
+- **Unit Test Suite**: **104/104 tests pass** ภายใน 6.25 วินาที (`python -m unittest discover -s tests -p "test_*.py"`)
+  - `tests/test_symbolic_mutator.py`: 5 tests pass (0.43s)
+  - `tests/test_alpha_stress_gauntlet.py`: 3 tests pass (0.13s)
 - **Dependencies**: Zero heavy bloat (รันบน Python stdlib, NumPy, Pandas, Requests)
-- **Knowledge Compendium**: 4 เสาหลัก (NautilusTrader, Qlib, Hummingbot, Hugging Face TSFMs + 7 Anti-Patterns)
+- **Knowledge Compendiums**:
+  - `QUANT_RESEARCH_COMPENDIUM.md` (NautilusTrader, Qlib, Hummingbot, Hugging Face TSFMs + 7 Anti-Patterns)
+  - `AUTONOMOUS_EVOLUTION_COMPENDIUM.md` (6-Level Evolution Scale, Microsoft RD-Agent, AlphaGen, EvolveTrade 2026, Moirai 2.0 + 3 High-ROI Proposals)
 
 ## [4] Next Action Items (งานลำดับถัดไป)
 - ให้คำแนะนำและสนับสนุนผู้ใช้ในการดูแลระบบ
+- ปล่อยให้ Live Execution (`CDCVIX15` 5 เหรียญหลัก) รันตามรอบปกติเพื่อสะสมตัวอย่างสถิติ
 - รักษาการทำงานแบบประหยัด Token ตามแนวทาง `token-saver` เสมอ
-- หากจะเพิ่มฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับตาราง 7 Anti-Patterns ใน `QUANT_RESEARCH_COMPENDIUM.md` ก่อนทุกครั้ง
+- หากจะเพิ่มฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับตาราง 7 Anti-Patterns และ 3 ข้อเสนอใน `AUTONOMOUS_EVOLUTION_COMPENDIUM.md` ก่อนทุกครั้ง

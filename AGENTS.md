@@ -1668,6 +1668,26 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
    - *Frontier 3:* Synthetic Order Flow & CVD Proxy (ดึง Taker Delta Ratio โดยไม่ต้องใช้ WebSocket)
    - *Frontier 4:* Cross-Asset Momentum Spillover (การส่งผ่านโมเมนตัมจาก BTC สู่ Altcoins)
 
+## 49. สารบัญคลังเทคโนโลยีและแหล่งวิจัยสถาบันสำหรับอนาคต (Global Quant Research & Technology Directory) (ต.ค. 2026)
+
+สถานะ: **บันทึกคลังความรู้มาตรฐานหลัก — `.agents/knowledge/FUTURE_RESEARCH_AND_TECH_DIRECTORY.md`**
+
+### 1. วัตถุประสงค์
+- รวบรวมแหล่งข้อมูลสถิติฟรีระดับโลก (Free Institutional Data APIs), แหล่งเปเปอร์วิชาการ (arXiv, SSRN, Papers with Code), ระเบียบวิธีวิจัยสถาบัน (HRP, HMM, VPIN), และเครื่องมือ Zero-Bloat ประสิทธิภาพสูง (Numba, Vectorized Event Processing) เพื่อทำหน้าที่เป็น "สมุดหน้าเหลืองและคลังอาวุธทางปัญญา" ให้ระบบหยิบมาใช้ได้ทันที
+
+### 2. แหล่งข้อมูลสำคัญที่บันทึกไว้
+1. **คลังงานวิจัยระดับโลก:** arXiv Quantitative Finance (`q-fin.ST`, `q-fin.TR`, `q-fin.PM`), SSRN Financial Economics, Papers with Code, Hugging Face Time Series Hub
+2. **ฐานข้อมูลสถิติฟรี 100%:**
+   - `data.binance.vision`: ข้อมูลแท่งเทียน 1s/1m/15m, Trades tick-by-tick, และ Liquidation Snapshot ย้อนหลังฟรี
+   - FRED API: ดัชนีผลตอบแทนพันธบัตร US10Y (`DGS10`), ดัชนีดอลลาร์ DXY (`DTWEXBGS`), และขนาดงบดุลเฟด (`WALCL`)
+   - DeFiLlama API: ปริมาณเงินสำรอง Stablecoin และ TVL รายเชน
+3. **ระเบียบวิธีวิจัยสถาบัน:**
+   - Hierarchical Risk Parity (HRP) ของ López de Prado
+   - Hidden Markov Models (HMM) สำหรับจัดกลุ่ม Market Regime 3 สภาวะ (Trending, Expansion, Chop)
+   - Volume-Synchronized Probability of Toxicity (VPIN) ดักจับ Toxic Flow ของวาฬ
+4. **เครื่องมือเร่งความเร็ว:** Numba JIT (`@njit`) เร่งความเร็วคำนวณ 100x โดยไม่ทำลาย Zero-Bloat
+
+
 
 
 

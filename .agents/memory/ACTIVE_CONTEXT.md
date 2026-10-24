@@ -27,18 +27,21 @@
   - `tests/test_alpha_stress_gauntlet.py`: 3 tests pass (0.13s)
   - `tests/test_global_horizon_scout.py`: 5 tests pass (0.03s)
 - **Dependencies**: Zero heavy bloat (รันบน Python stdlib, NumPy, Pandas, Requests)
-- **Knowledge Compendiums**:
+- **Knowledge Compendiums & Research Dossiers**:
+  - `dossiers/KNOWLEDGE_DOSSIER_INDEX.md` (AQKP Registry: Standardized Research Schema & Registry)
+  - `dossiers/KD-001_TIMEFRAME_OPTIMALITY_MATRIX.md` (KD-001: Multi-Timeframe Optimality & Friction Drag Analysis)
   - `SYSTEM_RESEARCH_MANIFEST.md` (Master System Research Manifest: Bedrock, Graveyard, Validated Edge & 4 Uncharted Frontiers)
   - `FUTURE_RESEARCH_AND_TECH_DIRECTORY.md` (Global Quant Research Hubs, Free Institutional Data APIs, HRP, HMM, VPIN & Numba Stack)
   - `QUANT_RESEARCH_COMPENDIUM.md` (NautilusTrader, Qlib, Hummingbot, Hugging Face TSFMs + 7 Anti-Patterns)
   - `AUTONOMOUS_EVOLUTION_COMPENDIUM.md` (6-Level Evolution Scale, Microsoft RD-Agent, AlphaGen, EvolveTrade 2026, Moirai 2.0 + 3 High-ROI Proposals)
-  - `.agents/knowledge/monthly_digests/2026-10_HORIZON_DIGEST.md` (Initial monthly harvest digest)
+  - `monthly_digests/2026-10_HORIZON_DIGEST.md` (Initial monthly harvest digest)
 
 ## [4] Next Action Items (งานลำดับถัดไป)
 - ให้คำแนะนำและสนับสนุนผู้ใช้ในการดูแลระบบ
 - ปล่อยให้ Live Execution (`CDCVIX15` 5 เหรียญหลัก) รันตามรอบปกติเพื่อสะสมตัวอย่างสถิติ
 - ปล่อยให้ Global Horizon Scout รันทุกวันที่ 1 ของเดือนเพื่อนำความรู้ใหม่เข้ามาในระบบ
 - รักษาการทำงานแบบประหยัด Token ตามแนวทาง `token-saver` เสมอ
-- ก่อนเริ่มวิจัยหรือต่อยอดฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับ `SYSTEM_RESEARCH_MANIFEST.md` และ `FUTURE_RESEARCH_AND_TECH_DIRECTORY.md` เสมอ เพื่อป้องกันการทำซ้ำ
+- ก่อนเริ่มวิจัยหรือต่อยอดฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับ `SYSTEM_RESEARCH_MANIFEST.md`, `FUTURE_RESEARCH_AND_TECH_DIRECTORY.md`, และ `KNOWLEDGE_DOSSIER_INDEX.md` เสมอ
+
 
 

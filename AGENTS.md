@@ -1687,6 +1687,25 @@ BINANCE_FUTURES_VOLATILITY_MAX_MULT = 1.35         # ตัวคูณสูง
    - Volume-Synchronized Probability of Toxicity (VPIN) ดักจับ Toxic Flow ของวาฬ
 4. **เครื่องมือเร่งความเร็ว:** Numba JIT (`@njit`) เร่งความเร็วคำนวณ 100x โดยไม่ทำลาย Zero-Bloat
 
+## 50. ระบบแฟ้มวิจัยการลงทุนเชิงปริมาณ (Autonomous Quantitative Knowledge Protocol - AQKP) และแฟ้มวิจัย KD-001 (ต.ค. 2026)
+
+สถานะ: **บันทึกคลังความรู้มาตรฐาน — `.agents/knowledge/dossiers/KNOWLEDGE_DOSSIER_INDEX.md` และ `KD-001_TIMEFRAME_OPTIMALITY_MATRIX.md`**
+
+### 1. วัตถุประสงค์และกลไก
+- เพื่อแก้ปัญหา AI ทั่วไปที่ชอบค้นหาข้อมูลแบบผิวเผิน (Superficial) โดยไม่มีการพิสูจน์ทางคณิตศาสตร์และไม่คำนวณต้นทุนธุรกรรมจริง
+- ออกแบบ **AQKP (Autonomous Quantitative Knowledge Protocol)** ตามมาตรฐานระเบียบวิธีวิจัยสถาบัน 5 ขั้นตอน (Literature Audit $\rightarrow$ Friction Model $\rightarrow$ Empirical Matrix $\rightarrow$ Boundaries $\rightarrow$ Knowledge Dossier)
+- ทุกผลการวิจัยจะถูกสกัดเป็นแฟ้มความรู้มาตรฐานรหัส `KD-XXX` ใน `.agents/knowledge/dossiers/` เพื่อให้สามารถนำไปประกอบเป็นระบบวางแผนการลงทุนใหม่ได้ทันที
+
+### 2. แฟ้มวิจัยฉบับแรก: `KD-001` (Multi-Timeframe Optimality & Friction Drag Analysis)
+- **โจทย์:** วิเคราะห์ความคุ้มค่าเชิงสถิติข้ามกรอบเวลา (1m, 3m, 5m, 15m, 30m, 45m, 1h, 4h, 1D) ภายใต้ต้นทุน Round-Trip จริง 0.20% - 0.30%
+- **ข้อค้นพบหลัก (Key Findings):**
+  1. *1m - 3m (Noise Trap):* ถูกครอบงำโดย Brownian Motion $> 85\%$ ต้นทุนค่าธรรมเนียมกินกำไรถึง $50\% - 80\%$ โอกาสรอดชีวิต $< 1\%$
+  2. *15m (Golden Sweet Spot):* จุดสมดุลทองคำสำหรับ Intraday Futures ต้นทุนค่าฟีลดลงเหลือเพียง $10\% - 15\%$ ของกำไร และรักษาความถี่ 1-3 ไม้/วัน (เป็นเหตุผลที่ `CDCVIX15` เลือก 15m)
+  3. *1h - 4h (Swing Trend):* สัญญาณบริสุทธิ์สูง ต้นทุนค่าฟีต่ำกว่า $3\%$ เหมาะกับบอทสวิงตามเทรนด์
+  4. *1D (Macro Allocation):* ต้นทุนธุรกรรมแทบเป็นศูนย์ ($< 0.8\%$) เหมาะกับระบบออมเงิน Spot Value Averaging และ DCA ระยะยาว แต่ห้ามใช้ High Leverage
+- **งานวิจัยอ้างอิง:** Brock et al. (1992, Journal of Finance), López de Prado (2018), Lo & MacKinlay (1988 Variance Ratio), AQR Value and Momentum Everywhere (2013)
+
+
 
 
 

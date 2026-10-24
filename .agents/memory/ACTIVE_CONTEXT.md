@@ -30,6 +30,10 @@
 - **Knowledge Compendiums & Research Dossiers**:
   - `dossiers/KNOWLEDGE_DOSSIER_INDEX.md` (AQKP Registry: Standardized Research Schema & Registry)
   - `dossiers/KD-001_TIMEFRAME_OPTIMALITY_MATRIX.md` (KD-001: Multi-Timeframe Optimality & Friction Drag Analysis)
+  - `dossiers/KD-002_DYNAMIC_VALUE_AVERAGING_VS_DCA.md` (KD-002: Dynamic Value Averaging & Volatility Targeting vs Static DCA)
+  - `dossiers/KD-003_CROSS_ASSET_MOMENTUM_SPILLOVER.md` (KD-003: Cross-Asset Momentum Spillover & Capital Rotation Matrix)
+  - `dossiers/KD-004_STATISTICAL_ARBITRAGE_PAIRS.md` (KD-004: Market-Neutral Statistical Arbitrage & Cointegration Pairs Trading)
+  - `dossiers/KD-005_ORDER_FLOW_TOXICITY_VPIN.md` (KD-005: Order Flow Toxicity & Liquidation Cascade Mechanics)
   - `SYSTEM_RESEARCH_MANIFEST.md` (Master System Research Manifest: Bedrock, Graveyard, Validated Edge & 4 Uncharted Frontiers)
   - `FUTURE_RESEARCH_AND_TECH_DIRECTORY.md` (Global Quant Research Hubs, Free Institutional Data APIs, HRP, HMM, VPIN & Numba Stack)
   - `QUANT_RESEARCH_COMPENDIUM.md` (NautilusTrader, Qlib, Hummingbot, Hugging Face TSFMs + 7 Anti-Patterns)
@@ -42,6 +46,7 @@
 - ปล่อยให้ Global Horizon Scout รันทุกวันที่ 1 ของเดือนเพื่อนำความรู้ใหม่เข้ามาในระบบ
 - รักษาการทำงานแบบประหยัด Token ตามแนวทาง `token-saver` เสมอ
 - ก่อนเริ่มวิจัยหรือต่อยอดฟีเจอร์ใหม่ ให้ตรวจสอบเทียบกับ `SYSTEM_RESEARCH_MANIFEST.md`, `FUTURE_RESEARCH_AND_TECH_DIRECTORY.md`, และ `KNOWLEDGE_DOSSIER_INDEX.md` เสมอ
+
 
 
 

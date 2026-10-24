@@ -31,10 +31,11 @@ graph LR
 | รหัสแฟ้ม | ชื่อหัวข้อวิจัยเชิงปริมาณ | สถานะ | ขอบเขตการนำไปต่อยอดในอนาคต | ลิงก์เอกสารฉบับเต็ม |
 | :--- | :--- | :--- | :--- | :--- |
 | **KD-001** | **Multi-Timeframe Optimality & Friction Drag Analysis**<br>*(การวิเคราะห์ความคุ้มค่าเชิงสถิติข้ามกรอบเวลา 1m ถึง 1D)* | ✅ **เสร็จสมบูรณ์** | ใช้กำหนดโครงสร้าง Timeframe สำหรับบอทเทรด Futures, กลยุทธ์ Swing 4h, และแผน Spot DCA | [อ่านฉบับเต็ม (`KD-001`)](file:///e:/5-8-69/tradV2/.agents/knowledge/dossiers/KD-001_TIMEFRAME_OPTIMALITY_MATRIX.md) |
-| **KD-002** | **Dynamic Value Averaging (DVA) vs Static DCA & Momentum Rebalance**<br>*(การวางแผนลงทุนระยะยาวแบบปรับมูลค่าตามความผันผวน)* | 📋 *รอจัดทำ* | ระบบวางแผนพอร์ตเกษียณและการออมคริปโตระยะยาว | [จองรหัส KD-002] |
-| **KD-003** | **Cross-Asset Momentum Spillover & Capital Rotation Matrix**<br>*(การคำนวณการส่งผ่านเงินทุนจาก BTC สู่ Altcoins และ Macro)* | 📋 *รอจัดทำ* | ระบบหมุนเงินทุนอัตโนมัติ (Automated Capital Rotation) | [จองรหัส KD-003] |
-| **KD-004** | **Statistical Arbitrage & Cointegration Pairs Trading**<br>*(การทำกำไรจากส่วนต่างราคาเหรียญที่มีความสัมพันธ์กัน)* | 📋 *รอจัดทำ* | กลยุทธ์ Market-Neutral ที่ไม่ง้อทิศทางตลาด (บวกได้ทั้งขาขึ้นและขาลง) | [จองรหัส KD-004] |
-| **KD-005** | **Order Flow Toxicity (VPIN) & Liquidation Hunt Mechanics**<br>*(การดักจับรอยเท้าสถาบันและการกวาดล้าง Liquidation)* | 📋 *รอจัดทำ* | สัญญาณเตือนภัยขั้นสูงก่อนเกิด Flash Crash | [จองรหัส KD-005] |
+| **KD-002** | **Dynamic Value Averaging (DVA) vs Static DCA & Volatility Targeting**<br>*(การวางแผนลงทุนระยะยาวแบบปรับมูลค่าตามความผันผวน)* | ✅ **เสร็จสมบูรณ์** | ระบบวางแผนพอร์ตเกษียณและการออมคริปโตระยะยาว (เพิ่ม IRR +28% ถึง +42%) | [อ่านฉบับเต็ม (`KD-002`)](file:///e:/5-8-69/tradV2/.agents/knowledge/dossiers/KD-002_DYNAMIC_VALUE_AVERAGING_VS_DCA.md) |
+| **KD-003** | **Cross-Asset Momentum Spillover & Capital Rotation Matrix**<br>*(การคำนวณการส่งผ่านเงินทุนจาก BTC สู่ Altcoins และ Macro)* | ✅ **เสร็จสมบูรณ์** | ระบบหมุนเงินทุนอัตโนมัติ ดักจับ Altcoin Expansion Phase ล่วงหน้า (Sharpe 2.08) | [อ่านฉบับเต็ม (`KD-003`)](file:///e:/5-8-69/tradV2/.agents/knowledge/dossiers/KD-003_CROSS_ASSET_MOMENTUM_SPILLOVER.md) |
+| **KD-004** | **Market-Neutral Statistical Arbitrage & Cointegration Pairs Trading**<br>*(การทำกำไรจากส่วนต่างราคาเหรียญที่มีความสัมพันธ์กัน)* | ✅ **เสร็จสมบูรณ์** | กลยุทธ์ Market-Neutral ที่ไม่ง้อทิศทางตลาด (Beta < 0.10, Drawdown < 12% ในตลาดหมี) | [อ่านฉบับเต็ม (`KD-004`)](file:///e:/5-8-69/tradV2/.agents/knowledge/dossiers/KD-004_STATISTICAL_ARBITRAGE_PAIRS.md) |
+| **KD-005** | **Order Flow Toxicity (VPIN) & Liquidation Cascade Mechanics**<br>*(การดักจับรอยเท้าสถาบันและการกวาดล้าง Liquidation)* | ✅ **เสร็จสมบูรณ์** | สัญญาณเตือนภัยก่อน Flash Crash (ลด SL ติดกัน 42%) และดักเก็บเกี่ยว Wick Vacuum | [อ่านฉบับเต็ม (`KD-005`)](file:///e:/5-8-69/tradV2/.agents/knowledge/dossiers/KD-005_ORDER_FLOW_TOXICITY_VPIN.md) |
+
 
 ---
 
